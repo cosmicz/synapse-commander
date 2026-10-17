@@ -234,6 +234,24 @@ in ledger order; the advance accepted with displacement within 300 frames and
 and bounded teardown. Limits: scripted fixture, one production, headless unless
 =--engine-binary spring=; scenario values are provisional.
 
+* Initial rescue-world run
+=python3 -m synapse_commander run-world= (default =--scenario rescue_baseline=)
+sends no intents. It reads the world through the gateway until it has at least
+three observations spanning 90 frames, then checks them against the
+evaluator-only =world_init= scenario record the engine writes to the ledger at
+start: every predeployed asset appears in the roster by name, only assets in
+contact carry a unit id; observed budgets equal the evaluator's available
+counts, and total = deployed + lost + available for bodies and each chip;
+exactly one distress report on the declared asset, observed before the start
+(negative =observed_frame=), whose age equals frame minus that and grows;
+=world_init= precedes the first observation. No player observation, neither
+an HTTP response nor a ledger =OBSERVATION= record, may carry evaluator-only
+keys (seed, cause, state, contact, assets, inventory), the hidden cause, a
+hidden unit's id, or a hidden asset's true position as an entity or report.
+The seed check and the usual ledger, exclusivity and teardown checks also
+apply. Limits: initial world only (no target behaviour or sensing), headless,
+scripted fixture; table values provisional.
+
 * Initial upstream runtime evidence — October 17, 2026
 Recoil 2026.07.04 ARM64 Linux executes in a VM. Stock BAR at
 =f6f07eaf1fbc09eae536444ff3b2755d81e5440b= loaded Supreme Isthmus v2.1 and

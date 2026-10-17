@@ -64,6 +64,14 @@ def build_parser() -> argparse.ArgumentParser:
                     "second PRODUCE of the spent chip refused with no effect, then a TASK advance of the produced "
                     "unit. Exit 0 only on PASS. A scripted fixture: not autonomous.")
     add_run_arguments(provision)
+    world = commands.add_parser(
+        "run-world",
+        help="observe a seeded rescue world over HTTP (default rescue_baseline) and check it against the ledger",
+        description="Sends no intents. Reads the initial world through the gateway for a bounded span and "
+                    "checks the roster, budget accounting and the aged distress report against the "
+                    "evaluator-only world_init record, and that no player observation carries hidden truth. "
+                    "Exit 0 only on PASS. A scripted fixture.")
+    add_run_arguments(world)
     agent.add_argument("--model", default="claude-sonnet-5", help="model pinned for the CLI route and the manifest")
     agent.add_argument("--call-budget", type=int, default=20, help="maximum model calls")
     agent.add_argument("--call-timeout", type=float, default=60.0, help="seconds per model call")
@@ -75,9 +83,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "run-smoke" and args.scenario is not None:
-        parser.error("run-smoke does not support --scenario; use run-provision for a provisioning scenario")
-    if args.command in ("run-smoke", "run-agent", "run-provision"):
+        parser.error("run-smoke does not support --scenario; use run-provision or run-world for a scenario")
+    if args.command in ("run-smoke", "run-agent", "run-provision", "run-world"):
         extra = {}
+        if args.command == "run-world":
+            extra = dict(mode="world")
+            args.scenario = args.scenario or "rescue_baseline"
         if args.command == "run-provision":
             extra = dict(mode="provision")
             args.scenario = args.scenario or "rescue_smoke"

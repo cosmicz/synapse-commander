@@ -1151,6 +1151,36 @@ class PrincipalStreams(LedgerCase):
                 self.assertFalse(result.ok)
                 self.assertIn("cross_principal_citation", result.errors[0])
 
+    def test_decisions_may_cite_only_view_records(self):
+        r, ids = self.two_streams(end=False)
+        event = r.record(rec.SCENARIO_EVENT, sim_frame=3, origin="scenario", payload={"name": "collapse_1"})
+        self.refused("incompatible_cause", lambda: r.record(
+            rec.INFERENCE, sim_frame=3, origin="agent",
+            payload={"inference_id": "inf-x", "live": True, "model_id": MODEL, "principal": "M1"},
+            causes=[ids["om"], event]))
+        self.refused("incompatible_cause", lambda: self.intent(r, "M1", "m-x", "obs-M1-0", [ids["om"], event], frame=3))
+        inf = self.inference(r, "M1", "inf-ok", ids["om"], frame=3)
+        self.refused("incompatible_cause", lambda: r.record(
+            rec.INFERENCE, sim_frame=3, origin="agent",
+            payload={"inference_id": "inf-chain", "live": True, "model_id": MODEL, "principal": "M1"},
+            causes=[ids["om"], inf]))
+        self.assertTrue(self.intent(r, "M1", "m-ok", "obs-M1-0", [ids["om"], inf], frame=3, origin="agent"))
+        r.close()
+
+    def test_redelivery_after_the_intent_does_not_shorten_latency(self):
+        clock = FakeClock(start=0, step=10 ** 9)  # one second per record
+        r = Recorder.create(self.path, manifest(**TWO), clock=clock, fsync=False)
+        r.run_start(0)
+        om = self.obs(r, "M1", "obs-M1-0")
+        sub = self.intent(r, "M1", "m1", "obs-M1-0", [om])
+        self.obs(r, "M1", "obs-M1-0")  # the same observation re-delivered afterwards
+        self.receipt(r, "M1", "m1", sub, frame=0)
+        oc = self.obs(r, "commander", "obs-commander-0")
+        self.receipt(r, "commander", "c1", self.intent(r, "commander", "c1", "obs-commander-0", [oc]), frame=0)
+        r.run_end(1, {})
+        latency = verify_ledger(self.path).principals["M1"]["decision_latency_s"]
+        self.assertEqual(latency, {"samples": 1, "median": 1.0, "inconsistent": 0})
+
     def test_an_observation_id_never_changes_owner(self):
         r, _ = self.two_streams(end=False)
         self.obs(r, "commander", "obs-commander-0", frame=3)  # re-delivery is fine
@@ -1229,6 +1259,22 @@ class PrincipalStreams(LedgerCase):
         result = self.agent_run({"commander": "agent", "M1": "agent"}, [{"label": "d-commander", "principal": "commander"}])
         self.assertEqual(result.principal_classifications["M1"], "agent_partial")
         self.assertFalse(result.autonomous)
+
+    def test_declared_scripted_needs_scripted_evidence(self):
+        # M1 declared scripted, but its intent is agent-origin without its decision: agent_partial.
+        result = self.agent_run({"commander": "agent", "M1": "agent"}, [{"label": "d-commander", "principal": "commander"}])
+        self.assertEqual(result.principal_classifications["M1"], "agent_partial")
+        self.path.unlink()
+        r = self.recorder(principals=["commander", "M1"], principal_sources={"commander": "scripted", "M1": "scripted"},
+                          model_id=MODEL, required_decisions=[{"label": "d-M1", "principal": "M1"}])
+        r.run_start(0)
+        om = self.obs(r, "M1", "obs-M1-0")
+        sub = self.intent(r, "M1", "i-M1", "obs-M1-0", [self.inference(r, "M1", "inf-M1", om)], origin="agent")
+        self.receipt(r, "M1", "i-M1", sub, frame=0)
+        r.run_end(1, {})
+        result = verify_ledger(self.path)
+        self.assertEqual(result.principal_classifications["M1"], "agent_partial")
+        self.assertIn("principal M1 declared scripted but its evidence classifies as agent_partial", result.evidence_limits)
 
     def test_a_declared_source_never_upgrades_the_label(self):
         self.two_streams(principal_sources={"commander": "agent", "M1": "scripted"})

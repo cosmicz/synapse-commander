@@ -103,6 +103,8 @@ MANIFEST_FIELDS: dict[str, type | tuple[type, ...]] = {
 _COMMIT = re.compile(r"^[0-9a-f]{7,64}$")
 _PRINCIPAL = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 PRINCIPAL_SOURCES = frozenset({"scripted", "agent"})
+# The labels that bear out each declared source; anything else is reported.
+SUPPORTED_BY = {"scripted": frozenset({"scripted_replay", "scripted_fixture"}), "agent": frozenset({"agent_only"})}
 # With declared principals, every record of these kinds names the principal
 # whose view or authority it belongs to (for an EFFECT: the viewer).
 PRINCIPAL_KINDS = frozenset({OBSERVATION, INFERENCE, INTENT_SUBMITTED, INTENT_RECEIPT, EFFECT})
@@ -462,8 +464,14 @@ class _LedgerState:
         if payload.get("client") is not None and not (isinstance(payload["client"], str) and _PRINCIPAL.match(payload["client"])):
             raise LedgerError("invalid_payload", f"seq {seq} client must be a short label")
         if kind in (INFERENCE, INTENT_SUBMITTED):
-            # A decision may rest only on what its own principal could see.
-            for cited in self._cited(causes, {OBSERVATION, INFERENCE}):
+            # A decision may rest only on what its own principal could see: an
+            # inference on its observations, an intent on those or its inferences.
+            allowed = {OBSERVATION} if kind == INFERENCE else {OBSERVATION, INFERENCE}
+            for cause in causes:
+                if self.by_id[cause]["kind"] not in allowed:
+                    raise LedgerError("incompatible_cause",
+                                      f"seq {seq} {kind} of {principal} cites a {self.by_id[cause]['kind']}")
+            for cited in self._cited(causes, allowed):
                 if cited["payload"].get("principal") != principal:
                     raise LedgerError("cross_principal_citation",
                                       f"seq {seq} {principal} cites {cited['payload'].get('principal')}'s {cited['event_id']}")
@@ -821,7 +829,7 @@ def _classify(result: Verification) -> None:
         limits.append(f"intent_id {intent_id} accepted more than once")
     for name, declared in sorted((sources or {}).items()):
         got = result.principal_classifications[name]
-        if (declared == "agent") != (got == "agent_only"):
+        if got not in SUPPORTED_BY[declared]:
             # The declaration never upgrades a label; the disagreement is reported.
             limits.append(f"principal {name} declared {declared} but its evidence classifies as {got}")
     limits.append("hash chain detects accidental corruption, not deliberate forgery")
@@ -831,14 +839,23 @@ def _classify(result: Verification) -> None:
 def _principal_summary(name: str, records: list[dict[str, Any]], intents: list[dict[str, Any]],
                        receipts: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
     """Counts and observation-to-receive latency for one principal's stream."""
-    observations = {r["payload"]["observation_id"]: r for r in records
-                    if r["kind"] == OBSERVATION and r["payload"]["principal"] == name}
-    latencies = []
+    mine = [r for r in records if r["kind"] == OBSERVATION and r["payload"]["principal"] == name]
+    latencies, inconsistent = [], 0
     for intent in intents:
-        seen = observations.get(intent["payload"]["based_on_observation_id"])
-        if seen is not None:
-            received = intent["payload"].get("received_wall_ns", intent["wall_ns"])
-            latencies.append(max(0, received - seen["wall_ns"]) / 1e9)
+        # The cited observation as it stood when the intent arrived: the latest
+        # recording of that id before the intent, never a later re-delivery.
+        seen = None
+        for observation in mine:
+            if observation["seq"] < intent["seq"] and \
+                    observation["payload"]["observation_id"] == intent["payload"]["based_on_observation_id"]:
+                seen = observation
+        if seen is None:
+            continue
+        received = intent["payload"].get("received_wall_ns", intent["wall_ns"])
+        if received < seen["wall_ns"]:
+            inconsistent += 1  # received before the observation it cites: reported, not hidden
+            continue
+        latencies.append((received - seen["wall_ns"]) / 1e9)
     latencies.sort()
     median = None
     if latencies:
@@ -849,7 +866,7 @@ def _principal_summary(name: str, records: list[dict[str, Any]], intents: list[d
         "effects": sum(1 for r in records if r["kind"] == EFFECT and r["payload"]["principal"] == name),
         "intents": len(intents),
         "accepted": sum(1 for r in intents if receipts.get(r["event_id"], {}).get("payload", {}).get("status") == "accepted"),
-        "decision_latency_s": {"samples": len(latencies), "median": median},
+        "decision_latency_s": {"samples": len(latencies), "median": median, "inconsistent": inconsistent},
     }
 
 

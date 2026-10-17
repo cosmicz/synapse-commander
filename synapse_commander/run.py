@@ -29,6 +29,7 @@ from .agents.scripted import (
     planar_distance,
 )
 from .agents.provision import ProvisionSmoke
+from .agents.world import WorldObserver
 from .agents.commander import SYSTEM_PROMPT, AgentCommander, ClaudeCliRoute, displacement_after_receipt
 from .gateway import LoopbackGateway
 from .scenarios import ScenarioError, load_scenario
@@ -333,12 +334,13 @@ def run_smoke(config: SmokeConfig, *,
     "agent" with the agent commander, whose decisions come from a live model.
     """
     run_id = launch.check_run_id(config.run_id)
-    if config.mode not in ("scripted", "agent", "provision"):
+    if config.mode not in ("scripted", "agent", "provision", "world"):
         raise launch.LaunchError(f"unknown mode {config.mode!r}")
     agent = config.mode == "agent"
     provision = config.mode == "provision"
-    if provision and config.scenario is None:
-        raise launch.LaunchError("provision mode needs a scenario table (--scenario)")
+    world = config.mode == "world"
+    if (provision or world) and config.scenario is None:
+        raise launch.LaunchError(f"{config.mode} mode needs a scenario table (--scenario)")
     if not config.rig_commit:
         raise launch.LaunchError("rig commit is required for the manifest")
     app_commit, app_dirty = app or app_identity()
@@ -380,7 +382,7 @@ def run_smoke(config: SmokeConfig, *,
         config_hashes[f"scenario_table/{config.scenario}"] = sha256_text(json.dumps(table, sort_keys=True))
     package = Path(__file__).resolve().parent
     for module in ("mailbox.py", "gateway.py", "protocol.py", "recording.py", "run.py", "launch.py",
-                   "agents/scripted.py", "agents/commander.py", "agents/provision.py"):
+                   "agents/scripted.py", "agents/commander.py", "agents/provision.py", "agents/world.py"):
         path = package / module
         if path.exists():
             config_hashes[f"synapse_commander/{module}"] = launch.sha256_file(path)
@@ -490,6 +492,8 @@ def run_smoke(config: SmokeConfig, *,
             driver: Any = AgentCommander(client, route, config.model, sink=ordered, on_decision=keep_decision,
                                          call_budget=config.call_budget, wall_deadline_s=config.agent_deadline_s,
                                          poll_s=config.client_poll_s)
+        elif world:
+            driver = WorldObserver(client, wall_timeout_s=config.client_timeout_s, poll_s=config.client_poll_s)
         elif provision:
             driver = ProvisionSmoke(client, wall_timeout_s=config.client_timeout_s, poll_s=config.client_poll_s)
         else:
@@ -529,8 +533,7 @@ def run_smoke(config: SmokeConfig, *,
             except Exception as exc:
                 verdict.setdefault("pump_errors", []).append(repr(exc))
         if recorder is not None:
-            checks = (evaluate_agent if agent else evaluate_provision if provision else evaluate)(
-                trace, ordered, verdict)
+            checks = _evaluator(config.mode)(trace, ordered, verdict)
             outcome = {"pre_ledger_checks": "PASS" if checks and all(c["ok"] for c in checks.values())
                        and not error else "FAIL", "failed": sorted(n for n, c in checks.items() if not c["ok"]),
                        "error": error, "classification": run_label(agent, presentation)}
@@ -546,7 +549,7 @@ def run_smoke(config: SmokeConfig, *,
                 (config.lock_dir / "owner").read_text())
     verdict["wall_end_utc"] = utc_now()
     verdict["error"] = error
-    _finish(verdict, trace, ordered, ledger_path, layout, agent=agent, provision=provision)
+    _finish(verdict, trace, ordered, ledger_path, layout, mode=config.mode)
     return verdict
 
 
@@ -878,6 +881,131 @@ def provision_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]
     return checks
 
 
+def evaluate_world(trace: dict[str, Any], ordered: OrderedLedger | None,
+                   verdict: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Initial-world checks known before RUN_END; truth comparisons follow in _finish."""
+    checks: dict[str, dict[str, Any]] = {}
+
+    def check(name: str, ok: bool, **detail: Any) -> None:
+        checks[name] = {"ok": bool(ok), **detail}
+
+    check("hello_seen", ordered is not None and ordered.hello is not None,
+          hello=None if ordered is None else ordered.hello)
+    observations = trace.get("observations", [])
+    check("world_observed", len(observations) >= 2, count=len(observations),
+          frames=[o["frame"] for o in observations])
+    _host_checks(verdict, check)
+    return checks
+
+
+# Keys a player observation must never carry: evaluator-only fields.
+_HIDDEN_KEYS = frozenset({"seed", "cause_hidden", "state", "contact", "assets", "inventory", "health_truth"})
+
+
+def _walk(value: Any):
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            yield key, nested
+            yield from _walk(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _walk(nested)
+
+
+def world_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Roster, accounting, distress ageing and non-disclosure against world_init."""
+    checks: dict[str, dict[str, Any]] = {}
+    init = next((r for r in records if r["kind"] == "SCENARIO_EVENT" and r["payload"].get("name") == "world_init"),
+                None)
+    served = trace.get("observations", [])
+    ledger_observations = [r for r in records if r["kind"] == "OBSERVATION"]
+    first_observation = ledger_observations[0] if ledger_observations else None
+    checks["world_init_recorded_before_observations"] = {
+        "ok": init is not None and first_observation is not None and init["seq"] < first_observation["seq"]
+        and init["origin"] == "scenario",
+        "world_init_seq": None if init is None else init["seq"],
+        "first_observation_seq": None if first_observation is None else first_observation["seq"]}
+    if init is None or not served:
+        checks["world_truth_available"] = {"ok": False}
+        return checks
+    truth = init["payload"]
+    assets = {a["name"]: a for a in truth.get("assets", [])}
+    hidden_ids = {a["unit_id"] for a in assets.values() if not a.get("contact") and a.get("unit_id") is not None}
+    hidden_positions = [a["position"] for a in assets.values() if not a.get("contact") and a.get("position")]
+
+    # Roster: every asset known by name; only units in contact carry a unit id.
+    roster_ok, roster_seen = True, {}
+    for observation in served:
+        roster = {entry["name"]: entry for entry in observation.get("roster") or []}
+        roster_seen = {name: {k: v for k, v in entry.items()} for name, entry in roster.items()}
+        if set(roster) != set(assets):
+            roster_ok = False
+        for name, asset in assets.items():
+            entry = roster.get(name, {})
+            if asset.get("contact") and asset.get("state") == "active":
+                roster_ok &= entry.get("status") == "in_contact" and entry.get("unit_id") == asset.get("unit_id")
+            else:
+                roster_ok &= entry.get("status") != "in_contact" and "unit_id" not in entry
+    checks["roster_contact_and_ids"] = {"ok": roster_ok, "last_roster": roster_seen}
+
+    # Accounting: observed budgets equal the evaluator's available counts, and
+    # total = deployed + lost + available for bodies and every chip.
+    inventory = truth.get("inventory", {})
+    expected = {"bodies_remaining": inventory.get("bodies", {}).get("available"),
+                "chips": {chip: v.get("available") for chip, v in (inventory.get("chips") or {}).items()}}
+    observed = served[0].get("budgets")
+    balanced = bool(truth.get("inventory_consistent")) and all(
+        v["total"] == v["deployed"] + v["lost"] + v["available"]
+        for v in [inventory.get("bodies", {}), *(inventory.get("chips") or {}).values()] if v)
+    checks["budgets_debited_for_predeployed"] = {
+        "ok": balanced and all(o.get("budgets") == expected for o in served),
+        "observed": observed, "expected_available": expected, "inventory": inventory}
+
+    # Distress: one pre-start report on the declared asset whose age grows with time.
+    distress = truth.get("distress") or {}
+    ages, report_ok = [], True
+    for observation in served:
+        reports = [r for r in observation.get("reports") or [] if r.get("kind") == "distress"]
+        if len(reports) != 1:
+            report_ok = False
+            continue
+        report = reports[0]
+        report_ok &= (report.get("asset") == distress.get("asset") and report.get("symptom") == distress.get("symptom")
+                      and report.get("observed_frame") == distress.get("observed_frame")
+                      and report.get("age_frames") == int(observation["frame"]) - int(report["observed_frame"]))
+        ages.append((observation["frame"], report.get("age_frames")))
+    growing = len(ages) >= 2 and all(b[1] > a[1] for a, b in zip(ages, ages[1:]))
+    pre_start = bool(ages) and distress.get("observed_frame") is not None and int(distress["observed_frame"]) < 0
+    checks["distress_report_aged_and_growing"] = {"ok": report_ok and growing and pre_start, "ages": ages,
+                                                  "observed_frame": distress.get("observed_frame")}
+
+    # Non-disclosure, over the HTTP responses and the ledger's observation records alike.
+    leaks: list[str] = []
+    cause = distress.get("cause_hidden")
+    for where, observation in [*(("http", o) for o in served),
+                               *(("ledger", r["payload"].get("observation", {})) for r in ledger_observations)]:
+        for key, value in _walk(observation):
+            if key in _HIDDEN_KEYS:
+                leaks.append(f"{where}:{observation.get('observation_id')}:key {key}")
+            if cause is not None and value == cause:
+                leaks.append(f"{where}:{observation.get('observation_id')}:cause")
+        for report in observation.get("reports") or []:
+            for position in hidden_positions:
+                pos = report.get("position") or []
+                if len(pos) == 3 and abs(pos[0] - position[0]) < 1 and abs(pos[2] - position[-1]) < 1:
+                    leaks.append(f"{where}:{observation.get('observation_id')}:true position in report")
+        for entity in observation.get("entities", []):
+            if entity.get("id") in hidden_ids:
+                leaks.append(f"{where}:{observation.get('observation_id')}:hidden unit {entity.get('id')}")
+            for position in hidden_positions:
+                pos = entity.get("pos") or []
+                if len(pos) == 3 and abs(pos[0] - position[0]) < 1 and abs(pos[2] - position[-1]) < 1:
+                    leaks.append(f"{where}:{observation.get('observation_id')}:true position")
+    checks["no_hidden_truth_in_player_output"] = {"ok": not leaks, "leaks": leaks[:20],
+                                                  "hidden_unit_ids": sorted(hidden_ids)}
+    return checks
+
+
 def _probe_id(trace: dict[str, Any], name: str) -> str | None:
     for probe in trace.get("probes", []):
         if probe.get("name") == name:
@@ -885,9 +1013,14 @@ def _probe_id(trace: dict[str, Any], name: str) -> str | None:
     return None
 
 
+def _evaluator(mode: str) -> Callable[..., dict[str, dict[str, Any]]]:
+    return {"agent": evaluate_agent, "provision": evaluate_provision, "world": evaluate_world}.get(mode, evaluate)
+
+
 def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedger | None,
-            ledger_path: Path, layout: launch.RunLayout, *, agent: bool = False, provision: bool = False) -> None:
-    checks = (evaluate_agent if agent else evaluate_provision if provision else evaluate)(trace, ordered, verdict)
+            ledger_path: Path, layout: launch.RunLayout, *, mode: str = "scripted") -> None:
+    agent, provision, world = mode == "agent", mode == "provision", mode == "world"
+    checks = _evaluator(mode)(trace, ordered, verdict)
     verification = verify_ledger(ledger_path) if ledger_path.exists() else None
     if verification is not None:
         checks["ledger_verified"] = {"ok": verification.ok, "status": verification.status,
@@ -899,8 +1032,8 @@ def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedg
         records = verification.records if verification.ok else _ledger_records(ledger_path)
         if agent:
             checks.update(agent_ledger_checks(records, trace, verification))
-        elif provision:
-            checks.update(provision_ledger_checks(records, trace))
+        elif provision or world:
+            checks.update((provision_ledger_checks if provision else world_ledger_checks)(records, trace))
             checks["not_autonomous"] = {"ok": verification.autonomous is False
                                         and verification.classification in ("scripted_replay", "scripted_fixture"),
                                         "classification": verification.classification}
