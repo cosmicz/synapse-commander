@@ -441,15 +441,18 @@ def evaluate(trace: dict[str, Any], ordered: OrderedLedger | None, verdict: dict
     if settled is not None and final is not None:
         before = _pos(settled, unit_id)
         after = _pos(final, unit_id)
-        foreign_moves = {}
+        # Only the probed units count: Gaia critters wander on their own.
+        targets = set(trace.get("probe_target_ids", []))
+        target_moves, other_moves = {}, {}
         for foreign in trace.get("foreign_units", []):
             a, b = _pos(settled, foreign["id"]), _pos(final, foreign["id"])
-            foreign_moves[str(foreign["id"])] = None if a is None or b is None else planar_distance(a, b)
+            moved_by = None if a is None or b is None else planar_distance(a, b)
+            (target_moves if foreign["id"] in targets else other_moves)[str(foreign["id"])] = moved_by
         still = before is not None and after is not None and planar_distance(before, after) <= STILL_DISTANCE
         check("no_movement_after_probes", still and all(d is not None and d <= STILL_DISTANCE
-                                                         for d in foreign_moves.values()),
+                                                         for d in target_moves.values()),
               own_moved=None if not (before and after) else planar_distance(before, after),
-              foreign_moved=foreign_moves)
+              probe_target_moved=target_moves, unprobed_foreign_moved=other_moves)
     else:
         check("no_movement_after_probes", False, detail="no settled/final observation")
     teardown = verdict.get("teardown") or {}

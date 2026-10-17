@@ -9,6 +9,7 @@ engine evidence.
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 import tempfile
@@ -97,7 +98,15 @@ class FakeEngine:
                 observation_id = f"obs-0-{self.frame}"
                 self.observations[observation_id] = self.frame
                 entities = [{"id": unit["id"], "pos": list(unit["pos"]), "source": "own_unit",
-                             "observed_frame": self.frame, "age_frames": 0}]
+                             "observed_frame": self.frame, "age_frames": 0},
+                            # A start commander: owned too, but not the smoke unit.
+                            {"id": 50, "pos": [3000.0, 10.0, 3000.0], "source": "own_unit",
+                             "observed_frame": self.frame, "age_frames": 0},
+                            ]
+                if self.gaia:
+                    # A wandering critter: visible, foreign, moves on its own; sorts first.
+                    entities.append({"id": 890, "pos": [1200.0 + 60.0 * math.sin(self.frame / 30.0), 10.0, 1300.0],
+                                     "source": "los", "observed_frame": self.frame, "age_frames": 0})
                 if self.gaia:
                     entities.append({"id": self.gaia_unit["id"], "pos": list(self.gaia_unit["pos"]), "source": "los",
                                      "observed_frame": self.frame, "age_frames": 0})
@@ -200,6 +209,9 @@ class LoopOrchestrationTests(unittest.TestCase):
                      "identity_injected_by_gateway", "teardown_bounded", "not_autonomous"):
             self.assertTrue(checks[name]["ok"], (name, checks[name]))
         self.assertEqual(checks["ledger_verified"]["classification"], "scripted_replay")
+        trace = json.loads((self.out / "fake-ok" / "trace.json").read_text())
+        self.assertEqual(trace["unit_id"], 101, "the smoke unit, not the commander")
+        self.assertEqual(trace["probe_target_ids"], [900])
         self.assertEqual(checks["unit_and_waypoint_observed"]["ok"], gateway_passes_scenario())
         self.assertEqual(verdict["verdict"], "PASS" if gateway_passes_scenario() else "FAIL")
         run_dir = self.out / "fake-ok"

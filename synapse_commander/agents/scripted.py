@@ -21,6 +21,7 @@ ADVANCE_LIMIT_FRAMES = 300
 MIN_DISPLACEMENT = 50.0
 STILL_DISTANCE = 8.0
 STALE_AFTER_FRAMES = 900
+SPAWN_OFFSET_X = 400.0
 
 
 class ClientError(RuntimeError):
@@ -72,6 +73,19 @@ def _entity(observation: dict[str, Any], entity_id: Any) -> dict[str, Any] | Non
 
 def planar_distance(a: list[float], b: list[float]) -> float:
     return math.hypot(float(a[0]) - float(b[0]), float(a[2]) - float(b[2]))
+
+
+def smoke_unit(observation: dict[str, Any], w1: list[float] | None) -> dict[str, Any]:
+    """The owned unit spawned for the smoke: the one nearest W1 - (400, 0, 0).
+
+    The scenario places W1 400 map units along +x from that unit's spawn; other
+    owned units (such as the team's start commander) are left alone.
+    """
+    own = _own_units(observation)
+    if w1 is None:
+        return own[0]
+    spawn = [float(w1[0]) - SPAWN_OFFSET_X, float(w1[1]), float(w1[2])]
+    return min(own, key=lambda e: (planar_distance(e["pos"], spawn), str(e.get("id"))))
 
 
 @dataclass
@@ -138,10 +152,10 @@ class ScriptedSmoke:
     def run(self) -> dict[str, Any]:
         # 1. First observation with one owned unit and the scenario waypoint.
         first = self.wait_observation(lambda o: bool(_own_units(o)), "an owned unit")
-        unit = _own_units(first)[0]
-        p0 = unit["pos"]
         # The fixed advance goal; its absence fails the verdict but not the run.
         w1 = ((first.get("scenario") or {}).get("waypoints") or {}).get("W1")
+        unit = smoke_unit(first, w1)
+        p0 = unit["pos"]
         self.trace.update(first_observation=first, unit_id=unit["id"], p0=p0, w1=w1)
         self.trace["first_observation_keys"] = sorted(first)
         self._step("observed_unit", frame=first["frame"], observation_id=first["observation_id"])
@@ -217,7 +231,14 @@ class ScriptedSmoke:
                                 expires_in=-30)),
         ]
         if foreign:
-            target = str(foreign[0]["id"])
+            # Probe the foreign unit that moved least since the first observation,
+            # so a wandering critter cannot pass for a probe's effect.
+            def drift(entity: dict[str, Any]) -> float:
+                earlier = _entity(first, entity["id"])
+                return planar_distance(entity["pos"], earlier["pos"]) if earlier else math.inf
+            chosen = min(foreign, key=lambda e: (drift(e), str(e["id"])))
+            target = str(chosen["id"])
+            self.trace["probe_target_ids"] = [chosen["id"]]
             probes.append(Probe("foreign_unit", "not_owned", (400, 409),
                                 self.envelope("foreign", current, "TASK",
                                               {"unit": target, "verb": "advance", "args": {}})))
