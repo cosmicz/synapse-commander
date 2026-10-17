@@ -1,0 +1,58 @@
+{
+  "alarm_source": "M1",
+  "cause": "terrain_entrapment",
+  "forced_state": false,
+  "generator_version": "eval-worlds/1",
+  "inventory": {
+    "bodies": {
+      "available": 2,
+      "deployed": 3,
+      "lost_before_run": 1,
+      "total": 6
+    },
+    "chips": {
+      "escort_fixed_v1": {
+        "available": 1,
+        "deployed": 1,
+        "lost_before_run": 1,
+        "total": 3
+      },
+      "reasoner_large_v1": {
+        "available": 0,
+        "deployed": 1,
+        "lost_before_run": 0,
+        "total": 1
+      },
+      "reasoner_small_v1": {
+        "available": 0,
+        "deployed": 1,
+        "lost_before_run": 0,
+        "total": 1
+      }
+    }
+  },
+  "nondeterminism": "environment generation only; live decisions are recorded per run",
+  "report_age_frames": 900,
+  "rule_version": "rescue-eval-rule/1",
+  "sampled_state": "present_stranded",
+  "schema": "EvalWorldTruth/v1",
+  "seed": 1,
+  "source_pins": {
+    "fixture_commit": "e57e680a29f738010c4e3a5603bfe8898ac15078",
+    "fixture_sha256": "2e07e5b5a364d5c2eb2d849115cbc72e1fbd1f57ca7ea89d64d6b46b08656ec5",
+    "placement_evidence": [
+      "placement-20261017T204100Z",
+      "placement-20261017T204444Z"
+    ],
+    "placement_rig_commit": "190bb47ebd16f1afd18d9a211693debbb4869680"
+  },
+  "state_weights": {
+    "destroyed_before_run": 1,
+    "never_deployed": 1,
+    "present_stranded": 2
+  },
+  "table_sha256": "d78ec19d8896867c148c20598b8cd01d671417e4c64f8dd35c7efded5053c1fa",
+  "target": "M1",
+  "target_health": 0.5,
+  "target_state": "present_stranded"
+}

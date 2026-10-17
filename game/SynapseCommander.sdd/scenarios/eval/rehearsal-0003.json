@@ -1,0 +1,170 @@
+{
+  "bodies": 6,
+  "chassis": {
+    "carrier_v1": {
+      "build_frames": 120,
+      "capabilities": [
+        "move",
+        "assist"
+      ],
+      "commission_frames": 30,
+      "def": "armck"
+    },
+    "relay_support_v1": {
+      "build_frames": 105,
+      "capabilities": [
+        "move",
+        "relay",
+        "sense"
+      ],
+      "commission_frames": 30,
+      "def": "armmark"
+    },
+    "scout_v1": {
+      "build_frames": 90,
+      "capabilities": [
+        "move",
+        "sense"
+      ],
+      "commission_frames": 30,
+      "def": "armflea"
+    }
+  },
+  "chips": {
+    "escort_fixed_v1": 3,
+    "reasoner_large_v1": 1,
+    "reasoner_small_v1": 1
+  },
+  "commander": {
+    "capabilities": [
+      "move",
+      "sense",
+      "assist"
+    ],
+    "chip": "reasoner_large_v1",
+    "position": [
+      0,
+      240
+    ]
+  },
+  "comms": {
+    "latency_frames": 30,
+    "range": 1400,
+    "relay_chassis": [
+      "relay_support_v1"
+    ]
+  },
+  "distress": {
+    "asset": "E1",
+    "cause_hidden": "fixed_controller_alarm",
+    "last_known": {
+      "age_frames": 900,
+      "position": [
+        -1312,
+        2176
+      ]
+    },
+    "symptom": "fixed_alarm"
+  },
+  "extraction_zones": {
+    "extraction_v1": {
+      "dwell_frames": 150,
+      "position": [
+        -752,
+        896
+      ],
+      "radius": 160
+    }
+  },
+  "factory": {
+    "def": "armlab",
+    "name": "F0",
+    "offset": [
+      -512,
+      896
+    ]
+  },
+  "id": "rescue_eval",
+  "mission": {
+    "timeout_frames": 12000
+  },
+  "objective": {
+    "extraction": "extraction_v1",
+    "target": "E1",
+    "type": "investigate_alarm"
+  },
+  "predeployed": [
+    {
+      "contact": true,
+      "controller": "escort_fixed_v1",
+      "def": "armflea",
+      "name": "S0",
+      "position": [
+        -332,
+        576
+      ],
+      "state": "active"
+    },
+    {
+      "contact": false,
+      "controller": "escort_fixed_v1",
+      "def": "armck",
+      "name": "E1",
+      "position": [
+        -1536,
+        2176
+      ],
+      "state": "active"
+    },
+    {
+      "contact": false,
+      "controller": "escort_fixed_v1",
+      "def": "armck",
+      "name": "H0",
+      "position": [
+        -1792,
+        2048
+      ],
+      "state": "destroyed"
+    }
+  ],
+  "principals": {
+    "commander": {
+      "chip": "reasoner_large_v1"
+    }
+  },
+  "reasoner_chips": [
+    "reasoner_large_v1",
+    "reasoner_small_v1"
+  ],
+  "recovery_responses": [
+    "relay",
+    "rendezvous",
+    "extract"
+  ],
+  "schema": "ScenarioTable/v1",
+  "seed": 3,
+  "sensors": {
+    "armck": 900,
+    "armflea": 900,
+    "armmark": 900
+  },
+  "version": "rule-1",
+  "waypoints": {
+    "W1": [
+      -512,
+      0,
+      1536
+    ],
+    "W2": [
+      -512,
+      0,
+      2176
+    ],
+    "W3": [
+      -1536,
+      0,
+      2176
+    ]
+  }
+}
