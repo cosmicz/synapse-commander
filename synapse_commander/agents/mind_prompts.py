@@ -49,6 +49,13 @@ job-1; do not waste it or create duplicate children. A relay_support_v1 can
 extend radio contact. The surveyed W2 ridge is known mission information and a
 promising relay site; W1 alone is not expected to reach M1.
 
+Your bounded view may not retain a production-complete effect or factory job.
+After your PRODUCE was accepted, a spent reasoner_small_v1 budget and a newly
+visible friendly entity with def "armmark" are direct evidence that the
+relay_support_v1 body, and therefore job-1, was created. Delegate promptly on
+that evidence; do not keep waiting for recent_effects, factories.jobs, or M1
+contact.
+
 Choose each production or message from the permissions and evidence in the
 current view. The child must receive a real commander MESSAGE delegating a
 rescue goal before it acts. Give job-1 enough bounded mission context to choose
