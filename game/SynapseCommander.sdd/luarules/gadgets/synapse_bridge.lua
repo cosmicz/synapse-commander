@@ -6,7 +6,7 @@ if gadgetHandler:IsSyncedCode() then
   local function out(kind, body) SendToUnsynced("synapse_out", kind, Json.encode(body), Spring.GetGameFrame()) end
   local function receipt(e,status,reason) out("receipt",{schema="IntentReceipt/v1",intent_id=e.intent_id,principal=e.principal,team=e.team,status=status,reason=reason,frame=Spring.GetGameFrame()}) end
   function gadget:GameStart()
-    local x,z=Game.mapSizeX/2,Game.mapSizeZ/2; local unit=Spring.CreateUnit("armpw",x,Spring.GetGroundHeight(x,z),z,0,0); GG.synapse_unit=unit; GG.synapse_waypoint={x+400,Spring.GetGroundHeight(x+400,z),z}; out("hello",{protocol="synapse-mailbox/0",teams={0},clock_mode="continuous"})
+    local x,z=Game.mapSizeX/2,Game.mapSizeZ/2; local unit=Spring.CreateUnit("armpw",x,Spring.GetGroundHeight(x,z),z,0,0); GG.synapse_unit=unit; GG.synapse_waypoint={x+400,Spring.GetGroundHeight(x+400,z),z}; out("hello",{protocol="synapse-mailbox/0",run_id=(Spring.GetModOptions() or {}).synapse_run_id,teams={0},clock_mode="continuous"})
     out("scenario",{name="smoke_spawn",unit_id=unit})
   end
   function gadget:RecvLuaMsg(msg,player)

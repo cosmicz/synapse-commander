@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from threading import RLock
 import time
+import re
 from typing import Any
 from .protocol import IntentEnvelope, IntentReceipt
 
@@ -49,6 +50,8 @@ def _decode_event(raw: bytes) -> dict[str, Any]:
 
 class MailboxTransport:
     def __init__(self, mailbox_dir: Path, *, run_id: str, team: str | int = 0, ledger: Any | None = None) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id): raise ValueError("invalid run_id")
+        self.run_id = run_id
         self.team, self.ledger = str(team), ledger
         self.dir = Path(mailbox_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -78,7 +81,7 @@ class MailboxTransport:
                 body = event["body"]
                 self._events.append(event)
                 self._offset += len(raw)
-                if event["kind"] == "hello":
+                if event["kind"] == "hello" and body.get("run_id") == self.run_id:
                     self._hello = body
                 elif event["kind"] == "observation" and str(body.get("team")) == self.team:
                     self._observation = body
