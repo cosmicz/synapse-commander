@@ -10,16 +10,18 @@ from .protocol import IntentEnvelope, IntentReceipt
 MAX_LINE = 4096
 
 class MailboxTransport:
-    def __init__(self, write_dir: Path, *, run_id: str, team: str | int, ledger: Any | None = None) -> None:
+    def __init__(self, mailbox_dir: Path, *, run_id: str, team: str | int = 0, ledger: Any | None = None) -> None:
         self.team, self.ledger = str(team), ledger
-        self.dir = Path(write_dir) / "synapse" / run_id
+        self.dir = Path(mailbox_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.inbox, self.outbox = self.dir / "inbox.jsonl", self.dir / "outbox.jsonl"
         self.inbox.touch(); self.outbox.touch(); self._offset = 0; self._seq = 0; self._events: list[dict[str, Any]] = []; self._receipts: dict[str, dict[str, Any]] = {}; self._observation: dict[str, Any] | None = None; self._hello: dict[str, Any] | None = None
     def _read(self) -> None:
         with self.outbox.open("rb") as file:
-            file.seek(self._offset)
-            for raw in file:
+            file.seek(self._offset); pending = file.read()
+            if b"\n" not in pending: return
+            complete = pending.rsplit(b"\n", 1)[0] + b"\n"
+            for raw in complete.splitlines(keepends=True):
                 self._offset += len(raw)
                 if len(raw) > 32768: continue
                 try: event = json.loads(raw)

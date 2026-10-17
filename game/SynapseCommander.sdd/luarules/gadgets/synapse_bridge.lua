@@ -21,7 +21,7 @@ if gadgetHandler:IsSyncedCode() then
   end
   function gadget:GameFrame(f) if f%15~=0 then return end; local u=GG.synapse_unit; local x,y,z=Spring.GetUnitPosition(u); local id="obs-0-"..f; observations[id]=f; out("observation",{schema="ObservationFrame/v1",observation_id=id,team=0,frame=f,entities={{id=u,pos={x,y,z},source="own_unit",observed_frame=f,age_frames=0}},scenario={waypoints={W1=GG.synapse_waypoint}},permitted_intents={{type="TASK",verbs={"advance"}}},truncated=false,omitted=0}) end
 else
-  local runID = Spring.GetConfigString("synapse_run_id", "")
+  local runID = (Spring.GetModOptions() or {}).synapse_run_id or ""
   local path, outbox, offset, seq = "synapse/" .. runID .. "/inbox.jsonl", "synapse/" .. runID .. "/outbox.jsonl", 0, 0
   local function write(kind, body, frame) seq=seq+1; local f=io.open(outbox,"a"); if f then f:write(string.format('{"seq":%d,"frame":%d,"kind":"%s","body":%s}\n',seq,frame,kind,body)); f:close() end end
   local function bridge(_,kind,body,frame) write(kind,body,frame) end
