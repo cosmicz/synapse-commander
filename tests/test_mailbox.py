@@ -18,6 +18,7 @@ class MailboxTests(unittest.TestCase):
         env=IntentEnvelope("IntentEnvelope/v1","i","p","0","o",1,"TASK",{"unit":"1","verb":"advance","args":{}})
         self.assertEqual(self.t.submit_intent(env,0).reason,"pending")
         self.assertIn(b'"seq":1',self.t.inbox.read_bytes())
+        self.assertIn(b'"team":0',self.t.inbox.read_bytes()); self.assertIn(b'"unit_id":1',self.t.inbox.read_bytes())
     def test_events_preserve_sequence(self):
         self.t.outbox.write_text('{"seq":2,"frame":2,"kind":"bye","body":{}}\n{"seq":3,"frame":3,"kind":"hello","body":{}}\n')
         self.assertEqual([x["seq"] for x in self.t.events_since(0)], [2,3])

@@ -11,11 +11,12 @@ if gadgetHandler:IsSyncedCode() then
   function gadget:RecvLuaMsg(msg,player)
     if #msg>MAX or msg:sub(1,5)~="SYN0 " then return false end
     local ok,e=pcall(Json.decode,msg:sub(6)); if not ok or type(e)~="table" or type(e.envelope)~="table" then return true end; e=e.envelope
-    local _,_,spec,team=Spring.GetPlayerInfo(player,false); if spec or e.team~=team then receipt(e,"rejected","wrong_team"); return true end
+    local _,_,spec,team=Spring.GetPlayerInfo(player,false); if type(e.intent_id)~="string" or type(e.team)~="number" or spec or e.team~=team then receipt(e,"rejected","wrong_team"); return true end
     if seen[e.intent_id] then receipt(e,"rejected","duplicate_intent_id"); return true end; seen[e.intent_id]=true
     if e.type~="TASK" then receipt(e,"rejected","unsupported_type"); return true end
-    local p=e.payload or {}; if p.verb~="advance" or type(p.args)~="table" or next(p.args) then receipt(e,"rejected","verb_not_supported"); return true end
+    local p=e.payload or {}; if p.verb~="advance" or type(p.args)~="table" or next(p.args) or type(p.unit_id)~="number" then receipt(e,"rejected","verb_not_supported"); return true end
     if not observations[e.based_on_observation_id] then receipt(e,"rejected","unknown_observation"); return true end
+    if e.expires_at_frame < Spring.GetGameFrame() then receipt(e,"rejected","expired"); return true end
     if Spring.GetUnitTeam(p.unit_id)~=team then receipt(e,"rejected","not_owned"); return true end
     local w=GG.synapse_waypoint; Spring.GiveOrderToUnit(p.unit_id,CMD.MOVE,w,0); pending[p.unit_id]=e.intent_id; receipt(e,"accepted",nil); out("effect",{schema="EffectEvent/v1",effect="order_started",frame=Spring.GetGameFrame(),unit_id=p.unit_id,team=team,intent_id=e.intent_id}) ; return true
   end

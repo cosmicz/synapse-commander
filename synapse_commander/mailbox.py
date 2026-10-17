@@ -41,7 +41,9 @@ class MailboxTransport:
     def receipt(self, intent_id: str) -> dict[str, Any] | None: self._read(); return self._receipts.get(intent_id)
     def events_since(self, seq: int, limit: int = 256) -> list[dict[str, Any]]: self._read(); return [e for e in self._events if int(e.get("seq", 0)) > seq][:limit]
     def submit_intent(self, envelope: IntentEnvelope, wait_s: float = 1.0) -> IntentReceipt:
-        self._seq += 1; record = {"seq": self._seq, "kind": "intent", "envelope": envelope.to_wire()}; raw = json.dumps(record, separators=(",", ":")).encode() + b"\n"
+        wire = envelope.to_wire(); wire["team"] = int(envelope.team)
+        if envelope.type == "TASK": wire["payload"] = {"unit_id": int(envelope.payload["unit"]), "verb": envelope.payload["verb"], "args": envelope.payload["args"]}
+        self._seq += 1; record = {"seq": self._seq, "kind": "intent", "envelope": wire}; raw = json.dumps(record, separators=(",", ":")).encode() + b"\n"
         if len(raw) > MAX_LINE: return IntentReceipt(envelope.intent_id, False, self.current_frame(), "mailbox", "too_large")
         with self.inbox.open("ab") as file: file.write(raw); file.flush()
         deadline = time.monotonic() + wait_s
