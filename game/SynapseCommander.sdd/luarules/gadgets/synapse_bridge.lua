@@ -202,7 +202,12 @@ if gadgetHandler:IsSyncedCode() then
   function gadget:GameFrame(frame)
     for unitID, command in pairs(pending) do
       local x, _, z = Spring.GetUnitPosition(unitID)
-      if x and ((x - command.last_x) * (x - command.last_x) + (z - command.last_z) * (z - command.last_z) >= 32 * 32) then
+      if x and ((x - waypoint[1]) * (x - waypoint[1]) + (z - waypoint[3]) * (z - waypoint[3]) <= 16 * 16) then
+        -- Reissuing the fixed move while already at W1 may not produce an
+        -- engine UnitCmdDone callback. Physical arrival is still terminal.
+        out("effect", { schema = "EffectEvent/v1", effect = "order_done", frame = frame, unit_id = unitID, team = TEAM0, intent_id = command.intent_id })
+        pending[unitID] = nil
+      elseif x and ((x - command.last_x) * (x - command.last_x) + (z - command.last_z) * (z - command.last_z) >= 32 * 32) then
         command.last_x, command.last_z = x, z
         out("effect", { schema = "EffectEvent/v1", effect = "unit_moved", frame = frame, unit_id = unitID, team = TEAM0, intent_id = command.intent_id, detail = { pos = { x, z } } })
       end

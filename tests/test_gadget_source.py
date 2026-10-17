@@ -51,6 +51,10 @@ class GadgetSourceContractTests(unittest.TestCase):
     def test_visible_gaia_probe_stays_near_the_advance_route(self) -> None:
         self.assertIn('x + 200, Spring.GetGroundHeight(x + 200, z + 100), z + 100', self.source)
 
+    def test_arrival_completes_a_move_without_waiting_for_engine_callback(self) -> None:
+        self.assertIn("<= 16 * 16", self.source)
+        self.assertIn("Physical arrival is still terminal", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
