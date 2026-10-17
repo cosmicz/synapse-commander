@@ -123,7 +123,7 @@ class RescueEngine:
                                "reason": reason})
         return IntentReceipt(envelope.intent_id, reason is None, self.frame, "fake-" + envelope.intent_id, reason)
 
-    def submit_intent(self, envelope):
+    def submit_intent(self, envelope, wait_s: float = 1.0):
         with self.lock:
             if envelope.intent_id in self.seen:
                 return self._receipt(envelope, "duplicate_intent_id")
@@ -220,12 +220,12 @@ class RescueTests(unittest.TestCase):
         self.assertIn("[commander] frame", text)
         self.assertIn("-> PRODUCE accepted", text)
         self.assertIn("-> PRODUCE refused: chip_unavailable", text)
-        self.assertIn("-> TASK refused: invalid_parameters", text)
+        self.assertIn("-> TASK refused: verb_not_supported", text)
         self.assertIn("unknown command", text)
         records = [json.loads(line) for line in (self.out / "rescue-play" / "ledger.jsonl").read_text().splitlines()]
         submitted = [r for r in records if r["kind"] == "INTENT_SUBMITTED"]
         commander = [r for r in submitted if r["payload"]["principal"] == "commander"]
-        self.assertEqual(len(commander), 3)  # move_to is refused at the gateway before submission
+        self.assertEqual(len(commander), 4)  # produce x2, message, move_to (refused by the engine)
         self.assertTrue(all(r["origin"] == "human" for r in commander))
         self.assertTrue(all(r["origin"] == "scripted" for r in submitted if r["payload"]["principal"] == "M1"))
         self.assertTrue(verdict["checks"]["human_inputs_recorded"]["ok"])
@@ -238,6 +238,10 @@ class RescueTests(unittest.TestCase):
         self.assertEqual(parse_extraction({"reports": [{"from": "commander", "text": "extract at 5392 7040"}]}),
                          (5392.0, 7040.0))
         self.assertIsNone(parse_extraction({"reports": [{"from": "S0", "text": "extract at 1 2"}]}))
+        from synapse_commander.agents.rescue import RescuePlay
+        play = RescuePlay(None, None, stdin=io.StringIO(), stdout=io.StringIO())
+        kind, intent_type, payload = play.parse("move_to 77 6000.5 7000", {"budgets": {}})
+        self.assertEqual(payload["args"], {"x": 6000, "z": 7000})
         rendered = render_observation({"principal": "commander", "frame": 30, "observation_id": "o",
                                        "roster": [{"name": "M1", "def": "armck", "status": "no_contact"}],
                                        "permitted_intents": [{"type": "TASK", "verbs": ["advance"]}]})

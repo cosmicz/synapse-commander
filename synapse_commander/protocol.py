@@ -135,6 +135,8 @@ class IntentEnvelope:
                         or any(not isinstance(args[axis], int) or isinstance(args[axis], bool)
                                for axis in ("x", "z"))):
                     raise ProtocolError("invalid_parameters", "move_to requires integer x and z")
+                if any(not 0 <= args[axis] <= 65536 for axis in ("x", "z")):
+                    raise ProtocolError("invalid_parameters", "move_to coordinates are outside the map bounds")
             else:
                 raise ProtocolError("verb_not_supported", "task verb is not exposed for this principal")
         for field in required & {"parameters", "args"}:

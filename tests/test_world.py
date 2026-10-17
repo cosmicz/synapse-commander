@@ -139,7 +139,7 @@ class FakeWorldEngine:
             self._advance()
             return [e for e in self.events if e["seq"] > seq][:limit]
 
-    def submit_intent(self, envelope):
+    def submit_intent(self, envelope, wait_s: float = 1.0):
         raise AssertionError("the world observer sends no intents")
 
     def close(self):

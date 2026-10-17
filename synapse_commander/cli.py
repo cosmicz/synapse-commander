@@ -44,6 +44,8 @@ def add_run_arguments(command: argparse.ArgumentParser) -> None:
                               "engine as synapse_scenario; unsupported by run-smoke")
     command.add_argument("--run-id", default=None, help="run id [A-Za-z0-9_-]{1,64} (default: generated)")
     command.add_argument("--hello-timeout", type=float, default=180.0, help="seconds to wait for the engine hello")
+    command.add_argument("--receipt-wait-s", type=float, default=1.0,
+                         help="seconds the gateway waits for each engine receipt before returning 503 (default: 1)")
     command.add_argument("--allow-join", action="store_true",
                          help="host the game on all interfaces (port 8452) so a spectator client can join late; "
                               "default loopback only. Spectators never command; orders use the gateway")
@@ -146,6 +148,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                              out_dir=args.out, lock_dir=args.lock_dir, rig_commit=args.rig_commit,
                              run_id=args.run_id or new_run_id(), allow_dirty=args.allow_dirty,
                              hello_timeout_s=args.hello_timeout,
+                             receipt_wait_s=args.receipt_wait_s,
                              engine_binary=args.engine_binary or os.environ.get("ENGINE_BINARY") or HEADLESS_BINARY,
                              springsettings=args.springsettings or env_path("SPRINGSETTINGS"),
                              extra_widgets_dir=args.extra_widgets_dir or env_path("EXTRA_WIDGETS_DIR"),

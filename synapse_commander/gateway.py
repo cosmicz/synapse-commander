@@ -6,6 +6,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
+import math
+import re
 import socket
 from threading import RLock
 from typing import Any
@@ -43,12 +45,17 @@ class LoopbackGateway:
         ledger: LedgerSink | None = None,
         scenario: str | None = None,
         sessions: dict[str, str] | None = None,
+        receipt_wait_s: float = 1.0,
     ) -> None:
         self.transport = transport
         self.principal = principal
         self.team = team
         self.origin = origin
         self.ledger = ledger
+        if (not isinstance(receipt_wait_s, (int, float)) or isinstance(receipt_wait_s, bool)
+                or not math.isfinite(receipt_wait_s) or receipt_wait_s <= 0):
+            raise ValueError("receipt_wait_s must be a positive finite number")
+        self.receipt_wait_s = float(receipt_wait_s)
         self._sessions = dict(sessions or {})
         self._scenario = None
         if scenario is not None:
@@ -64,6 +71,9 @@ class LoopbackGateway:
         # principal's fetch history.
         self._observation_principals: dict[str, tuple[str, int]] = {}
         self._submission_meta: dict[str, tuple[int | None, str]] = {}
+        self._submission_events: dict[str, str | None] = {}
+        self._intent_principals: dict[str, str] = {}
+        self._known_receipts: dict[str, Any] = {}
         self._ledger_lock = RLock()
 
     def _prune_observation_history(self, current_frame: int) -> None:
@@ -153,10 +163,44 @@ class LoopbackGateway:
                                                      controllers=None if self._scenario is None else frozenset(self._scenario["chips"]),
                                                      principals=None if not self._sessions else frozenset(self._sessions.values()))
             submission_event = self._record_submission(envelope)
-            receipt = self.transport.submit_intent(envelope)
+            self._submission_events[envelope.intent_id] = submission_event
+            self._intent_principals[envelope.intent_id] = principal
+            receipt = self.transport.submit_intent(envelope, wait_s=self.receipt_wait_s)
             if receipt.reason in {"pending", "receipt_timeout"}:
                 raise TimeoutError("engine receipt is not yet known")
+            self._known_receipts[envelope.intent_id] = receipt
             self._record_receipt(receipt, submission_event, principal)
+            return receipt
+
+    @staticmethod
+    def _receipt_from_transport(value: Any, intent_id: str) -> Any | None:
+        if value is None:
+            return None
+        if hasattr(value, "to_wire") and hasattr(value, "intent_id"):
+            return value
+        if not isinstance(value, dict) or value.get("intent_id") != intent_id:
+            raise ValueError("invalid receipt")
+        accepted = value.get("status") == "accepted"
+        if value.get("status") not in {"accepted", "rejected"} or not isinstance(value.get("frame"), int):
+            raise ValueError("invalid receipt")
+        from .protocol import IntentReceipt
+        return IntentReceipt(intent_id, accepted, value["frame"], "engine-" + intent_id, value.get("reason"))
+
+    def receipt(self, intent_id: str, principal: str) -> Any | None:
+        """Return one principal's known engine receipt without re-submitting it."""
+        with self._ledger_lock:
+            if self._intent_principals.get(intent_id) != principal:
+                return None
+            receipt = self._known_receipts.get(intent_id)
+            if receipt is None:
+                lookup = getattr(self.transport, "receipt", None)
+                if lookup is None:
+                    return None
+                receipt = self._receipt_from_transport(lookup(intent_id), intent_id)
+                if receipt is None:
+                    return None
+                self._known_receipts[intent_id] = receipt
+                self._record_receipt(receipt, self._submission_events.get(intent_id), principal)
             return receipt
 
     def make_server(self, port: int = 0, *, host: str = "127.0.0.1") -> ThreadingHTTPServer:
@@ -205,13 +249,26 @@ class LoopbackGateway:
                 return principal
 
             def do_GET(self) -> None:  # noqa: N802
-                if self.path != "/v1/observation":
+                receipt_prefix = "/v1/receipts/"
+                receipt_id = self.path[len(receipt_prefix):] if self.path.startswith(receipt_prefix) else None
+                if self.path != "/v1/observation" and (receipt_id is None or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", receipt_id)):
                     self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
                     return
                 if not self._trusted_headers(body=False):
                     return
                 principal = self._principal()
                 if principal is None:
+                    return
+                if receipt_id is not None:
+                    try:
+                        receipt = gateway.receipt(receipt_id, principal)
+                    except (KeyError, LedgerError, ProtocolError, ValueError):
+                        self._send(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "receipt_unavailable"})
+                        return
+                    if receipt is None:
+                        self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                    else:
+                        self._send(HTTPStatus.OK, receipt.to_wire())
                     return
                 try:
                     observation = gateway.observation(principal)

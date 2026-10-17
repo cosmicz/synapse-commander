@@ -375,7 +375,7 @@ class RescuePlay:
             return "advance", "TASK", {"unit": args[0], "verb": "advance", "args": {}}
         if command == "move_to" and len(args) == 3:
             try:
-                x, z = float(args[1]), float(args[2])
+                x, z = int(float(args[1])), int(float(args[2]))  # the gateway accepts integer world x, z
             except ValueError:
                 return "move_to needs numeric X and Z"
             return "move_to", "TASK", {"unit": args[0], "verb": "move_to", "args": {"x": x, "z": z}}

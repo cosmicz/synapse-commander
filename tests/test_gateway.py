@@ -346,6 +346,10 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaisesRegex(ProtocolError, "integer x and z"):
             IntentEnvelope.from_untrusted({**request, "payload": {**request["payload"], "args": {"x": 100.5, "z": 200}}},
                                          principal="M1", team="0", principals=frozenset({"M1"}))
+        for args in ({"x": -1, "z": 0}, {"x": 0, "z": 65537}):
+            with self.subTest(args=args), self.assertRaisesRegex(ProtocolError, "outside the map bounds"):
+                IntentEnvelope.from_untrusted({**request, "payload": {**request["payload"], "args": args}},
+                                              principal="M1", team="0", principals=frozenset({"M1"}))
         with self.assertRaisesRegex(ProtocolError, "not exposed"):
             IntentEnvelope.from_untrusted(request, principal="M1", team="0")
 
@@ -417,7 +421,7 @@ class GatewayTests(unittest.TestCase):
 
     def test_transport_timeout_returns_503_without_a_receipt_record(self) -> None:
         class TimeoutTransport(MemoryTransport):
-            def submit_intent(self, envelope):
+            def submit_intent(self, envelope, wait_s: float = 1.0):
                 raise TimeoutError("no synced receipt")
         self.server.shutdown(); self.thread.join(); self.server.server_close()
         self.transport = TimeoutTransport(frame=100)
@@ -430,9 +434,42 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(receipt["error"], "gateway_unavailable")
         self.assertEqual([event["kind"] for event in ledger.events], ["INTENT_SUBMITTED"])
 
+    def test_timeout_receipt_can_be_polled_without_replaying_the_intent(self) -> None:
+        class DeferredReceiptTransport(MemoryTransport):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.waits: list[float] = []
+                self.delayed: IntentReceipt | None = None
+
+            def submit_intent(self, envelope, wait_s: float = 1.0):
+                self.waits.append(wait_s)
+                raise TimeoutError("engine is still drawing")
+
+            def receipt(self, intent_id: str):
+                return self.delayed if self.delayed and self.delayed.intent_id == intent_id else None
+
+        self.server.shutdown(); self.thread.join(); self.server.server_close()
+        self.transport = DeferredReceiptTransport(frame=100)
+        self.transport.publish_observation("blue", observation())
+        ledger = Ledger()
+        self.server = LoopbackGateway(self.transport, principal="agent-alpha", team="blue", ledger=ledger,
+                                      receipt_wait_s=4.5).make_server()
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
+        status, body = self.request("POST", "/v1/intents", produce())
+        self.assertEqual((status, body["error"]), (503, "gateway_unavailable"))
+        self.assertEqual(self.transport.waits, [4.5])
+        self.assertEqual([event["kind"] for event in ledger.events], ["INTENT_SUBMITTED"])
+        self.assertEqual(self.request("GET", "/v1/receipts/intent-1"), (404, {"error": "not_found"}))
+        self.transport.delayed = IntentReceipt("intent-1", True, 125, "engine-intent-1")
+        status, body = self.request("GET", "/v1/receipts/intent-1")
+        self.assertEqual((status, body["accepted"]), (200, True))
+        self.assertEqual(self.transport.waits, [4.5], "polling must not submit another attempt")
+        self.assertEqual([event["kind"] for event in ledger.events], ["INTENT_SUBMITTED", "INTENT_RECEIPT"])
+        self.assertEqual(ledger.events[1]["causes"], (ledger.events[0]["event_id"],))
+
     def test_legacy_timeout_receipt_is_also_unknown_without_a_receipt_record(self) -> None:
         class LegacyTimeout(MemoryTransport):
-            def submit_intent(self, envelope):
+            def submit_intent(self, envelope, wait_s: float = 1.0):
                 return IntentReceipt(envelope.intent_id, False, 9, "legacy", "receipt_timeout")
         self.server.shutdown(); self.thread.join(); self.server.server_close()
         self.transport = LegacyTimeout(frame=700); self.transport.publish_observation("blue", observation(frame=100))
@@ -445,7 +482,7 @@ class GatewayTests(unittest.TestCase):
 
     def test_accepted_ledger_records_use_ingestion_frame_not_source_frames(self) -> None:
         class OldReceipt(MemoryTransport):
-            def submit_intent(self, envelope):
+            def submit_intent(self, envelope, wait_s: float = 1.0):
                 return IntentReceipt(envelope.intent_id, True, 9, "old-receipt")
         self.server.shutdown(); self.thread.join(); self.server.server_close()
         self.transport = OldReceipt(frame=700)

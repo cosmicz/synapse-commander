@@ -40,6 +40,14 @@ class RunCommandTests(unittest.TestCase):
         config = run.call_args.args[0]
         self.assertEqual(config.mode, "scripted")
         self.assertIsNone(config.scenario)
+        self.assertEqual(config.receipt_wait_s, 1.0)
+
+    def test_receipt_wait_is_forwarded_to_the_run_configuration(self):
+        with mock.patch.object(cli, "run_smoke", return_value={
+                "run_id": "cli-test", "verdict": "PASS"}) as run, \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(self.arguments("run-rescue", "--receipt-wait-s", "4.5")), 0)
+        self.assertEqual(run.call_args.args[0].receipt_wait_s, 4.5)
 
     def test_other_commands_keep_scenario_selection(self):
         cases = [

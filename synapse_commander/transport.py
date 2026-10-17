@@ -25,7 +25,9 @@ class EngineTransport(Protocol):
 
     def current_frame(self) -> int: ...
 
-    def submit_intent(self, envelope: IntentEnvelope) -> IntentReceipt: ...
+    def submit_intent(self, envelope: IntentEnvelope, wait_s: float = 1.0) -> IntentReceipt: ...
+
+    def receipt(self, intent_id: str) -> Mapping[str, object] | IntentReceipt | None: ...
 
 
 class MemoryTransport:
@@ -66,7 +68,7 @@ class MemoryTransport:
     def current_frame(self) -> int:
         return self.frame
 
-    def submit_intent(self, envelope: IntentEnvelope) -> IntentReceipt:
+    def submit_intent(self, envelope: IntentEnvelope, wait_s: float = 1.0) -> IntentReceipt:
         with self._lock:
             self._receipt_count += 1
             receipt_id = f"receipt-{self._receipt_count}"
@@ -93,3 +95,6 @@ class MemoryTransport:
             self.accepted.append(envelope)
             self._accepted_ids.add(envelope.intent_id)
             return IntentReceipt(envelope.intent_id, True, self.frame, receipt_id)
+
+    def receipt(self, intent_id: str) -> IntentReceipt | None:
+        return None

@@ -152,7 +152,7 @@ class FakeProvisionEngine:
                                "status": "rejected" if reason else "accepted", "reason": reason, "frame": frame})
         return IntentReceipt(envelope.intent_id, reason is None, frame, f"fake-{envelope.intent_id}", reason)
 
-    def submit_intent(self, envelope) -> IntentReceipt:
+    def submit_intent(self, envelope, wait_s: float = 1.0) -> IntentReceipt:
         with self.lock:
             self._advance()
             frame = self.frame

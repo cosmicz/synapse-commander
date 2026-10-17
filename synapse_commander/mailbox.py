@@ -101,7 +101,17 @@ class MailboxTransport:
             if principal not in self._principal_observations: raise KeyError(principal)
             return self._principal_observations[principal]
         return self._observation
-    def receipt(self, intent_id: str) -> dict[str, Any] | None: self._read(); return self._receipts.get(intent_id)
+    def receipt(self, intent_id: str) -> dict[str, Any] | None:
+        """Return a delayed engine receipt without creating another attempt."""
+        # Use the same lock order as submit_intent: submit, then read.  A
+        # timed-out gateway request can therefore be recovered safely by a
+        # later GET, rather than inviting a duplicate semantic submission.
+        with self._submit_lock:
+            self._read()
+            receipt = self._receipts.get(intent_id)
+            if receipt is not None:
+                self._pending_receipts.pop(intent_id, None)
+            return receipt
     def events_since(self, seq: int, limit: int = 256) -> list[dict[str, Any]]: self._read(); return [e for e in self._events if int(e.get("seq", 0)) > seq][:limit]
     def submit_intent(self, envelope: IntentEnvelope, wait_s: float = 1.0) -> IntentReceipt:
         # Engine receipts identify semantic intents, not individual attempts.

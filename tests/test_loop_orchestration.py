@@ -151,7 +151,7 @@ class FakeEngine:
         with self.lock:
             self._emit("bye", {"reason": "quit"})
 
-    def submit_intent(self, envelope) -> IntentReceipt:
+    def submit_intent(self, envelope, wait_s: float = 1.0) -> IntentReceipt:
         with self.lock:
             self._advance()
             frame = self.frame

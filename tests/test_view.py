@@ -63,7 +63,7 @@ class ViewEngine:
                 "permitted_intents": [{"type": "TASK", "verbs": ["advance"]}, {"type": "MESSAGE"}],
                 "truncated": False, "omitted": 0}
 
-    def submit_intent(self, envelope) -> IntentReceipt:
+    def submit_intent(self, envelope, wait_s: float = 1.0) -> IntentReceipt:
         self.frame += 1
         effect = "order_started" if envelope.type == "TASK" else "message_sent"
         self._emit("effect", {"effect": effect, "intent_id": envelope.intent_id,

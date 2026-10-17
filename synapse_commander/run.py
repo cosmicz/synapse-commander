@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import datetime as _dt
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import secrets
@@ -65,7 +66,8 @@ class SmokeTransport(Protocol):
     def hello(self) -> dict[str, Any] | None: ...
     def current_frame(self) -> int: ...
     def observation_for(self, team: str, principal: str | None = None) -> Any: ...
-    def submit_intent(self, envelope: Any) -> Any: ...
+    def submit_intent(self, envelope: Any, wait_s: float = 1.0) -> Any: ...
+    def receipt(self, intent_id: str) -> Any: ...
     def events_since(self, seq: int, limit: int = 256) -> list[dict[str, Any]]: ...
     def close(self) -> None: ...
 
@@ -297,6 +299,7 @@ class SmokeConfig:
     client_timeout_s: float = 120.0
     client_poll_s: float = 0.25
     lock_wait_s: float = 1200.0
+    receipt_wait_s: float = 1.0
     mode: str = "scripted"            # scripted, agent, provision, world, view, or rescue
     rescue_mode: str = "scripted"     # rescue: scripted rehearsal or play (a person commands)
     control_port: int = 8090         # bonded: loopback control surface for the person's orders
@@ -414,6 +417,9 @@ def run_smoke(config: SmokeConfig, *,
         raise launch.LaunchError(f"{config.mode} mode needs a scenario table (--scenario)")
     if not config.rig_commit:
         raise launch.LaunchError("rig commit is required for the manifest")
+    if (not isinstance(config.receipt_wait_s, (int, float)) or isinstance(config.receipt_wait_s, bool)
+            or not math.isfinite(config.receipt_wait_s) or config.receipt_wait_s <= 0):
+        raise launch.LaunchError("receipt wait must be a positive finite number")
     app_commit, app_dirty = app or app_identity()
     if app_dirty and not config.allow_dirty:
         raise launch.LaunchError(f"application checkout has {app_dirty} modified files; commit first")
@@ -533,11 +539,10 @@ def run_smoke(config: SmokeConfig, *,
         recorder.run_start(0)
         principal_tokens = mint_principal_tokens(layout.run_dir, view_principals) if view_principals else None
         # The rendered client reads the mailbox once per drawn frame (a few per second),
-        # so its receipts can take seconds; the headless engine answers within one.
-        receipt_wait_s = 1.0 if presentation == "headless" else 10.0
+        # so its receipts can take seconds; preserve its 10 s minimum while
+        # allowing the run command to request a still longer bounded wait.
+        receipt_wait_s = config.receipt_wait_s if presentation == "headless" else max(config.receipt_wait_s, 10.0)
         transport = (transport_factory or _mailbox_factory)(mailbox_dir, run_id)
-        if transport_factory is None and receipt_wait_s != 1.0:
-            transport = ReceiptWait(transport, receipt_wait_s)
         client_http_timeout_s = 5.0 + receipt_wait_s
         ordered = OrderedLedger(recorder, transport)
         engine = (engine_factory or (lambda lay: launch.EngineProcess(artifacts, lay)))(layout)
@@ -560,7 +565,8 @@ def run_smoke(config: SmokeConfig, *,
         gateway = LoopbackGateway(transport, principal=AGENT_PRINCIPAL if agent else ("commander" if view or rescue else PRINCIPAL),
                                   team=TEAM, origin="agent" if agent else "scripted", ledger=ordered,
                                   scenario=config.scenario,
-                                  sessions=None if principal_tokens is None else gateway_sessions(principal_tokens))
+                                  sessions=None if principal_tokens is None else gateway_sessions(principal_tokens),
+                                  receipt_wait_s=receipt_wait_s)
         server = gateway.make_server(0)
         threading.Thread(target=server.serve_forever, name="gateway", daemon=True).start()
 
@@ -675,20 +681,6 @@ def run_smoke(config: SmokeConfig, *,
     verdict["error"] = error
     _finish(verdict, trace, ordered, ledger_path, layout, mode=config.mode)
     return verdict
-
-
-class ReceiptWait:
-    """Delegates to a transport but waits longer for each engine receipt."""
-
-    def __init__(self, transport: Any, wait_s: float) -> None:
-        self._transport = transport
-        self._wait_s = wait_s
-
-    def submit_intent(self, envelope: Any, wait_s: float | None = None) -> Any:
-        return self._transport.submit_intent(envelope, wait_s=self._wait_s if wait_s is None else wait_s)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._transport, name)
 
 
 def _mailbox_factory(mailbox_dir: Path, run_id: str) -> SmokeTransport:
