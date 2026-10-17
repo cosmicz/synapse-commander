@@ -79,7 +79,7 @@ class SmokeObservationTests(unittest.TestCase):
     def test_checked_in_rescue_baseline_projects_only_declared_public_expedition_data(self):
         source = engine_observation()
         source.update({
-            "scenario": {"id": "rescue_baseline", "version": "1-provisional", "waypoints": {"W1": [500, 0, 100]}},
+            "scenario": {"id": "rescue_baseline", "version": load_scenario("rescue_baseline")["version"], "waypoints": {"W1": [500, 0, 100]}},
             "roster": [
                 {"name": "S0", "def": "armflea", "controller": "escort_fixed_v1", "status": "in_contact", "unit_id": 71},
                 {"name": "M1", "def": "armck", "controller": "reasoner_small_v1", "status": "no_contact"},
@@ -100,7 +100,7 @@ class SmokeObservationTests(unittest.TestCase):
     def test_http_gateway_uses_selected_table_for_rescue_baseline_projection(self):
         source = engine_observation()
         source.update({
-            "scenario": {"id": "rescue_baseline", "version": "1-provisional", "waypoints": {"W1": [500, 0, 100]}},
+            "scenario": {"id": "rescue_baseline", "version": load_scenario("rescue_baseline")["version"], "waypoints": {"W1": [500, 0, 100]}},
             "roster": [{"name": "M1", "def": "armck", "controller": "reasoner_small_v1", "status": "no_contact"}],
             "reports": [{"kind": "distress", "asset": "M1", "position": [2400, 0, 1300], "observed_frame": -900, "age_frames": 900, "symptom": "no_heartbeat"}],
             "world_init": {"cause_hidden": "terrain_entrapment"},

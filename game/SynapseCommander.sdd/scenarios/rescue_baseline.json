@@ -1,7 +1,7 @@
 {
   "schema": "ScenarioTable/v1",
   "id": "rescue_baseline",
-  "version": "1-provisional",
+  "version": "2-provisional",
   "seed": 1017,
   "factory": {"name": "F0", "def": "armlab", "offset": [120, 120]},
   "bodies": 6,
@@ -14,10 +14,10 @@
   "commander": {"chip": "reasoner_large_v1"},
   "predeployed": [
     {"name": "S0", "def": "armflea", "controller": "escort_fixed_v1", "position": [300, -200], "state": "active", "contact": true},
-    {"name": "M1", "def": "armck", "controller": "reasoner_small_v1", "position": [2600, 1400], "state": "active", "contact": false, "health": 0.4},
-    {"name": "H0", "def": "armck", "controller": "escort_fixed_v1", "position": [2200, 1100], "state": "destroyed", "contact": false}
+    {"name": "M1", "def": "armck", "controller": "reasoner_small_v1", "position": [900, -3400], "state": "active", "contact": false, "health": 0.4},
+    {"name": "H0", "def": "armck", "controller": "escort_fixed_v1", "position": [750, -3000], "state": "destroyed", "contact": false}
   ],
-  "distress": {"asset": "M1", "last_known": {"position": [2400, 1300], "age_frames": 900}, "symptom": "no_heartbeat", "cause_hidden": "terrain_entrapment"},
+  "distress": {"asset": "M1", "last_known": {"position": [990, -3060], "age_frames": 900}, "symptom": "no_heartbeat", "cause_hidden": "terrain_entrapment"},
   "recovery_responses": ["relay", "rendezvous", "extract"],
   "waypoints": {"W1": [500, 0, 100]},
   "objective": {"type": "rescue_return", "target": "rescue_target_v1", "extraction": "extraction_v1"}
