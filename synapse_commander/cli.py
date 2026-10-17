@@ -104,7 +104,10 @@ def build_parser() -> argparse.ArgumentParser:
     rescue.add_argument("--call-budget", type=int, default=20, help="bonded: maximum model calls")
     rescue.add_argument("--call-timeout", type=float, default=60.0, help="bonded: seconds per model call")
     rescue.add_argument("--deadline", type=float, default=400.0, help="bonded/agents: wall seconds for the run")
-    rescue.add_argument("--control-port", type=int, default=8090, help="bonded: loopback control port")
+    rescue.add_argument("--control-port", type=int, default=8090, help="bonded/agents --orders: loopback control port")
+    rescue.add_argument("--orders", action="store_true",
+                        help="agents: accept a person's orders for the commander mind on the control port; each "
+                             "order is recorded as an operator intervention (the run is then assisted)")
     view = commands.add_parser(
         "run-view",
         help="two-principal scripted view seam: M1 acts locally and sends a bounded message",
@@ -130,7 +133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "run-rescue":
             extra = dict(mode="rescue", rescue_mode=args.rescue_mode, model=args.model, call_budget=args.call_budget,
                          call_timeout_s=args.call_timeout, agent_deadline_s=args.deadline,
-                         control_port=args.control_port)
+                         control_port=args.control_port, agents_orders=args.orders)
             args.scenario = args.scenario or "rescue_baseline"
         if args.command == "run-world":
             extra = dict(mode="world")

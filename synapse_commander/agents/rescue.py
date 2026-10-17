@@ -481,14 +481,23 @@ class AgentsRescue:
 
     def __init__(self, clients: dict[str, GatewayClient], routes: dict[str, Any], sink: Any, *,
                  on_decision: Callable[[dict[str, Any]], None] | None, call_budget: int,
-                 wall_deadline_s: float, poll_s: float = 0.5, sleep: Callable[[float], None] = time.sleep) -> None:
+                 wall_deadline_s: float, poll_s: float = 0.5, sleep: Callable[[float], None] = time.sleep,
+                 on_order: Callable[[str, int], None] | None = None, control_token: str | None = None,
+                 control_port: int = 8090, announce: Callable[[str], None] | None = None) -> None:
         from .embodied import LiveMind
         labels = {"commander": "mind_task", "job-1": "relay_move", "M1": "return_home"}
         principals = frozenset(clients)
         self.minds = {name: LiveMind(name, clients[name], routes[name], sink, principals=principals,
                                      on_decision=on_decision, call_budget=call_budget,
-                                     wall_deadline_s=wall_deadline_s, poll_s=poll_s, task_label=labels[name])
+                                     wall_deadline_s=wall_deadline_s, poll_s=poll_s, task_label=labels[name],
+                                     on_order=on_order if name == "commander" else None)
                       for name in clients}
+        # A person's orders, when enabled, reach the commander mind only; every mind stays live.
+        self.control = None
+        if on_order is not None and control_token is not None:
+            from ..control import ControlServer
+            self.control = ControlServer(self.minds["commander"], control_token, port=control_port)
+        self.announce = announce or (lambda _text: None)
         self.wall_deadline_s = wall_deadline_s
         self.sleep = sleep
         self.trace: dict[str, Any] = {"agents": True}
@@ -496,6 +505,9 @@ class AgentsRescue:
     def run(self) -> dict[str, Any]:
         for mind in self.minds.values():
             mind.start()
+        if self.control is not None:
+            self.control.start()
+            self.announce(f"order surface on 127.0.0.1:{self.control.server_port}")
         began = time.monotonic()
         try:
             while time.monotonic() - began < self.wall_deadline_s:
@@ -508,6 +520,8 @@ class AgentsRescue:
                     break
                 self.sleep(0.5)
         finally:
+            if self.control is not None:
+                self.control.close()
             self.trace["minds"] = {name: mind.stop() for name, mind in self.minds.items()}
         self.trace.setdefault("outcome", "not_reached")
         return self.trace

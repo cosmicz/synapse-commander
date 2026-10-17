@@ -310,7 +310,8 @@ class SmokeConfig:
     receipt_wait_s: float = 1.0
     mode: str = "scripted"            # scripted, agent, provision, world, view, or rescue
     rescue_mode: str = "scripted"     # rescue: scripted rehearsal or play (a person commands)
-    control_port: int = 8090         # bonded: loopback control surface for the person's orders
+    control_port: int = 8090         # bonded, or agents with orders: loopback control surface
+    agents_orders: bool = False      # agents: accept a person's orders for the commander mind
     play_stdin: Any = None
     play_stdout: Any = None
     engine_binary: str = launch.HEADLESS_BINARY  # or "spring", the rendered client
@@ -1322,8 +1323,27 @@ def make_agents(config: SmokeConfig, layout: launch.RunLayout, ordered: OrderedL
         with lock, decisions_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
+    on_order = token = None
+    if config.agents_orders:
+        token = secrets.token_urlsafe(32)
+        token_path = layout.run_dir / "control_token"
+        token_path.write_text(token + "\n", encoding="utf-8")
+        token_path.chmod(0o600)
+        orders_path = layout.run_dir / "orders.jsonl"
+
+        def on_order(text: str, generation: int) -> None:
+            # Raw words stay private; the ledger gets the intervention and a hash (the run becomes assisted).
+            with orders_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"order_id": generation, "text": text, "wall_ns": time.monotonic_ns()}) + "\n")
+            ordered.record("OPERATOR_INTERVENTION", sim_frame=ordered.transport.current_frame(), origin="operator",
+                           payload={"action": "human_order" if text else "pause", "order_id": generation,
+                                    "text_sha256": sha256_text(text), "principal": "commander"})
+    out = config.play_stdout or sys.stdout
     return AgentsRescue(clients, routes, ordered, on_decision=on_decision, call_budget=config.call_budget,
-                        wall_deadline_s=config.agent_deadline_s, poll_s=config.client_poll_s)
+                        wall_deadline_s=config.agent_deadline_s, poll_s=config.client_poll_s,
+                        on_order=on_order, control_token=token, control_port=config.control_port,
+                        announce=lambda text: (out.write(text + "; token file control_token in the run directory\n"),
+                                               out.flush()))
 
 
 def make_bonded(config: SmokeConfig, layout: launch.RunLayout, ordered: OrderedLedger, transport: Any,

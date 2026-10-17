@@ -337,3 +337,45 @@ class LuaRulesErrorTests(unittest.TestCase):
             self.assertEqual(len(found), 2)
             self.assertTrue(all("LuaRules" in line for line in found))
             self.assertEqual(luarules_errors(Path(tmp) / "missing.log"), [])
+
+
+class AgentsOrdersTests(unittest.TestCase):
+    def test_orders_reach_only_the_commander_mind_and_are_interventions(self):
+        import re
+        import time
+        import urllib.request
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            engine = RescueEngine("agents-orders", move_to=True)
+            printed = io.StringIO()
+            cfg = SmokeConfig(engine_dir=out, data_dir=out, out_dir=out, run_id="agents-orders", rig_commit="b" * 40,
+                              scenario="rescue_baseline", mode="rescue", rescue_mode="agents", model="fake-model",
+                              client_timeout_s=10, client_poll_s=0.05, agent_deadline_s=4, call_budget=5,
+                              control_port=0, agents_orders=True, play_stdout=printed)
+            result = {}
+            thread = threading.Thread(target=lambda: result.update(verdict=run_smoke(
+                cfg, transport_factory=lambda _p, _r: engine, engine_factory=lambda _l: engine,
+                app=("a" * 40, 0), engine_scan=lambda _p: [], model_route=WaitingModel())))
+            thread.start()
+            port = None
+            for _ in range(100):
+                found = re.search(r"127\.0\.0\.1:(\d+)", printed.getvalue())
+                if found:
+                    port = int(found.group(1))
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(port, printed.getvalue())
+            token = (out / "agents-orders" / "control_token").read_text().strip()
+            request = urllib.request.Request(f"http://127.0.0.1:{port}/orders", method="POST",
+                                             data=json.dumps({"text": "relay first, then extract"}).encode(),
+                                             headers={"Content-Type": "application/json",
+                                                      "Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(request, timeout=5) as response:
+                self.assertEqual(response.status, 202)
+            thread.join(timeout=30)
+            records = [json.loads(line) for line in (out / "agents-orders" / "ledger.jsonl").read_text().splitlines()]
+            interventions = [r for r in records if r["kind"] == "OPERATOR_INTERVENTION"]
+            self.assertEqual(len(interventions), 1)
+            self.assertEqual(interventions[0]["payload"]["principal"], "commander")
+            self.assertNotIn("relay first, then extract", (out / "agents-orders" / "ledger.jsonl").read_text())
+            self.assertTrue(result["verdict"]["checks"]["ledger_verified"]["ok"], result["verdict"]["checks"]["ledger_verified"])
