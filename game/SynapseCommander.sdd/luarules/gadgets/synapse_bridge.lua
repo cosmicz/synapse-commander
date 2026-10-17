@@ -12,8 +12,10 @@ local Json = Json or VFS.Include("common/luaUtilities/json.lua")
 local PREFIX, MAX_LINE = "SYN0 ", 4096
 
 if gadgetHandler:IsSyncedCode() then
-  local TEAM0, OBS_INTERVAL, MAX_OBSERVATIONS = 0, 15, 16
-  local observations, receipts, pending, rate = {}, {}, {}, {}
+  -- Keep enough ids to distinguish a stale observation from an unknown one.
+  -- The public observation itself remains bounded; this is reducer-only state.
+  local TEAM0, OBS_INTERVAL, MAX_OBSERVATIONS = 0, 15, 128
+  local observations, seen, pending, rate = {}, {}, {}, {}
   local waypoint
 
   local function out(kind, body)
@@ -41,7 +43,7 @@ if gadgetHandler:IsSyncedCode() then
     return false
   end
 
-  local function emit_receipt(intent, status, reason, cache)
+  local function emit_receipt(intent, status, reason)
     local id = type(intent) == "table" and intent.intent_id or nil
     local body = {
       schema = "IntentReceipt/v1",
@@ -52,7 +54,6 @@ if gadgetHandler:IsSyncedCode() then
       reason = reason,
       frame = Spring.GetGameFrame(),
     }
-    if cache and type(id) == "string" and #id > 0 then receipts[id] = body end
     out("receipt", body)
   end
 
@@ -153,32 +154,38 @@ if gadgetHandler:IsSyncedCode() then
       emit_receipt(intent, "rejected", "schema_invalid")
       return true
     end
-    if receipts[id] then out("receipt", receipts[id]); return true end
-    if has_raw_engine(intent, 1) then emit_receipt(intent, "rejected", "raw_engine_forbidden", true); return true end
+    if seen[id] then
+      -- A reused id is a distinct rejected attempt; never replay an accepted
+      -- receipt, because that would misrepresent its causal outcome.
+      emit_receipt(intent, "rejected", "duplicate_intent_id")
+      return true
+    end
+    seen[id] = true
+    if has_raw_engine(intent, 1) then emit_receipt(intent, "rejected", "raw_engine_forbidden"); return true end
     local _, _, spectator, teamID = Spring.GetPlayerInfo(playerID, false)
-    if spectator or tonumber(intent.team) ~= teamID then emit_receipt(intent, "rejected", "wrong_team", true); return true end
-    if intent.type ~= "TASK" then emit_receipt(intent, "rejected", "unsupported_type", true); return true end
+    if spectator or tonumber(intent.team) ~= teamID then emit_receipt(intent, "rejected", "wrong_team"); return true end
+    if intent.type ~= "TASK" then emit_receipt(intent, "rejected", "unsupported_type"); return true end
     local payload = intent.payload
     if payload.verb ~= "advance" or type(payload.args) ~= "table" or next(payload.args) ~= nil then
-      emit_receipt(intent, "rejected", "verb_not_supported", true); return true
+      emit_receipt(intent, "rejected", "verb_not_supported"); return true
     end
     local unitID = tonumber(payload.unit or payload.unit_id)
     if not unitID or unitID % 1 ~= 0 or not Spring.ValidUnitID(unitID) then
-      emit_receipt(intent, "rejected", "unknown_unit", true); return true
+      emit_receipt(intent, "rejected", "unknown_unit"); return true
     end
-    if Spring.GetUnitTeam(unitID) ~= teamID then emit_receipt(intent, "rejected", "not_owned", true); return true end
+    if Spring.GetUnitTeam(unitID) ~= teamID then emit_receipt(intent, "rejected", "not_owned"); return true end
     local frame = Spring.GetGameFrame()
     local observation_frame = observation_known(teamID, intent.based_on_observation_id)
-    if not observation_frame then emit_receipt(intent, "rejected", "unknown_observation", true); return true end
-    if frame - observation_frame > 900 then emit_receipt(intent, "rejected", "stale_observation", true); return true end
+    if not observation_frame then emit_receipt(intent, "rejected", "unknown_observation"); return true end
+    if frame - observation_frame > 900 then emit_receipt(intent, "rejected", "stale_observation"); return true end
     if type(intent.expires_at_frame) ~= "number" or intent.expires_at_frame < frame then
-      emit_receipt(intent, "rejected", "expired", true); return true
+      emit_receipt(intent, "rejected", "expired"); return true
     end
-    if not use_token(teamID, frame) or pending[unitID] then emit_receipt(intent, "rejected", "rate_limited", true); return true end
+    if not use_token(teamID, frame) or pending[unitID] then emit_receipt(intent, "rejected", "rate_limited"); return true end
     local x, _, z = Spring.GetUnitPosition(unitID)
     Spring.GiveOrderToUnit(unitID, CMD.MOVE, waypoint, 0)
     pending[unitID] = { intent_id = id, last_x = x, last_z = z }
-    emit_receipt(intent, "accepted", nil, true)
+    emit_receipt(intent, "accepted", nil)
     out("effect", { schema = "EffectEvent/v1", effect = "order_started", frame = frame, unit_id = unitID, team = teamID, intent_id = id, detail = { target = waypoint } })
     return true
   end
@@ -261,13 +268,17 @@ else
 
   function gadget:Update()
     if quit then quit = false; Spring.SendCommands("quitforce"); return end
+    -- Drain already-complete buffered lines even when no later append wakes us.
+    -- This matters after the per-Update eight-record forwarding cap.
+    local chunk = ""
     local file = io.open(INBOX, "rb")
-    if not file then return end
-    file:seek("set", offset)
-    local chunk = file:read(65536)
-    file:close()
-    if not chunk or #chunk == 0 then return end
-    offset = offset + #chunk
+    if file then
+      file:seek("set", offset)
+      chunk = file:read(65536) or ""
+      file:close()
+      offset = offset + #chunk
+    end
+    if #partial == 0 and #chunk == 0 then return end
     local buffer, forwarded = partial .. chunk, 0
     if discarding then
       local newline = buffer:find("\n", 1, true)
