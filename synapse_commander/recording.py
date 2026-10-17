@@ -101,6 +101,11 @@ MANIFEST_FIELDS: dict[str, type | tuple[type, ...]] = {
     "required_decisions": list,
 }
 _COMMIT = re.compile(r"^[0-9a-f]{7,64}$")
+_PRINCIPAL = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+PRINCIPAL_SOURCES = frozenset({"scripted", "agent"})
+# With declared principals, every record of these kinds names the principal
+# whose view or authority it belongs to (for an EFFECT: the viewer).
+PRINCIPAL_KINDS = frozenset({OBSERVATION, INFERENCE, INTENT_SUBMITTED, INTENT_RECEIPT, EFFECT})
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SECRET_KEY = re.compile(
     r"(^|_)(api_?key|secret|password|passwd|credentials?|authorization|"
@@ -244,6 +249,18 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         raise LedgerError("invalid_manifest", "fps must be positive")
     if not _one_of(manifest["presentation"], ("headless", "rendered")):
         raise LedgerError("invalid_manifest", "presentation must be headless or rendered")
+    principals = manifest["principals"]
+    if not all(isinstance(p, str) and p for p in principals) or len(set(principals)) != len(principals):
+        raise LedgerError("invalid_manifest", "principals must be unique non-empty strings")
+    sources = manifest.get("principal_sources")
+    if sources is not None:
+        # Per-principal views (rah26-mmn): the declared source of every
+        # principal; the evidence, not this declaration, decides its label.
+        if not isinstance(sources, Mapping) or set(sources) != set(principals) or not 1 <= len(sources) <= 8:
+            raise LedgerError("invalid_manifest", "principal_sources must name exactly the manifest principals")
+        for name, source in sources.items():
+            if not _PRINCIPAL.match(name) or not _one_of(source, PRINCIPAL_SOURCES):
+                raise LedgerError("invalid_manifest", f"principal {name!r} needs a source of scripted or agent")
     labels = set()
     for decision in manifest["required_decisions"]:
         if not isinstance(decision, Mapping) or not isinstance(decision.get("label"), str):
@@ -256,6 +273,11 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
             raise LedgerError("invalid_manifest", "after_scenario_event must be a string")
         if decision.get("type") is not None and not isinstance(decision["type"], str):
             raise LedgerError("invalid_manifest", "required decision type must be a string")
+        owner = decision.get("principal")
+        if sources is not None and len(sources) > 1 and not _one_of(owner, sources):
+            raise LedgerError("invalid_manifest", "with several principals every required decision names its principal")
+        if owner is not None and not _one_of(owner, sources or principals):
+            raise LedgerError("invalid_manifest", "required decision names an unknown principal")
     scan_sensitive(manifest, "manifest")
 
 
@@ -272,6 +294,7 @@ class _LedgerState:
         self.last_frame = -1
         self.last_wall = -1
         self.receipted: set[str] = set()  # submission event ids that have a receipt
+        self.observation_principals: dict[str, str] = {}  # observation_id -> principal
 
     def accept(self, record: Mapping[str, Any]) -> None:
         if not isinstance(record, Mapping):
@@ -343,6 +366,7 @@ class _LedgerState:
             if not _one_of(origin, KIND_ORIGINS[kind]):
                 raise LedgerError("invalid_origin", f"seq {seq} {kind} from {origin!r}")
             self._check_kind(kind, payload, causes, seq)
+            self._check_principal(kind, payload, causes, seq, record["wall_ns"])
 
         stored = dict(record)
         if kind == INTENT_RECEIPT:
@@ -421,6 +445,43 @@ class _LedgerState:
             if not isinstance(payload.get("action"), str):
                 raise LedgerError("invalid_payload", f"seq {seq} intervention action")
 
+    def _check_principal(self, kind: str, payload: dict[str, Any], causes: list[str], seq: int, wall: int) -> None:
+        """With declared principals, keep each principal's view and authority separate."""
+        sources = (self.manifest or {}).get("principal_sources")
+        if sources is None or kind not in PRINCIPAL_KINDS:
+            return
+        principal = payload.get("principal")
+        if not _one_of(principal, sources):
+            raise LedgerError("unknown_principal", f"seq {seq} {kind} principal {principal!r}")
+        # received_wall_ns is the gateway's receive time in this ledger's own
+        # run-relative monotonic domain (Recorder.now_ns), so never after the record.
+        stamp = payload.get("received_wall_ns")
+        if stamp is not None and (not isinstance(stamp, int) or isinstance(stamp, bool) or not 0 <= stamp <= wall):
+            raise LedgerError("invalid_payload", f"seq {seq} received_wall_ns must lie in [0, record wall_ns]")
+        # client is a bounded, non-secret label for the client session, never its bearer token.
+        if payload.get("client") is not None and not (isinstance(payload["client"], str) and _PRINCIPAL.match(payload["client"])):
+            raise LedgerError("invalid_payload", f"seq {seq} client must be a short label")
+        if kind in (INFERENCE, INTENT_SUBMITTED):
+            # A decision may rest only on what its own principal could see.
+            for cited in self._cited(causes, {OBSERVATION, INFERENCE}):
+                if cited["payload"].get("principal") != principal:
+                    raise LedgerError("cross_principal_citation",
+                                      f"seq {seq} {principal} cites {cited['payload'].get('principal')}'s {cited['event_id']}")
+        elif kind == INTENT_RECEIPT:
+            submitted = self._cited(causes, {INTENT_SUBMITTED})[0]
+            if submitted["payload"].get("principal") != principal:
+                raise LedgerError("principal_mismatch", f"seq {seq} receipt for another principal's submission")
+            # Citing another principal's observation is a valid probe only when refused.
+            owner = self.observation_principals.get(submitted["payload"]["based_on_observation_id"])
+            if payload["status"] == "accepted" and owner is not None and owner != principal:
+                raise LedgerError("cross_principal_citation",
+                                  f"seq {seq} accepted {principal} intent based on {owner}'s observation")
+        elif kind == OBSERVATION:
+            # A re-delivered observation keeps its id; an id never changes owner.
+            owner = self.observation_principals.setdefault(payload["observation_id"], principal)
+            if owner != principal:
+                raise LedgerError("observation_owner_conflict", f"seq {seq} {payload['observation_id']}")
+
     @staticmethod
     def _no_rejected_receipt(cited: list[dict[str, Any]], seq: int) -> None:
         for record in cited:
@@ -484,6 +545,10 @@ class Recorder:
     def manifest(self) -> dict[str, Any]:
         assert self._state.manifest is not None
         return dict(self._state.manifest)
+
+    def now_ns(self) -> int:
+        """Current time in this ledger's run-relative monotonic domain, for receive stamps."""
+        return self._clock() - self._epoch
 
     def run_start(self, sim_frame: int = 0) -> str:
         return self._append(RUN_START, origin="recorder", sim_frame=sim_frame, payload={}, causes=(), sync=True)
@@ -581,6 +646,8 @@ class Verification:
     evidence_limits: list[str] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
     outcome: dict[str, Any] | None = None
+    principal_classifications: dict[str, str] = field(default_factory=dict)
+    principals: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -592,6 +659,8 @@ class Verification:
             "evidence_limits": self.evidence_limits,
             "counts": self.counts,
             "outcome": self.outcome,
+            "principal_classifications": self.principal_classifications,
+            "principals": self.principals,
             "run_id": self.manifest.get("run_id") if self.manifest else None,
         }
 
@@ -626,6 +695,9 @@ def verify_ledger(path: str | os.PathLike[str]) -> Verification:
         return _failed(state, "truncated", f"line {len(lines) + 1}: partial record without newline")
     if not state.ended:
         return _failed(state, "incomplete", "no RUN_END trailer; the capture may be truncated")
+    problem = _principal_problem(state)
+    if problem:
+        return _failed(state, "invalid", problem)
     result = Verification(True, "complete", records=state.records, manifest=state.manifest)
     result.outcome = state.records[-1]["payload"]["outcome"]
     _classify(result)
@@ -638,6 +710,26 @@ def replay(path: str | os.PathLike[str]) -> list[dict[str, Any]]:
     if not result.ok:
         raise LedgerError(f"replay_refused_{result.status}", "; ".join(result.errors))
     return result.records
+
+
+def _principal_problem(state: _LedgerState) -> str | None:
+    """End-of-ledger check: a foreign-cited intent must have been refused."""
+    if (state.manifest or {}).get("principal_sources") is None:
+        return None
+    answered = {}
+    for record in state.records:
+        if record["kind"] == INTENT_RECEIPT:
+            for cause in record["causes"]:
+                answered[cause] = record["payload"]["status"]
+    for record in state.records:
+        if record["kind"] != INTENT_SUBMITTED:
+            continue
+        payload = record["payload"]
+        owner = state.observation_principals.get(payload["based_on_observation_id"])
+        if owner is not None and owner != payload["principal"] and answered.get(record["event_id"]) != "rejected":
+            return (f"cross_principal_citation: {record['event_id']} {payload['principal']} intent based on "
+                    f"{owner}'s observation was {answered.get(record['event_id'], 'never answered')}")
+    return None
 
 
 def _failed(state: _LedgerState, status: str, error: str) -> Verification:
@@ -656,7 +748,6 @@ def _classify(result: Verification) -> None:
     interventions = [r for r in records if r["kind"] == OPERATOR_INTERVENTION]
     interventions += [r for r in records if r["kind"] == CLOCK_MODE and not r["payload"]["declared"]]
     intents = [r for r in records if r["kind"] == INTENT_SUBMITTED]
-    origins = {r["origin"] for r in intents}
     # Keyed by the submission event each receipt answers, so a repeated
     # intent_id attempt never borrows another attempt's acceptance.
     receipts = {c: r for r in records if r["kind"] == INTENT_RECEIPT
@@ -679,25 +770,38 @@ def _classify(result: Verification) -> None:
         return found
 
     chains = {r["event_id"]: live_chain(r) for r in intents if r["origin"] == "agent"}
-    unlinked_agent = [event_id for event_id, chain in chains.items() if not chain]
 
-    if interventions:
-        classification = "assisted"
-    elif "scripted" in origins:
-        classification = "scripted_replay"
-    elif unlinked_agent:
-        classification = "unattributed"
-    elif {"agent", "human"} <= origins:
-        classification = "centaur"
-    elif origins == {"human"}:
-        classification = "human_only"
-    elif origins == {"agent"}:
-        met = _required_decisions_met(manifest, records, intents, receipts, chains)
-        classification = "agent_only" if met else "agent_partial"
-    else:
-        classification = "scripted_fixture"
+    def label(subset: list[dict[str, Any]], decisions: list[dict[str, Any]]) -> str:
+        origins = {r["origin"] for r in subset}
+        if interventions:
+            return "assisted"
+        if "scripted" in origins:
+            return "scripted_replay"
+        if any(not chains[r["event_id"]] for r in subset if r["origin"] == "agent"):
+            return "unattributed"
+        if {"agent", "human"} <= origins:
+            return "centaur"
+        if origins == {"human"}:
+            return "human_only"
+        if origins == {"agent"}:
+            met = _required_decisions_met(decisions, records, subset, receipts, chains)
+            return "agent_only" if met else "agent_partial"
+        return "scripted_fixture"
+
+    required = manifest.get("required_decisions") or []
+    classification = label(intents, required)
+    sources = manifest.get("principal_sources")
+    if sources is not None:
+        # Every principal is labelled from its own intents and decisions; a
+        # decision without a principal belongs to the sole principal.
+        for name in sorted(sources):
+            mine = [r for r in intents if r["payload"]["principal"] == name]
+            decisions = [d for d in required if d.get("principal", name if len(sources) == 1 else None) == name]
+            result.principal_classifications[name] = label(mine, decisions)
+            result.principals[name] = _principal_summary(name, records, mine, receipts)
     result.classification = classification
-    result.autonomous = classification == "agent_only"
+    result.autonomous = classification == "agent_only" and all(
+        c == "agent_only" for c in result.principal_classifications.values())
 
     limits = []
     if manifest.get("presentation") == "headless":
@@ -715,14 +819,43 @@ def _classify(result: Verification) -> None:
     for intent_id in sorted(i for i, n in accepted.items() if n > 1):
         # Recorded faithfully rather than refused; the dispatcher should not do this.
         limits.append(f"intent_id {intent_id} accepted more than once")
+    for name, declared in sorted((sources or {}).items()):
+        got = result.principal_classifications[name]
+        if (declared == "agent") != (got == "agent_only"):
+            # The declaration never upgrades a label; the disagreement is reported.
+            limits.append(f"principal {name} declared {declared} but its evidence classifies as {got}")
     limits.append("hash chain detects accidental corruption, not deliberate forgery")
     result.evidence_limits = limits
 
 
-def _required_decisions_met(manifest: Mapping[str, Any], records: list[dict[str, Any]],
+def _principal_summary(name: str, records: list[dict[str, Any]], intents: list[dict[str, Any]],
+                       receipts: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
+    """Counts and observation-to-receive latency for one principal's stream."""
+    observations = {r["payload"]["observation_id"]: r for r in records
+                    if r["kind"] == OBSERVATION and r["payload"]["principal"] == name}
+    latencies = []
+    for intent in intents:
+        seen = observations.get(intent["payload"]["based_on_observation_id"])
+        if seen is not None:
+            received = intent["payload"].get("received_wall_ns", intent["wall_ns"])
+            latencies.append(max(0, received - seen["wall_ns"]) / 1e9)
+    latencies.sort()
+    median = None
+    if latencies:
+        middle = len(latencies) // 2
+        median = latencies[middle] if len(latencies) % 2 else (latencies[middle - 1] + latencies[middle]) / 2
+    return {
+        "observations": sum(1 for r in records if r["kind"] == OBSERVATION and r["payload"]["principal"] == name),
+        "effects": sum(1 for r in records if r["kind"] == EFFECT and r["payload"]["principal"] == name),
+        "intents": len(intents),
+        "accepted": sum(1 for r in intents if receipts.get(r["event_id"], {}).get("payload", {}).get("status") == "accepted"),
+        "decision_latency_s": {"samples": len(latencies), "median": median},
+    }
+
+
+def _required_decisions_met(required: list[dict[str, Any]], records: list[dict[str, Any]],
                             intents: list[dict[str, Any]], receipts: Mapping[str, dict[str, Any]],
                             chains: Mapping[str, list[dict[str, Any]]]) -> bool:
-    required = manifest.get("required_decisions") or []
     if not required:
         return False
     for decision in required:

@@ -1006,6 +1006,239 @@ class Classification(LedgerCase):
         self.assertEqual(self.classify().classification, "agent_partial")
 
 
+TWO = dict(principals=["commander", "M1"], principal_sources={"commander": "scripted", "M1": "scripted"})
+
+
+class PrincipalStreams(LedgerCase):
+    """rah26-mmn per-principal views: streams, citations, labels (rah26-b3i)."""
+
+    def obs(self, r, principal, obs_id, frame=0):
+        return r.record(rec.OBSERVATION, sim_frame=frame, origin="gateway",
+                        payload={"observation_id": obs_id, "team": "team1", "principal": principal})
+
+    def intent(self, r, principal, intent_id, based_on, causes, frame=0, origin="scripted", decision=None, **extra):
+        payload = {"intent_id": intent_id, "type": "TASK", "principal": principal, "based_on_observation_id": based_on, **extra}
+        if decision:
+            payload["decision"] = decision
+        return r.record(rec.INTENT_SUBMITTED, sim_frame=frame, origin=origin, payload=payload, causes=causes)
+
+    def receipt(self, r, principal, intent_id, submitted, status="accepted", frame=1, **extra):
+        payload = {"intent_id": intent_id, "status": status, "principal": principal, **extra}
+        return r.record(rec.INTENT_RECEIPT, sim_frame=frame, origin="gateway", payload=payload, causes=[submitted])
+
+    def inference(self, r, principal, inference_id, observation, frame=0):
+        return r.record(rec.INFERENCE, sim_frame=frame, origin="agent",
+                        payload={"inference_id": inference_id, "live": True, "model_id": MODEL, "principal": principal},
+                        causes=[observation])
+
+    def two_streams(self, end=True, **overrides):
+        r = self.recorder(**{**TWO, **overrides})
+        r.run_start(0)
+        oc = self.obs(r, "commander", "obs-commander-0")
+        om = self.obs(r, "M1", "obs-M1-0")
+        ic = self.intent(r, "commander", "c1", "obs-commander-0", [oc])
+        rc = self.receipt(r, "commander", "c1", ic)
+        r.record(rec.EFFECT, sim_frame=2, origin="engine", payload={"type": "order_started", "principal": "commander"}, causes=[rc])
+        im = self.intent(r, "M1", "m1", "obs-M1-0", [om], frame=2)
+        rm = self.receipt(r, "M1", "m1", im, frame=2)
+        r.record(rec.EFFECT, sim_frame=2, origin="engine", payload={"type": "unit_moved", "principal": "M1"}, causes=[rm])
+        if end:
+            r.run_end(3, {})
+        return r, {"oc": oc, "om": om}
+
+    def refused(self, code, fn):
+        with self.assertRaises(LedgerError) as ctx:
+            fn()
+        self.assertEqual(ctx.exception.code, code)
+
+    def test_two_streams_verify_with_separate_labels(self):
+        self.two_streams()
+        result = verify_ledger(self.path)
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(result.principal_classifications, {"M1": "scripted_replay", "commander": "scripted_replay"})
+        self.assertFalse(result.autonomous)
+        self.assertEqual(result.principals["M1"]["observations"], 1)
+        self.assertEqual(result.principals["commander"]["accepted"], 1)
+        self.assertEqual(result.principals["M1"]["effects"], 1)
+        self.assertEqual(result.summary()["principal_classifications"]["commander"], "scripted_replay")
+
+    def test_single_principal_ledgers_are_unchanged(self):
+        self.write_run()
+        result = verify_ledger(self.path)
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(result.principal_classifications, {})
+        self.assertEqual(result.classification, "scripted_replay")
+
+    def test_every_view_record_names_a_declared_principal(self):
+        r, _ = self.two_streams(end=False)
+        self.refused("unknown_principal", lambda: r.record(rec.OBSERVATION, sim_frame=3, origin="gateway",
+                                                           payload={"observation_id": "obs-x", "team": "team1"}))
+        self.refused("unknown_principal", lambda: self.obs(r, "M2", "obs-M2-3", frame=3))
+        r.close()
+
+    def test_receipt_must_belong_to_its_submissions_principal(self):
+        r, ids = self.two_streams(end=False)
+        sub = self.intent(r, "M1", "m2", "obs-M1-0", [ids["om"]], frame=3)
+        self.refused("principal_mismatch", lambda: self.receipt(r, "commander", "m2", sub, frame=3))
+        r.close()
+
+    def test_inference_may_cite_only_its_principals_observations(self):
+        r, ids = self.two_streams(end=False)
+        self.refused("cross_principal_citation", lambda: self.inference(r, "M1", "inf-x", ids["oc"], frame=3))
+        r.close()
+
+    def test_intent_causes_may_cite_only_its_principals_records(self):
+        r, ids = self.two_streams(end=False)
+        self.refused("cross_principal_citation",
+                     lambda: self.intent(r, "commander", "c-x", "obs-commander-0", [ids["om"]], frame=3))
+        r.close()
+
+    def test_refused_foreign_citation_is_valid_probe_evidence(self):
+        # The mmn 6d probe: the commander cites M1's observation, uncaused, and is refused.
+        r, _ = self.two_streams(end=False)
+        probe = self.intent(r, "commander", "c-probe", "obs-M1-0", [], frame=3)
+        self.receipt(r, "commander", "c-probe", probe, status="rejected", reason_code="unknown_observation", frame=3)
+        r.run_end(4, {})
+        result = verify_ledger(self.path)
+        self.assertTrue(result.ok, result.errors)
+
+    def test_accepted_foreign_citation_is_refused_and_invalidates(self):
+        r, _ = self.two_streams(end=False)
+        probe = self.intent(r, "commander", "c-probe", "obs-M1-0", [], frame=3)
+        self.refused("cross_principal_citation", lambda: self.receipt(r, "commander", "c-probe", probe, frame=3))
+        self.receipt(r, "commander", "c-probe", probe, status="rejected", frame=3)
+        r.run_end(4, {})
+        # A rewrite that turns the refusal into an acceptance must not verify.
+        def accept(rs):
+            for record in rs:
+                if record["kind"] == rec.INTENT_RECEIPT and record["payload"]["intent_id"] == "c-probe":
+                    record["payload"]["status"] = "accepted"
+            return rs
+        self.rewrite(accept)
+        result = verify_ledger(self.path)
+        self.assertFalse(result.ok)
+        self.assertIn("cross_principal_citation", result.errors[0])
+        self.assertIsNone(result.classification)
+
+    def test_unanswered_foreign_citation_invalidates_at_end(self):
+        r, _ = self.two_streams(end=False)
+        self.intent(r, "commander", "c-probe", "obs-M1-0", [], frame=3)
+        r.run_end(4, {})
+        result = verify_ledger(self.path)
+        self.assertFalse(result.ok)
+        self.assertIn("never answered", result.errors[0])
+
+    def test_rewritten_cross_citations_fail_verification(self):
+        for kind in (rec.INFERENCE, rec.INTENT_SUBMITTED):
+            with self.subTest(kind=kind):
+                self.path.unlink(missing_ok=True)
+                r, ids = self.two_streams(end=False)
+                inf = self.inference(r, "M1", "inf-1", ids["om"], frame=3)
+                sub = self.intent(r, "M1", "m-inf", "obs-M1-0", [inf], frame=3, origin="agent")
+                self.receipt(r, "M1", "m-inf", sub, frame=3)
+                r.run_end(4, {})
+
+                def cross(rs, kind=kind):
+                    commander_obs = next(x["event_id"] for x in rs if x["kind"] == rec.OBSERVATION
+                                         and x["payload"]["principal"] == "commander")
+                    for record in rs:
+                        if record["kind"] == kind and record["payload"]["principal"] == "M1" and \
+                                (kind == rec.INFERENCE or record["payload"]["intent_id"] == "m-inf"):
+                            record["causes"] = [commander_obs]
+                    return rs
+                self.rewrite(cross)
+                result = verify_ledger(self.path)
+                self.assertFalse(result.ok)
+                self.assertIn("cross_principal_citation", result.errors[0])
+
+    def test_an_observation_id_never_changes_owner(self):
+        r, _ = self.two_streams(end=False)
+        self.obs(r, "commander", "obs-commander-0", frame=3)  # re-delivery is fine
+        self.refused("observation_owner_conflict", lambda: self.obs(r, "M1", "obs-commander-0", frame=3))
+        r.close()
+
+    def test_receive_stamps_and_client_labels_are_bounded(self):
+        r, ids = self.two_streams(end=False)
+        late = r.now_ns() + 10 ** 9
+        self.refused("invalid_payload", lambda: self.intent(r, "M1", "m-late", "obs-M1-0", [ids["om"]], frame=3, received_wall_ns=late))
+        self.refused("invalid_payload", lambda: self.intent(r, "M1", "m-bool", "obs-M1-0", [ids["om"]], frame=3, received_wall_ns=True))
+        self.refused("invalid_payload", lambda: self.intent(r, "M1", "m-tok", "obs-M1-0", [ids["om"]], frame=3, client="x" * 200))
+        ok = self.intent(r, "M1", "m-ok", "obs-M1-0", [ids["om"]], frame=3, received_wall_ns=r.now_ns(), client="session-m1")
+        self.assertTrue(ok)
+        r.close()
+
+    def test_latency_uses_receive_stamps_against_own_observation(self):
+        r = self.recorder(**TWO)
+        r.run_start(0)
+        om = self.obs(r, "M1", "obs-M1-0")
+        for i in range(3):
+            stamp = r.now_ns()
+            sub = self.intent(r, "M1", f"m{i}", "obs-M1-0", [om], received_wall_ns=stamp)
+            self.receipt(r, "M1", f"m{i}", sub, frame=0)
+        oc = self.obs(r, "commander", "obs-commander-0")
+        self.receipt(r, "commander", "c1", self.intent(r, "commander", "c1", "obs-commander-0", [oc]), frame=0)
+        r.run_end(2, {})
+        latency = verify_ledger(self.path).principals["M1"]["decision_latency_s"]
+        self.assertEqual(latency["samples"], 3)
+        self.assertGreater(latency["median"], 0)
+
+    def test_manifest_principal_declarations_are_exact(self):
+        with self.assertRaises(LedgerError):
+            rec.validate_manifest(manifest(principals=["commander", "M1"], principal_sources={"commander": "scripted"}))
+        with self.assertRaises(LedgerError):
+            rec.validate_manifest(manifest(principals=["commander", "commander"]))
+        with self.assertRaises(LedgerError):
+            rec.validate_manifest(manifest(**TWO, required_decisions=[{"label": "x"}]))
+        with self.assertRaises(LedgerError):
+            rec.validate_manifest(manifest(principals=["M1"], principal_sources={"M1": "agent_only"}))
+        rec.validate_manifest(manifest(**TWO, required_decisions=[{"label": "x", "principal": "M1"}]))
+
+    def agent_run(self, sources, decisions):
+        r = self.recorder(principals=["commander", "M1"], principal_sources=sources, model_id=MODEL,
+                          required_decisions=decisions)
+        r.run_start(0)
+        for frame, principal in enumerate(("commander", "M1")):
+            o = self.obs(r, principal, f"obs-{principal}-0", frame=frame)
+            if sources[principal] == "agent":
+                cause, origin = self.inference(r, principal, f"inf-{principal}", o, frame=frame), "agent"
+            else:
+                cause, origin = o, "scripted"
+            sub = self.intent(r, principal, f"i-{principal}", f"obs-{principal}-0", [cause], origin=origin,
+                              decision=f"d-{principal}", frame=frame)
+            self.receipt(r, principal, f"i-{principal}", sub, frame=frame)
+        r.run_end(2, {})
+        return verify_ledger(self.path)
+
+    def test_each_principal_is_labelled_from_its_own_evidence(self):
+        decisions = [{"label": "d-M1", "principal": "M1"}, {"label": "d-commander", "principal": "commander"}]
+        result = self.agent_run({"commander": "scripted", "M1": "agent"}, decisions)
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(result.principal_classifications, {"M1": "agent_only", "commander": "scripted_replay"})
+        self.assertEqual(result.classification, "scripted_replay")
+        self.assertFalse(result.autonomous)
+        self.assertFalse(any("declared" in x for x in result.evidence_limits))
+
+    def test_autonomous_only_when_every_principal_is_agent_only(self):
+        decisions = [{"label": "d-M1", "principal": "M1"}, {"label": "d-commander", "principal": "commander"}]
+        result = self.agent_run({"commander": "agent", "M1": "agent"}, decisions)
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(set(result.principal_classifications.values()), {"agent_only"})
+        self.assertTrue(result.autonomous)
+
+    def test_a_principal_without_its_decisions_is_not_agent_only(self):
+        result = self.agent_run({"commander": "agent", "M1": "agent"}, [{"label": "d-commander", "principal": "commander"}])
+        self.assertEqual(result.principal_classifications["M1"], "agent_partial")
+        self.assertFalse(result.autonomous)
+
+    def test_a_declared_source_never_upgrades_the_label(self):
+        self.two_streams(principal_sources={"commander": "agent", "M1": "scripted"})
+        result = verify_ledger(self.path)
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(result.principal_classifications["commander"], "scripted_replay")
+        self.assertIn("principal commander declared agent but its evidence classifies as scripted_replay", result.evidence_limits)
+        self.assertFalse(result.autonomous)
+
+
 class SensitiveContent(LedgerCase):
     def test_credentials_and_private_paths_rejected(self):
         r = self.recorder()

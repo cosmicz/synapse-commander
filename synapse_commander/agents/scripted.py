@@ -273,7 +273,7 @@ class ScriptedSmoke:
             # which runs no provisioning scenario, must refuse the type itself.
             Probe("produce_unsupported", "unsupported_type", (409,),
                   self.envelope("produce", current, "PRODUCE", declared_produce_payload())),
-            Probe("raw_engine_payload", "invalid_payload", (400,),
+            Probe("raw_engine_payload", "invalid_parameters", (400,),
                   self.envelope("raw", current, "TASK",
                                 {"unit": own, "verb": "advance", "args": {"lua": "Spring.Echo('x')"}})),
             Probe("unknown_observation", "unknown_observation", (400, 409),

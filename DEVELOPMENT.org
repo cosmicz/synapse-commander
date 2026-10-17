@@ -45,7 +45,9 @@ That limiter represents the authoritative synchronized dispatcher in test; the
 HTTP gateway does not invent acceptance authority. The smoke payload's
 =parameters= and =args= objects are intentionally empty, so later
 controller-specific Broken Relay arguments cannot become an untyped escape
-hatch here.
+hatch here. A nonempty typed argument object, including the Loop 0
+raw-engine-payload probe, is rejected at the gateway with =invalid_parameters=;
+it is never forwarded to the engine.
 
 This smoke schema is intentionally narrower than the selected Broken Relay
 contract: it does not implement a Recoil bridge, radio delivery, controller

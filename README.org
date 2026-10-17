@@ -22,6 +22,8 @@ a manifest and hash-chained ledger recorded from the start. It is a scripted
 fixture, not autonomous play, not the Broken Relay mission and not a visual
 demo. No playable build, benchmark result or release is claimed.
 See [[file:DEVELOPMENT.org][development context]] and [[file:AGENTS.md][contribution rules]].
+Loop 0 treats every nonempty typed argument object as =invalid_parameters= at
+the gateway; it never forwards a raw engine command.
 
 * Commands
 - Tests (Python 3.13 standard library, no engine): =python3 -m unittest discover -s tests=
