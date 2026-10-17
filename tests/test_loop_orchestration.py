@@ -104,11 +104,12 @@ class FakeEngine:
                             {"id": 50, "pos": [3000.0, 10.0, 3000.0], "source": "own_unit",
                              "observed_frame": self.frame, "age_frames": 0},
                             ]
-                if self.gaia:
+                if self.gaia and self.frame > 0:
                     # A wandering critter: visible, foreign, moves on its own; sorts first.
                     entities.append({"id": 890, "pos": [1200.0 + 60.0 * math.sin(self.frame / 30.0), 10.0, 1300.0],
                                      "source": "los", "observed_frame": self.frame, "age_frames": 0})
-                in_sight = math.hypot(unit["pos"][0] - self.gaia_unit["pos"][0],
+                # Like the engine: nothing is in line of sight at frame 0.
+                in_sight = self.frame > 0 and math.hypot(unit["pos"][0] - self.gaia_unit["pos"][0],
                                       unit["pos"][2] - self.gaia_unit["pos"][2]) <= 380.0
                 if self.gaia and in_sight:
                     entities.append({"id": self.gaia_unit["id"], "pos": list(self.gaia_unit["pos"]), "source": "los",

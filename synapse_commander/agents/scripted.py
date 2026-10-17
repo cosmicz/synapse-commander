@@ -22,6 +22,7 @@ MIN_DISPLACEMENT = 50.0
 STILL_DISTANCE = 8.0
 STALE_AFTER_FRAMES = 900
 SPAWN_OFFSET_X = 400.0
+FOREIGN_WAIT_FRAMES = 90
 
 
 class ClientError(RuntimeError):
@@ -218,16 +219,21 @@ class ScriptedSmoke:
 
     def _foreign_probes(self, first: dict[str, Any], unit: dict[str, Any]) -> dict[str, Any]:
         """Probe a visible foreign unit; return the observation the advance builds on."""
-        second = self.wait_observation(lambda o: int(o["frame"]) >= int(first["frame"]) + 30,
+        # Line of sight is not computed at frame 0; wait a bounded time for a
+        # frame that shows foreign units, then a second one 30 frames later.
+        seen = self.wait_observation(
+            lambda o: bool(_foreign_units(o)) or int(o["frame"]) >= int(first["frame"]) + FOREIGN_WAIT_FRAMES,
+            "a frame with foreign units or the wait bound")
+        second = self.wait_observation(lambda o: int(o["frame"]) >= int(seen["frame"]) + 30,
                                        "a second observation 30 frames on")
         # The foreign unit present in both frames that moved least, so a wandering
         # critter cannot pass for a probe's effect.
-        candidates = [e for e in _foreign_units(second) if _entity(first, e["id"]) is not None]
+        candidates = [e for e in _foreign_units(second) if _entity(seen, e["id"]) is not None]
         self.trace["foreign_units"] = candidates
         if not candidates:
             self.trace["probes"].append({"name": "foreign_unit", "skipped": "no foreign unit visible"})
             return second
-        chosen = min(candidates, key=lambda e: (planar_distance(e["pos"], _entity(first, e["id"])["pos"]),
+        chosen = min(candidates, key=lambda e: (planar_distance(e["pos"], _entity(seen, e["id"])["pos"]),
                                                 str(e["id"])))
         target = str(chosen["id"])
         self.trace["probe_target_ids"] = [chosen["id"]]
