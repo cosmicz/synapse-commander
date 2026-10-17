@@ -302,6 +302,8 @@ class SmokeConfig:
     play_stdout: Any = None
     engine_binary: str = launch.HEADLESS_BINARY  # or "spring", the rendered client
     scenario: str | None = None       # a ScenarioTable/v1 name in the archive; None is Loop 0
+    springsettings: Path | None = None    # replaces the empty per-run settings (window size for capture)
+    extra_widgets_dir: Path | None = None  # *.lua copied into the run's LuaUI/Widgets (capture widget)
     model: str = "claude-sonnet-5"    # agent mode: model pinned for the CLI route
     call_budget: int = 20
     call_timeout_s: float = 60.0
@@ -343,6 +345,21 @@ def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, iden
             raise ValueError("principal_sources must name every declared principal")
         manifest["principal_sources"] = dict(principal_sources)
     return manifest
+
+
+def install_render_files(layout: launch.RunLayout, springsettings: Path | None,
+                         extra_widgets_dir: Path | None) -> dict[str, str]:
+    """Capture inputs, as the rig's render wrapper passes them; returns their hashes."""
+    hashes: dict[str, str] = {}
+    if springsettings is not None:
+        layout.settings_path.write_bytes(Path(springsettings).read_bytes())
+    if extra_widgets_dir is not None:
+        widgets = layout.write_dir / "LuaUI" / "Widgets"
+        widgets.mkdir(parents=True, exist_ok=True)
+        for source in sorted(Path(extra_widgets_dir).glob("*.lua")):
+            (widgets / source.name).write_bytes(source.read_bytes())
+            hashes[f"extra_widget/{source.name}"] = launch.sha256_file(widgets / source.name)
+    return hashes
 
 
 def scenario_seed(table: dict[str, Any] | None) -> int:
@@ -420,13 +437,15 @@ def run_smoke(config: SmokeConfig, *,
                                  seed=seed)
     settings = launch.engine_settings()
     layout.write_config(script, settings)
+    render_files = install_render_files(layout, config.springsettings, config.extra_widgets_dir)
     mailbox_dir = layout.mailbox_dir
     mailbox_dir.mkdir(parents=True, exist_ok=True)
 
     presentation = "headless" if artifacts is None else artifacts.presentation
     render_env = launch.render_environment()
     config_hashes = {"start_script": sha256_text(script),
-                     "springsettings": sha256_text(launch._settings_text(settings)),
+                     "springsettings": launch.sha256_file(layout.settings_path),
+                     **render_files,
                      # The values may hold host paths, so the manifest carries only their hash;
                      # the private verdict keeps them in full.
                      "engine_render_environment": sha256_text(json.dumps(render_env, sort_keys=True))}
@@ -1193,9 +1212,11 @@ def rescue_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -
     else:
         human = [r for r in submitted if r["origin"] == "human"]
         checks["human_inputs_recorded"] = {
-            "ok": len(human) == len(trace.get("intents", [])) and all(r["payload"].get("principal") == "commander"
-                                                                        for r in human),
-            "human_intents": len(human)}
+            # Intents the gateway refused before submission (HTTP 400) never reach the ledger.
+            "ok": len(human) == sum(1 for i in trace.get("intents", []) if i.get("http") != 400)
+            and all(r["payload"].get("principal") == "commander" for r in human),
+            "human_intents": len(human),
+            "refused_at_gateway": sum(1 for i in trace.get("intents", []) if i.get("http") == 400)}
     return checks
 
 

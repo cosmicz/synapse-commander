@@ -349,6 +349,23 @@ class LoopOrchestrationTests(unittest.TestCase):
             run_smoke(config, transport_factory=lambda _d, _i: FakeEngine("x"),
                       engine_factory=lambda _l: FakeEngine("x"), app=("a" * 40, 0))
 
+    def test_capture_settings_and_widgets_are_installed_and_hashed(self) -> None:
+        source = self.out / "render"
+        (source / "widgets").mkdir(parents=True)
+        (source / "settings.cfg").write_text("XResolution = 640\n")
+        (source / "widgets" / "cap.lua").write_text("-- capture\n")
+        engine = FakeEngine("fake-render")
+        config = SmokeConfig(engine_dir=self.out, data_dir=self.out, out_dir=self.out, run_id="fake-render",
+                             rig_commit="b" * 40, hello_timeout_s=10, client_timeout_s=20, client_poll_s=0.02,
+                             springsettings=source / "settings.cfg", extra_widgets_dir=source / "widgets")
+        run_smoke(config, transport_factory=lambda _d, _i: engine, engine_factory=lambda _l: engine,
+                  app=("a" * 40, 0), engine_scan=lambda _p: [])
+        write = self.out / "fake-render" / "write"
+        self.assertEqual((write / "springsettings.cfg").read_text(), "XResolution = 640\n")
+        self.assertEqual((write / "LuaUI" / "Widgets" / "cap.lua").read_text(), "-- capture\n")
+        manifest = json.loads((self.out / "fake-render" / "ledger.jsonl").read_text().splitlines()[0])["payload"]
+        self.assertIn("extra_widget/cap.lua", manifest["config_hashes"])
+
     def test_rig_commit_required(self) -> None:
         config = SmokeConfig(engine_dir=self.out, data_dir=self.out, out_dir=self.out, run_id="x", rig_commit=None)
         with self.assertRaises(launch.LaunchError):

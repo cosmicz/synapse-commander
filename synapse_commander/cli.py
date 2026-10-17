@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Sequence
@@ -13,13 +14,23 @@ from .launch import ENGINE_BINARIES, HEADLESS_BINARY
 from .run import SmokeConfig, new_run_id, run_smoke
 
 
+def env_path(name: str) -> Path | None:
+    value = os.environ.get(name)
+    return Path(value) if value else None
+
+
 def add_run_arguments(command: argparse.ArgumentParser) -> None:
     """Launch arguments shared by run-smoke and run-agent."""
     command.add_argument("--engine-dir", type=Path, required=True,
                          help="directory holding the pinned spring-headless binary")
-    command.add_argument("--engine-binary", choices=ENGINE_BINARIES, default=HEADLESS_BINARY,
+    command.add_argument("--engine-binary", choices=ENGINE_BINARIES, default=None,
                          help="engine program in --engine-dir: spring-headless (default) or the rendered "
-                              "client spring, which inherits DISPLAY and GL settings from this environment")
+                              "client spring, which inherits DISPLAY and GL settings from this environment; "
+                              "default $ENGINE_BINARY, else spring-headless")
+    command.add_argument("--springsettings", type=Path, default=None,
+                         help="settings file for the run (default $SPRINGSETTINGS, else an empty per-run file)")
+    command.add_argument("--extra-widgets-dir", type=Path, default=None,
+                         help="directory of *.lua widgets copied into the run (default $EXTRA_WIDGETS_DIR)")
     command.add_argument("--data-dir", type=Path, required=True,
                          help="engine data directory holding maps/ (and games/BAR.sdd unless --game-dir)")
     command.add_argument("--game-dir", type=Path, help="stock BAR checkout (default DATA_DIR/games/BAR.sdd)")
@@ -122,7 +133,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = SmokeConfig(engine_dir=args.engine_dir, data_dir=args.data_dir, game_dir=args.game_dir,
                              out_dir=args.out, lock_dir=args.lock_dir, rig_commit=args.rig_commit,
                              run_id=args.run_id or new_run_id(), allow_dirty=args.allow_dirty,
-                             hello_timeout_s=args.hello_timeout, engine_binary=args.engine_binary,
+                             hello_timeout_s=args.hello_timeout,
+                             engine_binary=args.engine_binary or os.environ.get("ENGINE_BINARY") or HEADLESS_BINARY,
+                             springsettings=args.springsettings or env_path("SPRINGSETTINGS"),
+                             extra_widgets_dir=args.extra_widgets_dir or env_path("EXTRA_WIDGETS_DIR"),
                              scenario=args.scenario, **extra)
         try:
             verdict = run_smoke(config)

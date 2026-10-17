@@ -344,7 +344,9 @@ class RescuePlay:
             return f"cannot parse: {exc}"
         command, args = words[0].lower(), words[1:]
         if command == "produce" and 1 <= len(args) <= 2:
-            controller = args[1] if len(args) == 2 else free_chip(observation)
+            chips = sorted(((observation.get("budgets") or {}).get("chips") or {}))
+            # With nothing funded, still send a declared chip so the engine answers with its budget reason.
+            controller = args[1] if len(args) == 2 else (free_chip(observation) or (chips[0] if chips else ""))
             factory = (observation.get("factories") or [{}])[0].get("name", "F0")
             return "produce", "PRODUCE", {"factory": factory, "chassis": args[0], "controller": controller,
                                           "parameters": {}}
