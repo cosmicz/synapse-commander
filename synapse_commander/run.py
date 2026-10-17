@@ -1142,6 +1142,7 @@ def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedg
         checks["ledger_verified"] = {"ok": verification.ok, "status": verification.status,
                                      "errors": verification.errors,
                                      "classification": verification.classification,
+                                     "principal_classifications": verification.principal_classifications,
                                      "autonomous": verification.autonomous,
                                      "evidence_limits": verification.evidence_limits,
                                      "counts": verification.counts}
