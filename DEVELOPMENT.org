@@ -1,0 +1,31 @@
+#+title: Synapse Commander — development
+#+startup: overview
+
+* Implementation boundary
+The repository currently contains project context, not game behavior.
+The selected engine path is Recoil/Beyond All Reason in a Linux VM. Demonstrate
+that runtime before committing to an adapter or engine extension.
+Separate deterministic simulation, bounded unit controllers,
+external reasoning and the human/spectator interface.
+
+The simulation owns world state and validates all actions. Model requests
+cannot grant unseen state, free computation, unlimited subagents or authority
+over another faction. Proposed bot updates distinguish orders, whole program
+replacement and physical upgrades; protocol details remain open.
+
+* Verification contract
+The first reproducible slice must show a unit performing useful work, a
+consequential change in circumstances, and an observable response. Record
+simulation and wall time, inputs, intent, acceptance, effects and human help.
+Headless simulation and rendered interaction need separate checks.
+
+Use bounded tests and fail-capable assertions. Preserve the same rules and
+information boundaries across human, autonomous and mixed-team modes.
+No test suite exists yet; documentation setup does not imply runtime coverage.
+
+* Coordination
+Tasks and private evidence live in an external event tracker. Contributor
+worktrees must be explicitly bound to that tracker with the native tooling;
+do not initialize another tracker here. Use separate worktrees and exact app
+commits for implementation and independent review. Remotes, publication and
+license selection are separate operator decisions.

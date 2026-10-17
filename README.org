@@ -1,0 +1,24 @@
+#+title: Synapse Commander
+#+subtitle: Build your army. Manufacture its minds.
+#+startup: overview
+
+* Concept
+A factory real-time strategy game about exploration, trade, combat and
+manufactured intelligence. Factories build robot bodies and provision the
+programs or reasoning minds that control them. Communication, computation
+and memory are resources; deployed units must live with their instructions
+until new ones can reach them.
+
+Human–agent teams and autonomous teams are intended play modes. The aim is
+useful cooperation through the game's mechanics, not privileged information
+or arbitrary handicaps. Whether it works is a question to test.
+
+* State of the project
+Repository scaffold only. The selected engine path is Recoil/Beyond All Reason
+in a Linux VM; runtime verification and the first mission are still in progress.
+No playable build, benchmark result or release is claimed.
+See [[file:DEVELOPMENT.org][development context]] and [[file:AGENTS.md][contribution rules]].
+
+There are no application build/run/test commands yet. The first runtime
+milestone must supply and verify them. This repository is independent of
+event coordination and contains no tracker database or private event records.
