@@ -7,6 +7,7 @@ if gadgetHandler:IsSyncedCode() then
   local function receipt(e,status,reason) out("receipt",{schema="IntentReceipt/v1",intent_id=e.intent_id,principal=e.principal,team=e.team,status=status,reason=reason,frame=Spring.GetGameFrame()}) end
   function gadget:GameStart()
     local x,z=Game.mapSizeX/2,Game.mapSizeZ/2; local unit=Spring.CreateUnit("armpw",x,Spring.GetGroundHeight(x,z),z,0,0); GG.synapse_unit=unit; GG.synapse_waypoint={x+400,Spring.GetGroundHeight(x+400,z),z}; out("hello",{protocol="synapse-mailbox/0",teams={0},clock_mode="continuous"})
+    out("scenario",{name="smoke_spawn",unit_id=unit})
   end
   function gadget:RecvLuaMsg(msg,player)
     if #msg>MAX or msg:sub(1,5)~="SYN0 " then return false end
@@ -20,10 +21,11 @@ if gadgetHandler:IsSyncedCode() then
     if Spring.GetUnitTeam(p.unit_id)~=team then receipt(e,"rejected","not_owned"); return true end
     local w=GG.synapse_waypoint; Spring.GiveOrderToUnit(p.unit_id,CMD.MOVE,w,0); pending[p.unit_id]=e.intent_id; receipt(e,"accepted",nil); out("effect",{schema="EffectEvent/v1",effect="order_started",frame=Spring.GetGameFrame(),unit_id=p.unit_id,team=team,intent_id=e.intent_id}) ; return true
   end
-  function gadget:GameFrame(f) if f%15~=0 then return end; local u=GG.synapse_unit; local x,y,z=Spring.GetUnitPosition(u); local id="obs-0-"..f; observations[id]=f; out("observation",{schema="ObservationFrame/v1",observation_id=id,team=0,frame=f,entities={{id=u,pos={x,y,z},source="own_unit",observed_frame=f,age_frames=0}},scenario={waypoints={W1=GG.synapse_waypoint}},permitted_intents={{type="TASK",verbs={"advance"}}},truncated=false,omitted=0}) end
+  function gadget:UnitCmdDone(unitID,_,team,cmd) if cmd==CMD.MOVE and pending[unitID] then out("effect",{schema="EffectEvent/v1",effect="order_done",frame=Spring.GetGameFrame(),unit_id=unitID,team=team,intent_id=pending[unitID]}); pending[unitID]=nil end end
+  function gadget:GameFrame(f) if f%15~=0 then return end; local u=GG.synapse_unit; if not u then return end; local x,y,z=Spring.GetUnitPosition(u); if not x then return end; local id="obs-0-"..f; observations[id]=f; out("observation",{schema="ObservationFrame/v1",observation_id=id,team=0,frame=f,entities={{id=u,pos={x,y,z},source="own_unit",observed_frame=f,age_frames=0}},scenario={waypoints={W1=GG.synapse_waypoint}},permitted_intents={{type="TASK",verbs={"advance"}}},truncated=false,omitted=0}) end
 else
   local runID = (Spring.GetModOptions() or {}).synapse_run_id or ""
-  local path, outbox, offset, seq = "synapse/" .. runID .. "/inbox.jsonl", "synapse/" .. runID .. "/outbox.jsonl", 0, 0
+  local path, outbox, offset, seq = "synapse/inbox.jsonl", "synapse/outbox.jsonl", 0, 0
   local function write(kind, body, frame) seq=seq+1; local f=io.open(outbox,"a"); if f then f:write(string.format('{"seq":%d,"frame":%d,"kind":"%s","body":%s}\n',seq,frame,kind,body)); f:close() end end
   local function bridge(_,kind,body,frame) write(kind,body,frame) end
   function gadget:Initialize() gadgetHandler:AddSyncAction("synapse_out",bridge) end
