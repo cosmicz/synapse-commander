@@ -28,7 +28,25 @@ def parse_mind_decision(text, observation, principal, principals, used_ids, inte
         stripped = text.strip()
         if stripped.startswith('```') and stripped.endswith('```'):
             stripped = stripped[3:-3].removeprefix('json').strip()
-        value = json.loads(stripped)
+        try:
+            value = json.loads(stripped)
+        except json.JSONDecodeError:
+            # CLI models sometimes add a sentence before the decision. Accept
+            # exactly one complete decision object; never choose among several.
+            candidates = []
+            decoder = json.JSONDecoder()
+            for index, char in enumerate(stripped):
+                if char != '{':
+                    continue
+                try:
+                    candidate, _ = decoder.raw_decode(stripped[index:])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(candidate, dict) and candidate.get('action') in ('intent', 'wait', 'done'):
+                    candidates.append(candidate)
+            if len(candidates) != 1:
+                raise ValueError('exactly one complete decision object required')
+            value = candidates[0]
         if not isinstance(value, dict) or value.get('action') not in ('intent', 'wait', 'done'):
             raise ValueError('one intent, wait or done decision required')
         if value['action'] != 'intent':
