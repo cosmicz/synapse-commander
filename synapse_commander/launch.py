@@ -176,6 +176,8 @@ def start_script(
 \tRecordDemo=0;
 \tMyPlayerName={player_name};
 \tIsHost=1;
+\tHostIP=127.0.0.1;
+\tHostPort={int(host_port)};
 \tFixedRNGSeed={int(seed)};
 \t[MODOPTIONS]
 \t{{
