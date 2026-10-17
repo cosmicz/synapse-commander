@@ -16,7 +16,7 @@ if gadgetHandler:IsSyncedCode() then
   -- The public observation itself remains bounded; this is reducer-only state.
   local TEAM0, OBS_INTERVAL, MAX_OBSERVATIONS = 0, 15, 128
   local observations, seen, pending, rate = {}, {}, {}, {}
-  local waypoint, creating_fixture = nil, false
+  local waypoint, creating_fixture, scenario_emitted = nil, false, false
 
   local function out(kind, body)
     SendToUnsynced("synapse_out", kind, Json.encode(body))
@@ -113,6 +113,7 @@ if gadgetHandler:IsSyncedCode() then
     Spring.CreateUnit("armck", x, Spring.GetGroundHeight(x, z + 300), z + 300, 0, gaia)
     Spring.CreateUnit("armck", x - 2500, Spring.GetGroundHeight(x - 2500, z), z, 0, gaia)
     out("scenario", { name = "smoke_spawn", unit_id = smoke_unit, waypoints = { W1 = waypoint } })
+    scenario_emitted = true
     creating_fixture = false
     out("effect", { schema = "EffectEvent/v1", effect = "unit_created", frame = frame, unit_id = smoke_unit, team = TEAM0 })
     local opts = Spring.GetModOptions() or {}
@@ -211,7 +212,8 @@ if gadgetHandler:IsSyncedCode() then
       if source then
         local x, y, z = Spring.GetUnitPosition(unitID)
         if x then
-          local entity = { id = unitID, team = teamID, pos = { x, y, z }, source = source, def = Spring.GetUnitDefID(unitID), health = Spring.GetUnitHealth(unitID) }
+          local definition = UnitDefs[Spring.GetUnitDefID(unitID)]
+          local entity = { id = unitID, team = teamID, pos = { x, y, z }, source = source, def = definition and definition.name, health = Spring.GetUnitHealth(unitID) }
           if source == "own_unit" then entity.commands = Spring.GetUnitCommandCount(unitID) end
           entities[#entities + 1] = entity
         end
@@ -227,7 +229,7 @@ if gadgetHandler:IsSyncedCode() then
   end
 
   function gadget:UnitCreated(unitID, _, teamID)
-    if not creating_fixture and can_emit_effect(unitID, teamID) then out("effect", { schema = "EffectEvent/v1", effect = "unit_created", frame = Spring.GetGameFrame(), unit_id = unitID, team = teamID }) end
+    if scenario_emitted and not creating_fixture and can_emit_effect(unitID, teamID) then out("effect", { schema = "EffectEvent/v1", effect = "unit_created", frame = Spring.GetGameFrame(), unit_id = unitID, team = teamID }) end
   end
 
   function gadget:UnitCmdDone(unitID, _, teamID, cmdID)

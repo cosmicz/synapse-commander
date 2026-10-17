@@ -24,6 +24,11 @@ class GadgetSourceContractTests(unittest.TestCase):
     def test_duplicate_is_not_replayed_as_accepted(self) -> None:
         self.assertIn('emit_receipt(intent, "rejected", "duplicate_intent_id")', self.source)
 
+    def test_scenario_gates_fixture_effects_and_exposes_named_defs(self) -> None:
+        self.assertIn("scenario_emitted = true", self.source)
+        self.assertIn("if scenario_emitted and not creating_fixture", self.source)
+        self.assertIn("definition and definition.name", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
