@@ -84,7 +84,10 @@ are classified. The exclusivity check counts both =spring-headless= and
 from =game/SynapseCommander.sdd/scenarios/= by adding =synapse_scenario=NAME=
 to the start script's =[MODOPTIONS]=; omitted, the run is the unchanged Loop 0
 smoke. The table is loaded and validated before anything starts, and the
-manifest records its id, version and hash. The scripted Loop 0 client and its
+manifest records its id, version and hash. A table that declares an integer
+=seed= sets the start script's =FixedRNGSeed= and the manifest's scenario seed
+(otherwise both stay 1), and the verdict checks that the engine's hello echoes
+the same seed. The scripted Loop 0 client and its
 verdict assume no scenario.
 
 | Layer | Module |

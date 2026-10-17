@@ -30,7 +30,8 @@ FPS_FAKE = 300  # simulated frames per wall second, so a stale observation arriv
 
 class FakeEngine:
     def __init__(self, run_id: str, *, accept_stale: bool = False, move: bool = True,
-                 gaia: bool = True, die_after_s: float | None = None) -> None:
+                 gaia: bool = True, die_after_s: float | None = None, hello_extra: dict | None = None) -> None:
+        self.hello_extra = hello_extra or {}
         self.die_after_s = die_after_s
         self.run_id = run_id
         self.accept_stale = accept_stale
@@ -81,7 +82,7 @@ class FakeEngine:
             self.frame += 1
             if self.frame == 0:
                 self._emit("hello", {"protocol": "synapse-mailbox/0", "run_id": self.run_id, "teams": [0],
-                                     "clock_mode": "continuous"})
+                                     "clock_mode": "continuous", **self.hello_extra})
                 self._emit("scenario", {"name": "smoke_spawn", "unit_id": self.unit["id"]})
                 self._emit("effect", {"schema": "EffectEvent/v1", "effect": "unit_created", "frame": 0,
                                       "unit_id": self.unit["id"], "team": 0, "intent_id": None})
@@ -309,6 +310,36 @@ class LoopOrchestrationTests(unittest.TestCase):
         manifest = json.loads((run_dir / "ledger.jsonl").read_text().splitlines()[0])["payload"]
         self.assertEqual(manifest["scenario"]["id"], "rescue_smoke")
         self.assertIn("scenario_table/rescue_smoke", manifest["config_hashes"])
+
+    def _seeded_run(self, run_id: str, echoed_seed) -> dict:
+        engine = FakeEngine(run_id, hello_extra={"scenario": {"id": "rescue_baseline", "seed": echoed_seed}})
+        config = SmokeConfig(engine_dir=self.out, data_dir=self.out, out_dir=self.out, run_id=run_id,
+                             rig_commit="b" * 40, hello_timeout_s=10, client_timeout_s=20, client_poll_s=0.02,
+                             scenario="rescue_baseline")
+        return run_smoke(config, transport_factory=lambda _d, _i: engine, engine_factory=lambda _l: engine,
+                         app=("a" * 40, 0), engine_scan=lambda _p: [])
+
+    def test_declared_table_seed_drives_start_script_and_manifest(self) -> None:
+        verdict = self._seeded_run("fake-seed", 1017)
+        run_dir = self.out / "fake-seed"
+        self.assertIn("FixedRNGSeed=1017;", (run_dir / "write" / "_synapse_script.txt").read_text())
+        manifest = json.loads((run_dir / "ledger.jsonl").read_text().splitlines()[0])["payload"]
+        self.assertEqual(manifest["scenario"]["seed"], 1017)
+        self.assertTrue(verdict["checks"]["scenario_seed_consistent"]["ok"])
+
+    def test_engine_echoing_another_seed_fails_the_seed_check(self) -> None:
+        verdict = self._seeded_run("fake-seed-mismatch", 1)
+        self.assertFalse(verdict["checks"]["scenario_seed_consistent"]["ok"])
+
+    def test_tables_without_a_seed_keep_seed_one(self) -> None:
+        engine = FakeEngine("fake-noseed")
+        config = SmokeConfig(engine_dir=self.out, data_dir=self.out, out_dir=self.out, run_id="fake-noseed",
+                             rig_commit="b" * 40, hello_timeout_s=10, client_timeout_s=20, client_poll_s=0.02,
+                             scenario="rescue_smoke")
+        verdict = run_smoke(config, transport_factory=lambda _d, _i: engine, engine_factory=lambda _l: engine,
+                            app=("a" * 40, 0), engine_scan=lambda _p: [])
+        self.assertIn("FixedRNGSeed=1;", (self.out / "fake-noseed" / "write" / "_synapse_script.txt").read_text())
+        self.assertNotIn("scenario_seed_consistent", verdict["checks"])
 
     def test_unknown_scenario_fails_before_anything_starts(self) -> None:
         config = SmokeConfig(engine_dir=self.out, data_dir=self.out, out_dir=self.out, run_id="bad-scenario",

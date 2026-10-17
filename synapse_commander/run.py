@@ -301,11 +301,19 @@ def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, iden
     }
 
 
+def scenario_seed(table: dict[str, Any] | None) -> int:
+    """The table's declared world seed, else the Loop 0 smoke seed."""
+    seed = None if table is None else table.get("seed")
+    if isinstance(seed, int) and not isinstance(seed, bool) and seed >= 0:
+        return seed
+    return SCENARIO["seed"]
+
+
 def scenario_identity(table: dict[str, Any] | None) -> dict[str, Any] | None:
     """Manifest scenario for a selected table; None keeps the Loop 0 smoke identity."""
     if table is None:
         return None
-    return {"id": table["id"], "version": table["version"], "seed": SCENARIO["seed"]}
+    return {"id": table["id"], "version": table["version"], "seed": scenario_seed(table)}
 
 
 def sha256_text(text: str) -> str:
@@ -351,7 +359,9 @@ def run_smoke(config: SmokeConfig, *,
             table = load_scenario(config.scenario)  # fail closed before anything starts
         except ScenarioError as exc:
             raise launch.LaunchError(f"scenario {config.scenario!r}: {exc}") from exc
-    script = launch.start_script(run_id=run_id, host_port=launch.free_udp_port(), scenario=config.scenario)
+    seed = scenario_seed(table)
+    script = launch.start_script(run_id=run_id, host_port=launch.free_udp_port(), scenario=config.scenario,
+                                 seed=seed)
     settings = launch.engine_settings()
     layout.write_config(script, settings)
     mailbox_dir = layout.mailbox_dir
@@ -402,6 +412,8 @@ def run_smoke(config: SmokeConfig, *,
                                **({"call_budget": config.call_budget, "model": config.model} if agent else {}),
                                "classification": run_label(agent, presentation),
                                "presentation": presentation, "engine_binary": config.engine_binary,
+                               "scenario": None if table is None else {"id": table["id"], "seed": seed,
+                                                                       "table_declares_seed": "seed" in table},
                                "engine_render_environment": render_env,
                                "app_commit": app_commit, "app_modified_files": app_dirty,
                                "rig_commit": config.rig_commit, "wall_start_utc": utc_now(),
@@ -904,6 +916,11 @@ def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedg
                                 "bridge_errors": ordered.bridge_errors, "bye": ordered.bye,
                                 "late_or_engine_receipts": ordered.engine_receipts,
                                 "inference_link_mismatches": ordered.inference_link_mismatches}
+    selected = verdict.get("scenario")
+    if selected and selected.get("table_declares_seed"):
+        echoed = ((ordered.hello or {}).get("scenario") or {}).get("seed") if ordered is not None else None
+        checks["scenario_seed_consistent"] = {"ok": echoed == selected["seed"], "manifest_and_start_script": selected["seed"],
+                                              "engine_hello": echoed}
     verdict["checks"] = checks
     verdict["failed_checks"] = sorted(name for name, c in checks.items() if not c["ok"])
     verdict["verdict"] = "PASS" if not verdict["failed_checks"] and not verdict.get("error") else "FAIL"
