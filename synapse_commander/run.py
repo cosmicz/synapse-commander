@@ -523,7 +523,7 @@ def run_smoke(config: SmokeConfig, *,
                                   wait_s=config.lock_wait_s)
     verdict: dict[str, Any] = {"run_id": run_id, "mode": config.mode,
                                **({"call_budget": config.call_budget, "model": config.model} if agent else {}),
-                               "classification": run_label(agent, presentation),
+                               "classification": run_label(agent or agents_mode, presentation),
                                "presentation": presentation, "engine_binary": config.engine_binary,
                                "scenario": None if table is None else {"id": table["id"], "seed": seed,
                                                                        "table_declares_seed": "seed" in table},
@@ -682,7 +682,7 @@ def run_smoke(config: SmokeConfig, *,
             checks = _evaluator(config.mode)(trace, ordered, verdict)
             outcome = {"pre_ledger_checks": "PASS" if checks and all(c["ok"] for c in checks.values())
                        and not error else "FAIL", "failed": sorted(n for n, c in checks.items() if not c["ok"]),
-                       "error": error, "classification": run_label(agent, presentation)}
+                       "error": error, "classification": run_label(agent or agents_mode, presentation)}
             try:
                 recorder.run_end(ordered.last_frame if ordered else 0, outcome)
             except Exception as exc:
