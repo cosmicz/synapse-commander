@@ -525,7 +525,13 @@ def run_smoke(config: SmokeConfig, *,
         recorder = Recorder.create(ledger_path, manifest)
         recorder.run_start(0)
         principal_tokens = mint_principal_tokens(layout.run_dir, view_principals) if view_principals else None
+        # The rendered client reads the mailbox once per drawn frame (a few per second),
+        # so its receipts can take seconds; the headless engine answers within one.
+        receipt_wait_s = 1.0 if presentation == "headless" else 10.0
         transport = (transport_factory or _mailbox_factory)(mailbox_dir, run_id)
+        if transport_factory is None and receipt_wait_s != 1.0:
+            transport = ReceiptWait(transport, receipt_wait_s)
+        client_http_timeout_s = 5.0 + receipt_wait_s
         ordered = OrderedLedger(recorder, transport)
         engine = (engine_factory or (lambda lay: launch.EngineProcess(artifacts, lay)))(layout)
         verdict["other_engines_at_start"] = engine_scan(None)
@@ -572,7 +578,7 @@ def run_smoke(config: SmokeConfig, *,
                     return
         threading.Thread(target=pump_loop, name="ledger-pump", daemon=True).start()
 
-        client = GatewayClient(f"http://127.0.0.1:{server.server_port}",
+        client = GatewayClient(f"http://127.0.0.1:{server.server_port}", timeout_s=client_http_timeout_s,
                                token=None if principal_tokens is None else principal_tokens["commander"])
         if agent:
             decisions_path = layout.run_dir / "decisions.jsonl"
@@ -589,7 +595,8 @@ def run_smoke(config: SmokeConfig, *,
         elif world:
             driver = WorldObserver(client, wall_timeout_s=config.client_timeout_s, poll_s=config.client_poll_s)
         elif rescue:
-            m1_client = GatewayClient(f"http://127.0.0.1:{server.server_port}", token=principal_tokens["M1"])
+            m1_client = GatewayClient(f"http://127.0.0.1:{server.server_port}", token=principal_tokens["M1"],
+                                      timeout_s=client_http_timeout_s)
             if play:
                 driver = RescuePlay(client, m1_client, stdin=config.play_stdin or sys.stdin,
                                     stdout=config.play_stdout or sys.stdout, poll_s=config.client_poll_s)
@@ -657,6 +664,20 @@ def run_smoke(config: SmokeConfig, *,
     verdict["error"] = error
     _finish(verdict, trace, ordered, ledger_path, layout, mode=config.mode)
     return verdict
+
+
+class ReceiptWait:
+    """Delegates to a transport but waits longer for each engine receipt."""
+
+    def __init__(self, transport: Any, wait_s: float) -> None:
+        self._transport = transport
+        self._wait_s = wait_s
+
+    def submit_intent(self, envelope: Any, wait_s: float | None = None) -> Any:
+        return self._transport.submit_intent(envelope, wait_s=self._wait_s if wait_s is None else wait_s)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._transport, name)
 
 
 def _mailbox_factory(mailbox_dir: Path, run_id: str) -> SmokeTransport:

@@ -195,6 +195,31 @@ required =advance_to_W1= decision. Limits: one unit, fixed waypoint, headless,
 not visual; agent-only autonomy on this smoke task says nothing about play
 quality on a real mission.
 
+* Stranded-mind local policy
+=agents/m1_policy.py= provides a scripted target policy for shared use by
+rescue rehearsal and interactive drivers. It has no I/O, model calls or access
+to scenario truth. =next_action(observation, State())= returns a new immutable
+state and at most one proposal with =label=, =type= and =payload=. The caller
+wraps that proposal in its M1 session envelope, submits through the gateway,
+and calls =record_receipt(state, http, receipt, intent_id)= for an extraction
+TASK. Do not pass status-message receipts to that function.
+
+Only M1's own bounded body view can produce an action. The policy sends status
+on contact/reconnection, then every ten distinct linked observations. It
+understands delivered commander messages =EXTRACT X Z= and =extract at X Z=,
+with nonnegative integer coordinates. The engine still validates map bounds,
+ground, authority and legality. It requests movement only on its own body and
+does not reissue the same message after a completed command. Explicit refusal
+permits at most three attempts, spaced by ten fresh observations; uncertain
+transport results remain pending. A matching public =order_done= or an
+observed own command-queue transition can finish the local command. Only the
+engine's mission outcome can establish extraction.
+
+=python3 -B -W error -m unittest tests.test_m1_policy -v= checks the pure policy
+with constructed views. This module-level check does not prove that a driver
+has wired it in or that an interactive rescue has completed; verify those
+claims in a native run with separate principal streams.
+
 * Loop 1 provisioning contract
 The provisioned-rescue extension shares one checked-in scenario declaration
 between the Recoil gadget and Python gateway:
