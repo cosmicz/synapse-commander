@@ -58,6 +58,28 @@ class SmokeObservationTests(unittest.TestCase):
                                                    "symptom": "no_heartbeat"}])
         self.assertNotIn("delivered_frame", observed["reports"][0])
 
+    def test_commander_keeps_only_declared_rescue_objective_and_extraction(self):
+        source = engine_observation()
+        body = {"id": 42, "pos": [100, 0, 100], "source": "own_body"}
+        source.update({
+            "principal": "commander", "body": body, "entities": [body],
+            "scenario": {"waypoints": {"W1": [1, 0, 1]},
+                         "extraction": {"id": "extraction_v1", "position": [200, 300], "radius": 160,
+                                        "private": "not forwarded"}},
+            "objective": {"type": "rescue_return", "target": "M1", "status": "pending", "hidden": True},
+            "permitted_intents": [{"type": "TASK", "verbs": ["advance", "move_to", "raw_engine"]}],
+        })
+        # The public source must be exact; an extra objective field is never
+        # treated as a harmless pass-through.
+        with self.assertRaisesRegex(ProtocolError, "commander objective"):
+            bounded_observation(source, scenario_table=load_scenario("rescue_baseline"), principal="commander")
+        source["objective"].pop("hidden")
+        source["scenario"]["extraction"].pop("private")
+        observed = bounded_observation(source, scenario_table=load_scenario("rescue_baseline"), principal="commander")
+        self.assertEqual(observed["objective"], {"type": "rescue_return", "target": "M1", "status": "pending"})
+        self.assertEqual(observed["scenario"]["extraction"], {"id": "extraction_v1", "position": [200, 300], "radius": 160})
+        self.assertEqual(observed["permitted_intents"], [{"type": "TASK", "verbs": ["advance", "move_to"]}])
+
     def test_roster_hides_disconnected_identity_and_preserves_historical_distress(self):
         source = engine_observation()
         source.update({

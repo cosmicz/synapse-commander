@@ -188,7 +188,7 @@ class RescueTests(unittest.TestCase):
         self.assertIn("[commander] frame", text)
         self.assertIn("-> PRODUCE accepted", text)
         self.assertIn("-> PRODUCE refused: chip_unavailable", text)
-        self.assertIn("-> TASK refused: verb_not_supported", text)
+        self.assertIn("-> TASK refused: invalid_parameters", text)
         self.assertIn("unknown command", text)
         records = [json.loads(line) for line in (self.out / "rescue-play" / "ledger.jsonl").read_text().splitlines()]
         submitted = [r for r in records if r["kind"] == "INTENT_SUBMITTED"]

@@ -125,10 +125,22 @@ class IntentEnvelope:
         if intent_type == "INSTALL" and controllers is not None:
             if payload["expected_version"] not in controllers or payload["replacement_version"] not in controllers:
                 raise ProtocolError("unknown_controller", "unknown controller version")
-        if intent_type == "TASK" and payload["verb"] != "advance":
-            raise ProtocolError("verb_not_supported", "only the engine-smoke advance task is exposed")
+        if intent_type == "TASK":
+            args = _bounded_object(payload["args"], "args")
+            if payload["verb"] == "advance":
+                if args:
+                    raise ProtocolError("invalid_parameters", "advance requires args is empty")
+            elif payload["verb"] == "move_to" and principals is not None:
+                if (set(args) != {"x", "z"}
+                        or any(not isinstance(args[axis], int) or isinstance(args[axis], bool)
+                               for axis in ("x", "z"))):
+                    raise ProtocolError("invalid_parameters", "move_to requires integer x and z")
+            else:
+                raise ProtocolError("verb_not_supported", "task verb is not exposed for this principal")
         for field in required & {"parameters", "args"}:
             _bounded_object(payload[field], field)
+            if field == "args" and intent_type == "TASK":
+                continue
             if payload[field]:
                 # The smoke schema deliberately has no controller-specific
                 # argument vocabulary. Broken Relay parameters belong in its
@@ -564,6 +576,31 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
         if not valid:
             raise ProtocolError("invalid_observation", "W1 must contain three finite coordinates")
         result["scenario"] = {"waypoints": {"W1": list(goal)}}
+    if principal == "commander" and "objective" in value:
+        objective = value["objective"]
+        declared = None if scenario_table is None else scenario_table.get("objective")
+        if (not isinstance(objective, Mapping) or set(objective) != {"type", "target", "status"}
+                or not isinstance(declared, Mapping)
+                or objective.get("type") != declared.get("type")
+                or objective.get("target") != declared.get("target")
+                or objective.get("status") not in {"pending", "extracted", "lost", "timeout"}):
+            raise ProtocolError("invalid_observation", "invalid commander objective")
+        result["objective"] = {"type": objective["type"], "target": objective["target"],
+                               "status": objective["status"]}
+    if principal == "commander" and "extraction" in scenario:
+        extraction = scenario["extraction"]
+        declared = None if scenario_table is None else scenario_table.get("objective")
+        if (not isinstance(extraction, Mapping) or set(extraction) != {"id", "position", "radius"}
+                or not isinstance(declared, Mapping) or extraction.get("id") != declared.get("extraction")
+                or not isinstance(extraction.get("position"), list) or len(extraction["position"]) != 2
+                or any(type(number) not in (int, float) or not math.isfinite(number)
+                       for number in extraction["position"])
+                or type(extraction.get("radius")) not in (int, float)
+                or not math.isfinite(extraction["radius"]) or extraction["radius"] <= 0):
+            raise ProtocolError("invalid_observation", "invalid extraction scenario")
+        result.setdefault("scenario", {})["extraction"] = {
+            "id": extraction["id"], "position": list(extraction["position"]), "radius": extraction["radius"],
+        }
     _bounded_provisioning(value, result, scenario_table)
     if principal is None:
         _bounded_expedition(value, result, scenario_table)
@@ -616,9 +653,13 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
         verbs = intent.get("verbs", [])
         if not isinstance(verbs, list):
             raise ProtocolError("invalid_observation", "invalid permitted verbs")
-        if intent.get("type") == "TASK" and "advance" in verbs:
+        if intent.get("type") == "TASK":
+            public_verbs = [verb for verb in ("advance", "move_to")
+                            if verb in verbs and (verb != "move_to" or principal is not None)]
+            if not public_verbs:
+                continue
             if "TASK" not in seen_permissions:
-                result["permitted_intents"].append({"type": "TASK", "verbs": ["advance"]})
+                result["permitted_intents"].append({"type": "TASK", "verbs": public_verbs})
                 seen_permissions.add("TASK")
             continue
         if intent.get("type") == "PRODUCE":

@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from synapse_commander.gateway import LoopbackGateway
-from synapse_commander.protocol import IntentReceipt, ProtocolError
+from synapse_commander.protocol import IntentEnvelope, IntentReceipt, ProtocolError
 from synapse_commander.recording import Recorder, verify_ledger
 from synapse_commander.recording import LedgerError
 from synapse_commander.transport import MemoryTransport
@@ -336,6 +336,18 @@ class GatewayTests(unittest.TestCase):
         status, result = self.request("POST", "/v1/intents", request)
         self.assertEqual((status, result["error"]), (400, "verb_not_supported"))
         self.assertEqual(self.transport.accepted, [])
+
+    def test_principal_move_to_has_exact_integer_coordinate_arguments(self) -> None:
+        request = {"schema": "IntentEnvelope/v1", "intent_id": "move-1", "principal": "M1",
+                   "based_on_observation_id": "obs-M1-100", "expires_at_frame": 200, "type": "TASK",
+                   "payload": {"unit": "M1", "verb": "move_to", "args": {"x": 100, "z": 200}}}
+        parsed = IntentEnvelope.from_untrusted(request, principal="M1", team="0", principals=frozenset({"M1"}))
+        self.assertEqual(parsed.payload["args"], {"x": 100, "z": 200})
+        with self.assertRaisesRegex(ProtocolError, "integer x and z"):
+            IntentEnvelope.from_untrusted({**request, "payload": {**request["payload"], "args": {"x": 100.5, "z": 200}}},
+                                         principal="M1", team="0", principals=frozenset({"M1"}))
+        with self.assertRaisesRegex(ProtocolError, "not exposed"):
+            IntentEnvelope.from_untrusted(request, principal="M1", team="0")
 
     def test_message_requires_principal_scenario_and_is_bounded(self) -> None:
         message = {"schema": "IntentEnvelope/v1", "intent_id": "message-1", "based_on_observation_id": "obs-1", "expires_at_frame": 200, "type": "MESSAGE", "payload": {"to": "M1", "text": "hello"}}
