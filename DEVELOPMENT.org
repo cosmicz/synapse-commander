@@ -33,6 +33,11 @@ The application now has a Python-standard-library boundary smoke check:
 bounded =synapse-smoke/v1= observation, and submits only typed =PRODUCE=,
 =TASK=, or =INSTALL= =IntentEnvelope/v1= envelopes to a two-method replaceable
 transport port. The listener rejects every non-loopback address.
+It also requires an exact loopback Host header, rejects any Origin header, and
+accepts POST bodies only as =application/json=. The only TASK is the
+engine-smoke-only =advance= verb with empty arguments; it is not a Broken
+Relay controller command. A =receipt_timeout= response is uncertain (HTTP 503),
+not an engine rejection or physical outcome.
 The in-memory transport is a deterministic test double, not an engine round
 trip. Its reference validation enforces a simulation-frame token bucket of two
 accepted intents per second with a burst of four and rejects duplicate IDs.

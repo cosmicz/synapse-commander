@@ -51,7 +51,7 @@ class LoopbackGateway:
             return
         event_id = self.ledger.record(
             "OBSERVATION",
-            sim_frame=observation["frame"],
+            sim_frame=self.transport.current_frame(),
             origin="gateway",
             payload={"observation_id": observation["observation_id"], "team": self.team, "observation": observation},
         )
@@ -75,11 +75,12 @@ class LoopbackGateway:
         if self.ledger is None:
             return
         payload = {"intent_id": receipt.intent_id, "status": "accepted" if receipt.accepted else "rejected"}
+        payload["frame"] = receipt.frame
         if receipt.reason:
             payload["reason_code"] = receipt.reason
         self.ledger.record(
             "INTENT_RECEIPT",
-            sim_frame=receipt.frame,
+            sim_frame=self.transport.current_frame(),
             origin="gateway",
             payload=payload,
             causes=(submission_event,) if submission_event else (),
@@ -96,6 +97,8 @@ class LoopbackGateway:
             envelope = IntentEnvelope.from_untrusted(value, principal=self.principal, team=self.team)
             submission_event = self._record_submission(envelope)
             receipt = self.transport.submit_intent(envelope)
+            if receipt.reason in {"pending", "receipt_timeout"}:
+                raise TimeoutError("engine receipt is not yet known")
             self._record_receipt(receipt, submission_event)
             return receipt
 

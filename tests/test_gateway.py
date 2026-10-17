@@ -3,12 +3,15 @@ from __future__ import annotations
 import http.client
 import json
 from pathlib import Path
+import socket
 import tempfile
 import threading
 import unittest
 
 from synapse_commander.gateway import LoopbackGateway
+from synapse_commander.protocol import IntentReceipt
 from synapse_commander.recording import Recorder, verify_ledger
+from synapse_commander.recording import LedgerError
 from synapse_commander.transport import MemoryTransport
 from tests.test_recording import manifest
 
@@ -60,10 +63,13 @@ class GatewayTests(unittest.TestCase):
         self.thread.join()
         self.server.server_close()
 
-    def request(self, method: str, path: str, body: object | None = None) -> tuple[int, dict[str, object]]:
+    def request(self, method: str, path: str, body: object | None = None, headers: dict[str, str] | None = None) -> tuple[int, dict[str, object]]:
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
         encoded = None if body is None else json.dumps(body).encode()
-        connection.request(method, path, body=encoded, headers={"Content-Type": "application/json"})
+        request_headers = {"Content-Type": "application/json"}
+        if headers:
+            request_headers.update(headers)
+        connection.request(method, path, body=encoded, headers=request_headers)
         response = connection.getresponse()
         result = json.loads(response.read())
         connection.close()
@@ -74,8 +80,8 @@ class GatewayTests(unittest.TestCase):
             "blue",
             observation(
                 entities=[{"id": str(i)} for i in reversed(range(35))],
-                recent_receipts=[{"id": str(i)} for i in range(18)],
-                recent_effects=[{"id": str(i)} for i in range(18)],
+                recent_receipts=[{"id": str(i), "frame": i} for i in range(20)],
+                recent_effects=[{"id": str(i), "frame": i} for i in range(20)],
             ),
         )
         status, result = self.request("GET", "/v1/observation")
@@ -84,14 +90,48 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(len(result["entities"]), 32)
         self.assertTrue(result["truncated"])
         self.assertEqual(result["omitted"]["entities"], 3)
-        self.assertEqual(result["omitted"]["recent_receipts"], 2)
+        self.assertEqual(result["omitted"]["recent_receipts"], 4)
         self.assertEqual(result["entities"][0]["id"], "0")
         self.assertEqual(len(result["recent_effects"]), 16)
+        self.assertEqual(result["recent_receipts"][0]["frame"], 4)
+        self.assertEqual(result["recent_effects"][-1]["frame"], 19)
 
     def test_server_is_loopback_only(self) -> None:
         self.assertEqual(self.server.server_address[0], "127.0.0.1")
         with self.assertRaises(ValueError):
             LoopbackGateway(self.transport, principal="agent-alpha", team="blue").make_server(host="0.0.0.0")
+
+    def test_cross_origin_and_non_json_ingress_are_rejected_before_transport(self) -> None:
+        status, body = self.request("POST", "/v1/intents", produce(), {"Origin": "https://evil.example"})
+        self.assertEqual((status, body["error"]), (403, "untrusted_origin"))
+        status, body = self.request("POST", "/v1/intents", produce(), {"Content-Type": "text/plain"})
+        self.assertEqual((status, body["error"]), (415, "content_type_required"))
+        self.assertEqual(self.transport.accepted, [])
+
+    def test_rebinding_host_and_oversize_observation_are_rejected(self) -> None:
+        status, body = self.request("GET", "/v1/observation", headers={"Host": "evil.example:80"})
+        self.assertEqual((status, body["error"]), (403, "untrusted_origin"))
+        self.transport.publish_observation("blue", observation(resources={"blob": "x" * 33000}))
+        status, body = self.request("GET", "/v1/observation")
+        self.assertEqual((status, body["error"]), (503, "observation_unavailable"))
+
+    def test_observation_ledger_failure_returns_stable_503(self) -> None:
+        class FailingLedger:
+            def record(self, *_args, **_kwargs):
+                raise LedgerError("ledger_closed")
+        self.server.shutdown(); self.thread.join(); self.server.server_close()
+        self.server = LoopbackGateway(self.transport, principal="agent-alpha", team="blue", ledger=FailingLedger()).make_server()
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
+        status, body = self.request("GET", "/v1/observation")
+        self.assertEqual((status, body["error"]), (503, "observation_unavailable"))
+
+    def test_short_body_times_out_and_closes_connection(self) -> None:
+        connection = socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2)
+        request = f"POST /v1/intents HTTP/1.1\r\nHost: 127.0.0.1:{self.server.server_port}\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n{{".encode()
+        connection.sendall(request)
+        connection.settimeout(2)
+        self.assertEqual(connection.recv(1), b"")
+        connection.close()
 
     def test_gateway_injects_identity_and_acceptance_is_not_an_effect(self) -> None:
         request = produce()
@@ -137,6 +177,17 @@ class GatewayTests(unittest.TestCase):
         status, result = self.request("POST", "/v1/intents", request)
         self.assertEqual(status, 400)
         self.assertEqual(result["error"], "invalid_payload")
+
+    def test_only_engine_smoke_advance_task_verb_is_allowed(self) -> None:
+        request = {"schema": "IntentEnvelope/v1", "intent_id": "task-1", "based_on_observation_id": "obs-1", "expires_at_frame": 200, "type": "TASK", "payload": {"unit": "H1", "verb": "move", "args": {}}}
+        status, result = self.request("POST", "/v1/intents", request)
+        self.assertEqual((status, result["error"]), (400, "verb_not_supported"))
+        self.assertEqual(self.transport.accepted, [])
+
+    def test_non_finite_json_is_rejected_at_parse_boundary(self) -> None:
+        request = produce(); request["expires_at_frame"] = float("nan")
+        status, result = self.request("POST", "/v1/intents", request)
+        self.assertEqual((status, result["error"]), (400, "malformed_json"))
 
     def test_stale_and_expired_submissions_are_distinct_rejections(self) -> None:
         self.transport.frame = 1100
@@ -192,7 +243,49 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(ledger.events[2]["causes"], ("event-2",))
         self.assertEqual(ledger.events[0]["payload"]["observation"]["observation_id"], "obs-1")
         self.assertEqual(ledger.events[1]["payload"]["envelope"]["payload"]["factory"], "F0")
-        self.assertEqual(ledger.events[2]["payload"], {"intent_id": "intent-1", "status": "accepted"})
+        self.assertEqual(ledger.events[2]["payload"], {"intent_id": "intent-1", "status": "accepted", "frame": 100})
+
+    def test_transport_timeout_returns_503_without_a_receipt_record(self) -> None:
+        class TimeoutTransport(MemoryTransport):
+            def submit_intent(self, envelope):
+                raise TimeoutError("no synced receipt")
+        self.server.shutdown(); self.thread.join(); self.server.server_close()
+        self.transport = TimeoutTransport(frame=100)
+        self.transport.publish_observation("blue", observation())
+        ledger = Ledger()
+        self.server = LoopbackGateway(self.transport, principal="agent-alpha", team="blue", ledger=ledger).make_server()
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
+        status, receipt = self.request("POST", "/v1/intents", produce())
+        self.assertEqual(status, 503)
+        self.assertEqual(receipt["error"], "gateway_unavailable")
+        self.assertEqual([event["kind"] for event in ledger.events], ["INTENT_SUBMITTED"])
+
+    def test_legacy_timeout_receipt_is_also_unknown_without_a_receipt_record(self) -> None:
+        class LegacyTimeout(MemoryTransport):
+            def submit_intent(self, envelope):
+                return IntentReceipt(envelope.intent_id, False, 9, "legacy", "receipt_timeout")
+        self.server.shutdown(); self.thread.join(); self.server.server_close()
+        self.transport = LegacyTimeout(frame=700); self.transport.publish_observation("blue", observation(frame=100))
+        ledger = Ledger(); self.server = LoopbackGateway(self.transport, principal="agent-alpha", team="blue", ledger=ledger).make_server()
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
+        status, body = self.request("POST", "/v1/intents", produce(expiry=800))
+        self.assertEqual(status, 503); self.assertEqual(body["error"], "gateway_unavailable")
+        self.assertEqual([event["kind"] for event in ledger.events], ["INTENT_SUBMITTED"])
+        self.assertEqual(ledger.events[0]["sim_frame"], 700)
+
+    def test_accepted_ledger_records_use_ingestion_frame_not_source_frames(self) -> None:
+        class OldReceipt(MemoryTransport):
+            def submit_intent(self, envelope):
+                return IntentReceipt(envelope.intent_id, True, 9, "old-receipt")
+        self.server.shutdown(); self.thread.join(); self.server.server_close()
+        self.transport = OldReceipt(frame=700)
+        self.transport.publish_observation("blue", observation("source", 100))
+        ledger = Ledger(); self.server = LoopbackGateway(self.transport, principal="agent-alpha", team="blue", ledger=ledger).make_server()
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
+        self.request("GET", "/v1/observation")
+        self.request("POST", "/v1/intents", produce("source", 800))
+        self.assertEqual([event["sim_frame"] for event in ledger.events], [700, 700, 700])
+        self.assertEqual(ledger.events[2]["payload"]["frame"], 9)
 
     def test_real_recorder_captures_flat_metadata_and_full_evidence(self) -> None:
         self.server.shutdown()
@@ -216,6 +309,23 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(submitted["payload"]["intent_id"], "intent-1")
         self.assertEqual(submitted["payload"]["envelope"]["payload"]["factory"], "F0")
 
+    def test_real_recorder_preserves_duplicate_attempt_and_its_rejection(self) -> None:
+        self.server.shutdown(); self.thread.join(); self.server.server_close()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run.jsonl"; recorder = Recorder.create(path, manifest(), fsync=False); recorder.run_start(0)
+            self.server = LoopbackGateway(self.transport, principal="agent-alpha", team="blue", origin="scripted", ledger=recorder).make_server()
+            self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
+            self.request("GET", "/v1/observation")
+            self.assertEqual(self.request("POST", "/v1/intents", produce())[0], 202)
+            self.assertEqual(self.request("POST", "/v1/intents", produce())[0], 409)
+            recorder.run_end(100, {"success": False}); result = verify_ledger(path)
+        self.assertTrue(result.ok, result.errors)
+        submitted = [r for r in result.records if r["kind"] == "INTENT_SUBMITTED"]
+        receipts = [r for r in result.records if r["kind"] == "INTENT_RECEIPT"]
+        self.assertEqual(len(submitted), 2); self.assertEqual(len(receipts), 2)
+        self.assertEqual(receipts[1]["payload"]["reason_code"], "duplicate_intent_id")
+        self.assertEqual(receipts[1]["causes"], [submitted[1]["event_id"]])
+
     def test_history_allows_an_observation_until_its_simulation_age_expires(self) -> None:
         self.transport.publish_observation("blue", observation("old", 100))
         self.transport.publish_observation("blue", observation("new", 115))
@@ -231,6 +341,19 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(result["error"], "invalid_payload")
         self.assertEqual(self.transport.accepted, [])
+
+    def test_closed_controller_and_install_version_enums_reject_validly_shaped_unknowns(self) -> None:
+        request = produce(); request["payload"]["controller"] = "haul_v9"
+        status, result = self.request("POST", "/v1/intents", request)
+        self.assertEqual((status, result["error"]), (400, "invalid_payload"))
+
+    def test_closed_chassis_enum_rejects_validly_shaped_unknown(self) -> None:
+        request = produce(); request["payload"]["chassis"] = "hauler_v9"
+        status, result = self.request("POST", "/v1/intents", request)
+        self.assertEqual((status, result["error"]), (400, "invalid_payload"))
+        install = {"schema": "IntentEnvelope/v1", "intent_id": "install-1", "based_on_observation_id": "obs-1", "expires_at_frame": 200, "type": "INSTALL", "payload": {"unit": "H1", "expected_version": "haul_v1", "replacement_version": "haul_v9", "parameters": {}}}
+        status, result = self.request("POST", "/v1/intents", install)
+        self.assertEqual((status, result["error"]), (400, "invalid_payload"))
 
 
 if __name__ == "__main__":

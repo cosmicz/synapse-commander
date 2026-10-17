@@ -66,24 +66,6 @@ def _bounded_object(value: Any, field: str) -> dict[str, Any]:
     return value
 
 
-def _safe_payload(value: Any, field: str, depth: int = 0) -> None:
-    """Reject command-smuggling keys and unbounded nested payload structures."""
-    if depth > 4:
-        raise ProtocolError("invalid_payload", f"{field} is nested too deeply")
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            if not isinstance(key, str) or key.casefold() in {"lua", "raw", "command", "console", "engine_command"}:
-                raise ProtocolError("invalid_payload", "raw engine commands are not permitted")
-            _safe_payload(nested, field, depth + 1)
-    elif isinstance(value, list):
-        if len(value) > 16:
-            raise ProtocolError("invalid_payload", f"{field} has too many list values")
-        for nested in value:
-            _safe_payload(nested, field, depth + 1)
-    elif not isinstance(value, (str, int, float, bool, type(None))):
-        raise ProtocolError("invalid_payload", f"{field} contains an unsupported value")
-
-
 @dataclass(frozen=True)
 class IntentEnvelope:
     schema: str
@@ -131,7 +113,6 @@ class IntentEnvelope:
                 # argument vocabulary. Broken Relay parameters belong in its
                 # later engine adapter, not an untyped escape hatch here.
                 raise ProtocolError("invalid_payload", f"{field} is empty in the smoke schema")
-        _safe_payload(payload, "payload")
         expiry = value.get("expires_at_frame")
         if not isinstance(expiry, int) or isinstance(expiry, bool) or expiry < 0:
             raise ProtocolError("invalid_expiry", "expires_at_frame must be a non-negative integer")
@@ -214,8 +195,8 @@ def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
     ordered_receipts = sorted(receipts, key=event_key)
     ordered_effects = sorted(effects, key=event_key)
     clipped_entities = ordered_entities[:MAX_ENTITIES]
-    clipped_receipts = ordered_receipts[:MAX_RECENT_EVENTS]
-    clipped_effects = ordered_effects[:MAX_RECENT_EVENTS]
+    clipped_receipts = ordered_receipts[-MAX_RECENT_EVENTS:]
+    clipped_effects = ordered_effects[-MAX_RECENT_EVENTS:]
     result: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
         "observation_id": observation_id,
