@@ -35,6 +35,11 @@ class StartScriptTests(unittest.TestCase):
         self.assertIn("Spectator=0;", script)
         self.assertIn("Team=0;", script)
         self.assertNotIn("debugcommands", script)
+        self.assertIn("HostIP=127.0.0.1;", script)
+        self.assertIn("HostPort=8452;", script)
+        self.assertIn("HostPort=40000;", launch.start_script(run_id="r", host_port=40000))
+        with self.assertRaises(launch.LaunchError):
+            launch.start_script(run_id="r", host_port=80)
         self.assertNotIn("runtestsheadless", script)
         self.assertEqual(script.count("{"), script.count("}"))
 

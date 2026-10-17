@@ -259,7 +259,7 @@ def run_smoke(config: SmokeConfig, *,
         identity = identity or artifacts.identity()
     else:
         layout.write_dir.mkdir(parents=True)
-    script = launch.start_script(run_id=run_id)
+    script = launch.start_script(run_id=run_id, host_port=launch.free_udp_port())
     settings = launch.engine_settings()
     layout.write_config(script, settings)
     mailbox_dir = layout.mailbox_dir

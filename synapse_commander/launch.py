@@ -17,6 +17,7 @@ import platform
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import time
 from typing import Mapping, Sequence
@@ -150,13 +151,19 @@ def start_script(
     map_name: str = MAP_NAME,
     seed: int = 1,
     player_name: str = "SynapseCommander",
+    host_port: int = 8452,
 ) -> str:
     """One player on team 0, no cheats or debug commands, no test runner.
+
+    The engine's own game server listens on loopback only, on HOST_PORT, so
+    concurrent engines on one host do not collide on the default port.
 
     Foreign units for ownership probes are Gaia units the scenario spawns. The
     game never ends by itself; the launcher stops it.
     """
     check_run_id(run_id)
+    if not 1024 <= int(host_port) <= 65535:
+        raise LaunchError("host port out of range")
     for value in (game_type, map_name, player_name):
         if any(ch in value for ch in ";{}\n\r"):
             raise LaunchError("start script value contains a structural character")
@@ -237,6 +244,13 @@ class RunLayout:
     def write_config(self, script: str, settings: Mapping[str, object]) -> None:
         self.script_path.write_text(script, encoding="ascii")
         self.settings_path.write_text(_settings_text(settings), encoding="ascii")
+
+
+def free_udp_port() -> int:
+    """A currently free loopback UDP port for the engine's game server."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 def engine_settings() -> dict[str, object]:
