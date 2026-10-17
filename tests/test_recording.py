@@ -551,10 +551,6 @@ class CausalTyping(LedgerCase):
         self.assertNotEqual(again, sub)
         with self.assertRaises(LedgerError) as ctx:
             r.record(rec.INTENT_RECEIPT, sim_frame=2, origin="gateway",
-                     payload={"intent_id": "i1", "status": "accepted"}, causes=[again])
-        self.assertEqual(ctx.exception.code, "duplicate_acceptance")
-        with self.assertRaises(LedgerError) as ctx:
-            r.record(rec.INTENT_RECEIPT, sim_frame=2, origin="gateway",
                      payload={"intent_id": "i1", "status": "rejected"}, causes=[sub])
         self.assertEqual(ctx.exception.code, "duplicate_receipt")
         with self.assertRaises(LedgerError):  # one receipt cannot answer both attempts
@@ -570,6 +566,20 @@ class CausalTyping(LedgerCase):
         self.assertEqual(result.counts[rec.INTENT_SUBMITTED], 2)
         self.assertEqual(result.counts[rec.INTENT_RECEIPT], 2)
         self.assertNotEqual(first, again)
+        self.assertFalse(any("more than once" in x for x in result.evidence_limits))
+
+    def test_double_acceptance_is_recorded_and_flagged_not_refused(self):
+        r, obs, sub = self.started()
+        r.record(rec.INTENT_RECEIPT, sim_frame=1, origin="gateway",
+                 payload={"intent_id": "i1", "status": "accepted"}, causes=[sub])
+        again = r.record(rec.INTENT_SUBMITTED, sim_frame=2, origin="human",
+                         payload={"intent_id": "i1", "type": "TASK", "based_on_observation_id": "o1"}, causes=[obs])
+        r.record(rec.INTENT_RECEIPT, sim_frame=2, origin="gateway",
+                 payload={"intent_id": "i1", "status": "accepted"}, causes=[again])
+        r.run_end(3, {})
+        result = verify_ledger(self.path)
+        self.assertTrue(result.ok, result.errors)
+        self.assertIn("intent_id i1 accepted more than once", result.evidence_limits)
 
     def test_decision_does_not_borrow_another_attempts_acceptance(self):
         self.write_run(origin="agent", **AGENT_MANIFEST)

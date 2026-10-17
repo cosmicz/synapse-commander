@@ -213,7 +213,6 @@ class _LedgerState:
         self.last_frame = -1
         self.last_wall = -1
         self.receipted: set[str] = set()  # submission event ids that have a receipt
-        self.accepted_intents: set[str] = set()
 
     def accept(self, record: Mapping[str, Any]) -> None:
         if not isinstance(record, Mapping):
@@ -278,8 +277,6 @@ class _LedgerState:
         stored = dict(record)
         if kind == INTENT_RECEIPT:
             self.receipted.update(c for c in causes if self.by_id[c]["kind"] == INTENT_SUBMITTED)
-            if payload["status"] == "accepted":
-                self.accepted_intents.add(payload["intent_id"])
         self.records.append(stored)
         self.by_id[stored["event_id"]] = stored
         self.head = stored["digest"]
@@ -329,8 +326,6 @@ class _LedgerState:
                 raise LedgerError("incompatible_cause", f"seq {seq} receipt must cite exactly its submission")
             if submitted[0]["event_id"] in self.receipted:
                 raise LedgerError("duplicate_receipt", f"seq {seq}")
-            if payload["status"] == "accepted" and payload["intent_id"] in self.accepted_intents:
-                raise LedgerError("duplicate_acceptance", f"seq {seq} intent {payload['intent_id']}")
         elif kind == RADIO:
             if payload.get("status") not in _RADIO_STATUSES:
                 raise LedgerError("invalid_payload", f"seq {seq} radio status")
@@ -627,6 +622,13 @@ def _classify(result: Verification) -> None:
         limits.append("operator intervention after start: not autonomous")
     if classification in ("unattributed", "agent_partial"):
         limits.append("agent decisions lack complete live-inference evidence: not autonomous")
+    accepted: dict[str, int] = {}
+    for receipt in receipts.values():
+        if receipt["payload"]["status"] == "accepted":
+            accepted[receipt["payload"]["intent_id"]] = accepted.get(receipt["payload"]["intent_id"], 0) + 1
+    for intent_id in sorted(i for i, n in accepted.items() if n > 1):
+        # Recorded faithfully rather than refused; the dispatcher should not do this.
+        limits.append(f"intent_id {intent_id} accepted more than once")
     limits.append("hash chain detects accidental corruption, not deliberate forgery")
     result.evidence_limits = limits
 
