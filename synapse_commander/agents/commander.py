@@ -43,6 +43,8 @@ An IntentEnvelope is {"schema": "IntentEnvelope/v1", "intent_id": "<new unique i
 "expires_at_frame": <an integer frame after the current frame, at most 900 later>,
 "type": <one of the permitted intent types>, "payload": <that type's payload>}.
 A TASK payload is {"unit": "<id of a unit you own, as a string>", "verb": "<permitted verb>", "args": {}}.
+Verbs take no arguments: args is always the empty object {}. The verb
+"advance" orders that unit to move to waypoint W1 shown in the observation.
 Only intents listed in permitted_intents can succeed. The game decides whether
 an intent is legal and reports receipts; an accepted intent is not yet an
 effect, so check later observations for what actually happened."""
@@ -167,7 +169,7 @@ def parse_decision(text: str, observation: dict[str, Any], used_ids: set[str]) -
     try:
         parsed = IntentEnvelope.from_untrusted(envelope, principal="client-check", team="client-check")
     except ProtocolError as exc:
-        return Decision("invalid", rejected=f"protocol: {exc.code}")
+        return Decision("invalid", rejected=f"protocol: {exc.code}: {exc.detail}")
     if envelope.get("schema") != INTENT_SCHEMA_VERSION:
         return Decision("invalid", rejected="schema")
     if parsed.based_on_observation_id != observation["observation_id"]:

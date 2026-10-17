@@ -101,6 +101,12 @@ class ParseDecisionTests(unittest.TestCase):
                 self.assertEqual(parse_decision(text, self.observation, set()).action, "invalid")
         self.assertEqual(parse_decision(self.envelope(), self.observation, {"a1"}).rejected, "intent_id reused")
 
+    def test_rejection_names_the_rule_so_the_model_can_correct(self) -> None:
+        decision = parse_decision(self.envelope(payload={"unit": "7", "verb": "advance", "args": {"to": "W1"}}),
+                                  self.observation, set())
+        self.assertEqual(decision.action, "invalid")
+        self.assertIn("args is empty", decision.rejected)
+
     def test_wait_and_done(self) -> None:
         self.assertEqual(parse_decision('{"action": "wait", "reason": "x"}', self.observation, set()).action, "wait")
         self.assertEqual(parse_decision('```json\n{"action": "done"}\n```', self.observation, set()).action, "done")

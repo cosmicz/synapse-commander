@@ -139,6 +139,38 @@ bridge filters them rather than field-allowlisted by the gateway.
 =tests/test_loop_orchestration.py= exercises the same orchestration with an
 in-process fake engine; it checks wiring and verdict rules, not the engine.
 
+* Agent commander run
+=python3 -m synapse_commander run-agent= takes the same launch arguments as
+=run-smoke= plus =--model= (default =claude-sonnet-5=), =--call-budget= (20),
+=--call-timeout= (60 s) and =--deadline= (600 s). Instead of the scripted
+client, =agents/commander.py= loops: read the bounded observation over HTTP,
+build a prompt from it and its own past decisions and receipts, call the model
+out of process, parse exactly one decision (an =IntentEnvelope/v1=, a wait or
+done), and submit an intent through the gateway. The engine keeps running
+while the model thinks. No negative probes are sent.
+
+The model route is the already-authenticated Claude CLI (=claude -p
+--output-format json=, tools disabled, no session persistence, stdin closed,
+bounded time); no credential is read or stored. The manifest declares the
+pinned model, the call budget and the system-prompt hash. Output that is not
+exactly one valid decision for the observation shown is rejected client-side,
+counted, and the rule it broke is fed back on the next call; it is never
+repaired or replaced by a scripted intent. Each call adds an =INFERENCE=
+record citing the observation it saw; the gateway's =INTENT_SUBMITTED= cites
+that record and carries the decision label only if the submitted envelope is
+the one the model produced. Raw prompts and outputs are kept in the private
+=decisions.jsonl=, never in the ledger.
+
+=PASS= needs: hello; unit and =W1= observed; an accepted advance chosen by the
+model; displacement within 300 frames after its receipt; =order_done= within
+600 frames; inference, submission, receipt, effect and moved observation in
+causal ledger order; no effect from a rejected intent; the call budget kept;
+the exclusivity and teardown checks; and the verified ledger classifying the
+run =agent_only=, which requires the declared model to have produced the
+required =advance_to_W1= decision. Limits: one unit, fixed waypoint, headless,
+not visual; agent-only autonomy on this smoke task says nothing about play
+quality on a real mission.
+
 * Initial upstream runtime evidence — October 17, 2026
 Recoil 2026.07.04 ARM64 Linux executes in a VM. Stock BAR at
 =f6f07eaf1fbc09eae536444ff3b2755d81e5440b= loaded Supreme Isthmus v2.1 and
