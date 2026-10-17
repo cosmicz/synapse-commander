@@ -29,6 +29,18 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn("if scenario_emitted and can_emit_effect", self.source)
         self.assertIn("definition and definition.name", self.source)
 
+    def test_boundary_records_and_observation_history_are_chronological(self) -> None:
+        self.assertIn("MAX_LINE + #PREFIX", self.source)
+        self.assertIn("local order = observation_order[teamID] or {}", self.source)
+        self.assertIn("table.remove(order, 1)", self.source)
+
+    def test_pending_order_never_spends_a_rate_token(self) -> None:
+        self.assertIn('emit_receipt(intent, "rejected", "unit_busy")', self.source)
+        self.assertLess(
+            self.source.index('emit_receipt(intent, "rejected", "unit_busy")'),
+            self.source.index("if not use_token(teamID, frame)"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

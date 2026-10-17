@@ -15,7 +15,7 @@ if gadgetHandler:IsSyncedCode() then
   -- Keep enough ids to distinguish a stale observation from an unknown one.
   -- The public observation itself remains bounded; this is reducer-only state.
   local TEAM0, OBS_INTERVAL, MAX_OBSERVATIONS = 0, 15, 128
-  local observations, seen, pending, rate = {}, {}, {}, {}
+  local observations, observation_order, seen, pending, rate = {}, {}, {}, {}, {}
   local waypoint, scenario_emitted = nil, false
 
   local function out(kind, body)
@@ -89,14 +89,13 @@ if gadgetHandler:IsSyncedCode() then
 
   local function remember_observation(teamID, id, frame)
     local by_team = observations[teamID] or {}
+    local order = observation_order[teamID] or {}
     observations[teamID] = by_team
+    observation_order[teamID] = order
+    if not by_team[id] then order[#order + 1] = id end
     by_team[id] = frame
-    local keys = {}
-    for key in pairs(by_team) do keys[#keys + 1] = key end
-    table.sort(keys)
-    while #keys > MAX_OBSERVATIONS do
-      by_team[keys[1]] = nil
-      table.remove(keys, 1)
+    while #order > MAX_OBSERVATIONS do
+      by_team[table.remove(order, 1)] = nil
     end
   end
 
@@ -130,7 +129,9 @@ if gadgetHandler:IsSyncedCode() then
 
   function gadget:RecvLuaMsg(msg, playerID)
     if msg:sub(1, #PREFIX) ~= PREFIX then return false end
-    if #msg > MAX_LINE then
+    -- MAX_LINE bounds the JSONL record; the internal SYN0 prefix is not part
+    -- of that external record and must not reject a valid 4096-byte line.
+    if #msg > MAX_LINE + #PREFIX then
       out("bridge_error", { reason = "too_large", bytes = #msg })
       return true
     end
@@ -183,7 +184,8 @@ if gadgetHandler:IsSyncedCode() then
     if type(intent.expires_at_frame) ~= "number" or intent.expires_at_frame < frame then
       emit_receipt(intent, "rejected", "expired"); return true
     end
-    if not use_token(teamID, frame) or pending[unitID] then emit_receipt(intent, "rejected", "rate_limited"); return true end
+    if pending[unitID] then emit_receipt(intent, "rejected", "unit_busy"); return true end
+    if not use_token(teamID, frame) then emit_receipt(intent, "rejected", "rate_limited"); return true end
     local x, _, z = Spring.GetUnitPosition(unitID)
     Spring.GiveOrderToUnit(unitID, CMD.MOVE, waypoint, 0)
     pending[unitID] = { intent_id = id, last_x = x, last_z = z }
@@ -210,8 +212,11 @@ if gadgetHandler:IsSyncedCode() then
         local x, y, z = Spring.GetUnitPosition(unitID)
         if x then
           local definition = UnitDefs[Spring.GetUnitDefID(unitID)]
-          local entity = { id = unitID, team = teamID, pos = { x, y, z }, source = source, def = definition and definition.name, health = Spring.GetUnitHealth(unitID) }
-          if source == "own_unit" then entity.commands = Spring.GetUnitCommandCount(unitID) end
+          local entity = { id = unitID, team = teamID, pos = { x, y, z }, source = source, def = definition and definition.name }
+          if source == "own_unit" then
+            entity.health = Spring.GetUnitHealth(unitID)
+            entity.commands = Spring.GetUnitCommandCount(unitID)
+          end
           entities[#entities + 1] = entity
         end
       end
