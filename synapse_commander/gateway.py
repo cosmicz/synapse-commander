@@ -5,6 +5,7 @@ from __future__ import annotations
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
+import hashlib
 import json
 import math
 import re
@@ -14,6 +15,7 @@ from typing import Any
 
 from .protocol import (
     MAX_ENVELOPE_BYTES,
+    MAX_OBSERVATION_BYTES,
     IntentEnvelope,
     LedgerSink,
     ProtocolError,
@@ -26,6 +28,7 @@ from .transport import EngineTransport
 
 
 OBSERVATION_HISTORY_FRAMES = 900
+MAX_PERSISTENT_MESSAGES = 16
 
 
 class PrincipalUnembodied(RuntimeError):
@@ -81,7 +84,63 @@ class LoopbackGateway:
         self._submission_meta: dict[tuple[str, str], int | None] = {}
         self._submission_events: dict[tuple[str, str], str | None] = {}
         self._known_receipts: dict[tuple[str, str], Any] = {}
+        # A model call may last longer than the engine's transient report tick.
+        # Keep only messages that the engine already exposed on this principal's
+        # own stream, so a delayed next observation cannot erase a delegation.
+        self._message_inboxes: dict[str, dict[tuple[str, int, str], dict[str, Any]]] = {}
         self._ledger_lock = RLock()
+
+    @staticmethod
+    def _message_key(report: dict[str, Any]) -> tuple[str, int, str]:
+        return (report["from"], report["observed_frame"],
+                hashlib.sha256(report["text"].encode("utf-8")).hexdigest())
+
+    def _remember_messages(self, source: Any, principal: str, frame: int) -> None:
+        """Copy valid delivered messages from this already-authorized stream."""
+        if not isinstance(source, dict) or source.get("principal") != principal:
+            return
+        reports = source.get("reports")
+        if not isinstance(reports, list):
+            return
+        inbox = self._message_inboxes.setdefault(principal, {})
+        for report in reports:
+            if not isinstance(report, dict) or set(report) != {
+                    "kind", "from", "text", "observed_frame", "delivered_frame", "age_frames"}:
+                continue
+            sender, text = report.get("from"), report.get("text")
+            observed, delivered = report.get("observed_frame"), report.get("delivered_frame")
+            if (report.get("kind") != "message" or not isinstance(sender, str) or not sender
+                    or not isinstance(text, str) or len(text) > 256
+                    or not isinstance(observed, int) or isinstance(observed, bool) or observed < 0
+                    or not isinstance(delivered, int) or isinstance(delivered, bool)
+                    or delivered < 0 or observed > frame or delivered > frame):
+                continue
+            item = {"kind": "message", "from": sender, "text": text,
+                    "observed_frame": observed, "delivered_frame": delivered,
+                    "age_frames": frame - observed}
+            inbox[self._message_key(item)] = item
+        if len(inbox) > MAX_PERSISTENT_MESSAGES:
+            keep = sorted(inbox.items(), key=lambda entry: (
+                entry[1]["delivered_frame"], entry[1]["observed_frame"], entry[0]))[-MAX_PERSISTENT_MESSAGES:]
+            self._message_inboxes[principal] = dict(keep)
+
+    def _merge_persistent_messages(self, observation: dict[str, Any], principal: str) -> None:
+        inbox = self._message_inboxes.get(principal)
+        if not inbox:
+            return
+        frame = observation["frame"]
+        messages = []
+        for item in inbox.values():
+            if item["observed_frame"] <= frame:
+                messages.append({**item, "age_frames": frame - item["observed_frame"]})
+        messages.sort(key=lambda item: (item["delivered_frame"], item["observed_frame"],
+                                        self._message_key(item)))
+        reports = observation.get("reports", [])
+        # The live inbox takes precedence over transient copies of the same
+        # message; retain the other already-bounded report types unchanged.
+        observation["reports"] = [item for item in reports if item.get("kind") != "message"] + messages
+        if len(compact_json(observation)) > MAX_OBSERVATION_BYTES:
+            raise ProtocolError("observation_too_large", "persistent inbox exceeds public cap")
 
     def _prune_observation_history(self, current_frame: int) -> None:
         """Keep session observation authority only for the engine freshness window."""
@@ -150,6 +209,8 @@ class LoopbackGateway:
             observation = bounded_observation(source, scenario_table=self._scenario,
                                               principal=principal if self._sessions else None)
             if self._sessions:
+                self._remember_messages(source, principal, observation["frame"])
+                self._merge_persistent_messages(observation, principal)
                 self._unembodied_principals.discard(principal)
                 self._prune_observation_history(self.transport.current_frame())
                 self._observation_principals[observation["observation_id"]] = (principal, observation["frame"])
