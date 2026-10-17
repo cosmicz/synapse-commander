@@ -16,10 +16,11 @@ from unittest import mock
 from synapse_commander import launch
 
 
-def _write_fake_artifacts(root: Path, engine_body: str) -> launch.RuntimeArtifacts:
+def _write_fake_artifacts(root: Path, engine_body: str,
+                          engine_binary: str = launch.HEADLESS_BINARY) -> launch.RuntimeArtifacts:
     engine_dir = root / "engine"
     engine_dir.mkdir()
-    engine = engine_dir / "spring-headless"
+    engine = engine_dir / engine_binary
     engine.write_text("#!/bin/sh\n" + engine_body)
     engine.chmod(engine.stat().st_mode | stat.S_IXUSR)
     game = root / "BAR.sdd"
@@ -27,7 +28,8 @@ def _write_fake_artifacts(root: Path, engine_body: str) -> launch.RuntimeArtifac
     (game / "modinfo.lua").write_text("return {}\n")
     (root / "data" / "maps").mkdir(parents=True)
     (root / "data" / "maps" / launch.MAP_FILE).write_bytes(b"map")
-    return launch.RuntimeArtifacts.from_dirs(engine_dir=engine_dir, data_dir=root / "data", game_dir=game)
+    return launch.RuntimeArtifacts.from_dirs(engine_dir=engine_dir, data_dir=root / "data", game_dir=game,
+                                             engine_binary=engine_binary)
 
 
 class StartScriptTests(unittest.TestCase):
@@ -77,6 +79,52 @@ class LayoutTests(unittest.TestCase):
             self.assertNotIn(tmp, repr(identity))
             hashes = artifacts.archive_hashes()
             self.assertIn(f"{launch.APP_ARCHIVE_DIR}/modinfo.lua", hashes)
+
+
+class EngineBinaryTests(unittest.TestCase):
+    def test_headless_is_the_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = _write_fake_artifacts(Path(tmp), "exit 0\n")
+            self.assertEqual(artifacts.engine.name, "spring-headless")
+            self.assertEqual(artifacts.presentation, "headless")
+
+    def test_rendered_client_from_the_same_engine_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = _write_fake_artifacts(Path(tmp), "exit 0\n", engine_binary="spring")
+            self.assertEqual(artifacts.engine, artifacts.engine_dir / "spring")
+            self.assertEqual(artifacts.presentation, "rendered")
+            self.assertEqual(artifacts.identity()["engine"]["binary"], "spring")
+
+    def test_only_known_engine_programs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("spring-dedicated", "../spring", "sh"):
+                with self.assertRaises(launch.LaunchError):
+                    launch.RuntimeArtifacts.from_dirs(engine_dir=Path(tmp), data_dir=Path(tmp), engine_binary=name)
+
+    def test_engine_inherits_display_and_gl_settings_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = _write_fake_artifacts(Path(tmp), "env > seen-env.txt\n", engine_binary="spring")
+            layout = launch.RunLayout(Path(tmp) / "out" / "r")
+            layout.create(artifacts)
+            layout.write_config(launch.start_script(run_id="r"), launch.engine_settings())
+            env = {"DISPLAY": ":99", "LIBGL_ALWAYS_SOFTWARE": "1", "GALLIUM_DRIVER": "llvmpipe"}
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("LD_PRELOAD", None)
+                engine = launch.EngineProcess(artifacts, layout)
+                engine.start()
+                engine.proc.wait(timeout=10)
+                recorded = launch.render_environment()
+            seen = dict(line.split("=", 1) for line in
+                        (layout.write_dir / "seen-env.txt").read_text().splitlines() if "=" in line)
+            for key, value in env.items():
+                self.assertEqual(seen.get(key), value)
+                self.assertEqual(recorded[key], value)
+            self.assertNotIn("LD_PRELOAD", seen, "the launcher adds no preload of its own")
+
+    def test_render_environment_keeps_only_render_variables(self) -> None:
+        recorded = launch.render_environment({"DISPLAY": ":1", "MESA_GL_VERSION_OVERRIDE": "4.3",
+                                              "HOME": "/x", "API_KEY": "secret"})
+        self.assertEqual(recorded, {"DISPLAY": ":1", "MESA_GL_VERSION_OVERRIDE": "4.3"})
 
 
 class TeardownTests(unittest.TestCase):

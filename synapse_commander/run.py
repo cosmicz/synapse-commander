@@ -45,6 +45,15 @@ AGENT_LABEL = ("agent commander: headless; every intent chosen by a live model f
 CLASSIFICATION_LABEL = "scripted fixture: headless, scripted reference client, not autonomous, not visual"
 
 
+def run_label(agent: bool, presentation: str) -> str:
+    """How the run is described; a rendered client changes presentation, not decisions."""
+    label = AGENT_LABEL if agent else CLASSIFICATION_LABEL
+    if presentation == "rendered":
+        label = label.replace("headless", "rendered client").replace(
+            "not visual", "rendered frames show presentation only")
+    return label
+
+
 class SmokeTransport(Protocol):
     def hello(self) -> dict[str, Any] | None: ...
     def current_frame(self) -> int: ...
@@ -255,6 +264,7 @@ class SmokeConfig:
     client_poll_s: float = 0.25
     lock_wait_s: float = 1200.0
     mode: str = "scripted"            # "scripted" reference client or "agent" commander
+    engine_binary: str = launch.HEADLESS_BINARY  # or "spring", the rendered client
     model: str = "claude-sonnet-5"    # agent mode: model pinned for the CLI route
     call_budget: int = 20
     call_timeout_s: float = 60.0
@@ -263,6 +273,7 @@ class SmokeConfig:
 
 def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, identity: dict[str, Any],
                    config_hashes: dict[str, str], principal: str = PRINCIPAL, model_id: str | None = None,
+                   presentation: str = "headless",
                    external_budgets: dict[str, Any] | None = None,
                    required_decisions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
@@ -282,7 +293,7 @@ def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, iden
         "external_budgets": external_budgets or {},
         "clock_mode": "continuous",
         "fps": FPS,
-        "presentation": "headless",
+        "presentation": presentation,
         "required_decisions": required_decisions or [],
     }
 
@@ -316,7 +327,7 @@ def run_smoke(config: SmokeConfig, *,
     artifacts = None
     if engine_factory is None:
         artifacts = launch.RuntimeArtifacts.from_dirs(engine_dir=config.engine_dir, data_dir=config.data_dir,
-                                                      game_dir=config.game_dir)
+                                                      game_dir=config.game_dir, engine_binary=config.engine_binary)
         layout.create(artifacts)
         identity = identity or artifacts.identity()
     else:
@@ -327,8 +338,13 @@ def run_smoke(config: SmokeConfig, *,
     mailbox_dir = layout.mailbox_dir
     mailbox_dir.mkdir(parents=True, exist_ok=True)
 
+    presentation = "headless" if artifacts is None else artifacts.presentation
+    render_env = launch.render_environment()
     config_hashes = {"start_script": sha256_text(script),
-                     "springsettings": sha256_text(launch._settings_text(settings))}
+                     "springsettings": sha256_text(launch._settings_text(settings)),
+                     # The values may hold host paths, so the manifest carries only their hash;
+                     # the private verdict keeps them in full.
+                     "engine_render_environment": sha256_text(json.dumps(render_env, sort_keys=True))}
     if artifacts is not None:
         config_hashes.update(artifacts.archive_hashes())
     package = Path(__file__).resolve().parent
@@ -344,14 +360,14 @@ def run_smoke(config: SmokeConfig, *,
         config_hashes["agent_system_prompt"] = sha256_text(SYSTEM_PROMPT)
         manifest = build_manifest(
             run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit, identity=identity,
-            config_hashes=config_hashes, principal=AGENT_PRINCIPAL, model_id=config.model,
+            config_hashes=config_hashes, principal=AGENT_PRINCIPAL, model_id=config.model, presentation=presentation,
             external_budgets={"model_calls": config.call_budget, "per_call_timeout_s": config.call_timeout_s,
                               "wall_deadline_s": config.agent_deadline_s,
                               "route": getattr(model_route, "name", "claude-cli")},
             required_decisions=[{"label": "advance_to_W1", "type": "TASK"}])
     else:
         manifest = build_manifest(run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit,
-                                  identity=identity, config_hashes=config_hashes)
+                                  identity=identity, config_hashes=config_hashes, presentation=presentation)
     (mailbox_dir / "run.json").write_text(json.dumps(
         {"run_id": run_id, "game": launch.APP_GAME_TYPE, "map": launch.MAP_NAME,
          "start_script_sha256": config_hashes["start_script"], "app_commit": app_commit}, indent=1) + "\n")
@@ -361,7 +377,9 @@ def run_smoke(config: SmokeConfig, *,
         lock = launch.RuntimeLock(config.lock_dir, f"plt-loop {run_id} {utc_now()}", wait_s=config.lock_wait_s)
     verdict: dict[str, Any] = {"run_id": run_id, "mode": config.mode,
                                **({"call_budget": config.call_budget, "model": config.model} if agent else {}),
-                               "classification": AGENT_LABEL if agent else CLASSIFICATION_LABEL,
+                               "classification": run_label(agent, presentation),
+                               "presentation": presentation, "engine_binary": config.engine_binary,
+                               "engine_render_environment": render_env,
                                "app_commit": app_commit, "app_modified_files": app_dirty,
                                "rig_commit": config.rig_commit, "wall_start_utc": utc_now(),
                                "lock": None if lock is None else {"name": config.lock_dir.name}}
@@ -475,7 +493,7 @@ def run_smoke(config: SmokeConfig, *,
             checks = (evaluate_agent if agent else evaluate)(trace, ordered, verdict)
             outcome = {"pre_ledger_checks": "PASS" if checks and all(c["ok"] for c in checks.values())
                        and not error else "FAIL", "failed": sorted(n for n, c in checks.items() if not c["ok"]),
-                       "error": error, "classification": AGENT_LABEL if agent else CLASSIFICATION_LABEL}
+                       "error": error, "classification": run_label(agent, presentation)}
             try:
                 recorder.run_end(ordered.last_frame if ordered else 0, outcome)
             except Exception as exc:
@@ -573,7 +591,7 @@ def evaluate(trace: dict[str, Any], ordered: OrderedLedger | None, verdict: dict
 def _host_checks(verdict: dict[str, Any], check: Callable[..., None]) -> None:
     others = sorted(set(verdict.get("other_engines_at_start", [])) | set(verdict.get("other_engines_during_run", [])))
     check("exclusive_runtime", not others, other_engine_pids=others,
-          detail="no other spring-headless process ran on this host during the run")
+          detail="no other engine process (spring-headless or spring) ran on this host during the run")
     teardown = verdict.get("teardown") or {}
     check("teardown_bounded", teardown.get("group_alive_after") is False
           and float(teardown.get("teardown_s", 1e9)) <= 20.0, teardown=teardown)

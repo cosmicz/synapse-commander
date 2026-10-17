@@ -231,6 +231,8 @@ class LoopOrchestrationTests(unittest.TestCase):
                      "no_movement_after_foreign_probes", "exclusive_runtime"):
             self.assertTrue(checks[name]["ok"], (name, checks[name]))
         self.assertEqual(checks["ledger_verified"]["classification"], "scripted_replay")
+        self.assertEqual(verdict["presentation"], "headless")
+        self.assertIn("engine_render_environment", verdict)
         trace = json.loads((self.out / "fake-ok" / "trace.json").read_text())
         self.assertEqual(trace["unit_id"], 101, "the smoke unit, not the commander")
         self.assertEqual(trace["probe_target_ids"], [900])

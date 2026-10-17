@@ -70,6 +70,16 @@ stock BAR checkout at =f6f07eaf= (=--game-dir=), a private evidence root
 for the manifest (=--rig-commit=). All of these are supplied at launch; no host
 path, credential or downloaded asset is stored in this repository.
 
+=--engine-binary spring= runs the rendered client from the same engine
+directory instead of =spring-headless=, with the same scenario, gateway, ledger
+and verdict. The engine inherits the launcher's environment unchanged: =DISPLAY=
+and GL settings are passed through, and the launcher sets none of them (no
+=LD_PRELOAD= of its own). The private verdict records the inherited rendering
+variables; the manifest carries only their hash and =presentation rendered=. A
+rendered frame shows presentation; it does not change how the run's decisions
+are classified. The exclusivity check counts both =spring-headless= and
+=spring= processes.
+
 | Layer | Module |
 |-------+--------|
 | Native launcher: run directory, start script, process group, lock | =synapse_commander/launch.py= |

@@ -9,6 +9,7 @@ import sys
 from typing import Sequence
 
 from . import launch
+from .launch import ENGINE_BINARIES, HEADLESS_BINARY
 from .run import SmokeConfig, new_run_id, run_smoke
 
 
@@ -16,6 +17,9 @@ def add_run_arguments(command: argparse.ArgumentParser) -> None:
     """Launch arguments shared by run-smoke and run-agent."""
     command.add_argument("--engine-dir", type=Path, required=True,
                          help="directory holding the pinned spring-headless binary")
+    command.add_argument("--engine-binary", choices=ENGINE_BINARIES, default=HEADLESS_BINARY,
+                         help="engine program in --engine-dir: spring-headless (default) or the rendered "
+                              "client spring, which inherits DISPLAY and GL settings from this environment")
     command.add_argument("--data-dir", type=Path, required=True,
                          help="engine data directory holding maps/ (and games/BAR.sdd unless --game-dir)")
     command.add_argument("--game-dir", type=Path, help="stock BAR checkout (default DATA_DIR/games/BAR.sdd)")
@@ -66,13 +70,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = SmokeConfig(engine_dir=args.engine_dir, data_dir=args.data_dir, game_dir=args.game_dir,
                              out_dir=args.out, lock_dir=args.lock_dir, rig_commit=args.rig_commit,
                              run_id=args.run_id or new_run_id(), allow_dirty=args.allow_dirty,
-                             hello_timeout_s=args.hello_timeout, **extra)
+                             hello_timeout_s=args.hello_timeout, engine_binary=args.engine_binary, **extra)
         try:
             verdict = run_smoke(config)
         except launch.LaunchError as exc:
             print(f"run-smoke: {exc}", file=sys.stderr)
             return 2
-        summary = {key: verdict.get(key) for key in ("run_id", "mode", "verdict", "failed_checks", "error",
+        summary = {key: verdict.get(key) for key in ("run_id", "mode", "presentation", "verdict", "failed_checks", "error",
                                                      "classification", "app_commit", "rig_commit")}
         summary["evidence_dir"] = verdict["run_id"]
         print(json.dumps(summary, indent=1))

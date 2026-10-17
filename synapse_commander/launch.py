@@ -30,6 +30,13 @@ MAP_NAME = "Supreme Isthmus v2.1"
 STOCK_GAME_TYPE = "Beyond All Reason $VERSION"
 APP_ARCHIVE_DIR = "SynapseCommander.sdd"
 APP_GAME_TYPE = "Synapse Commander 0"
+# The same pinned engine directory ships both; the rendered client needs a display.
+HEADLESS_BINARY = "spring-headless"
+ENGINE_BINARIES = (HEADLESS_BINARY, "spring")
+# Environment the engine inherits that decides how (and whether) it renders;
+# recorded in the private verdict. The launcher never sets any of these itself.
+RENDER_ENV_PREFIXES = ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "LIBGL_", "GALLIUM_", "LP_", "MESA_",
+                       "__GL", "__EGL", "EGL_", "SDL_", "LD_PRELOAD", "LD_LIBRARY_PATH")
 RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 # The app-owned dependent archive ships in this repository, next to the package.
 APP_ARCHIVE = Path(__file__).resolve().parent.parent / "game" / APP_ARCHIVE_DIR
@@ -86,22 +93,32 @@ class RuntimeArtifacts:
     game_dir: Path
     map_path: Path
     app_archive: Path
+    engine_binary: str = HEADLESS_BINARY
 
     @classmethod
-    def from_dirs(cls, *, engine_dir: Path, data_dir: Path, game_dir: Path | None = None) -> "RuntimeArtifacts":
+    def from_dirs(cls, *, engine_dir: Path, data_dir: Path, game_dir: Path | None = None,
+                  engine_binary: str = HEADLESS_BINARY) -> "RuntimeArtifacts":
+        if engine_binary not in ENGINE_BINARIES:
+            raise LaunchError(f"engine binary must be one of {', '.join(ENGINE_BINARIES)}")
         data_dir = data_dir.resolve()
         artifacts = cls(
             engine_dir=engine_dir.resolve(),
             game_dir=(game_dir or data_dir / "games" / GAME_DIR_NAME).resolve(),
             map_path=data_dir / "maps" / MAP_FILE,
             app_archive=APP_ARCHIVE,
+            engine_binary=engine_binary,
         )
         artifacts.check()
         return artifacts
 
     @property
     def engine(self) -> Path:
-        return self.engine_dir / "spring-headless"
+        return self.engine_dir / self.engine_binary
+
+    @property
+    def presentation(self) -> str:
+        """The recorder's presentation: the headless binary draws nothing."""
+        return "headless" if self.engine_binary == HEADLESS_BINARY else "rendered"
 
     def check(self) -> None:
         missing = [
@@ -267,7 +284,11 @@ def check_run_id(run_id: str) -> str:
 
 
 class EngineProcess:
-    """spring-headless as a child process group with bounded teardown."""
+    """The engine as a child process group with bounded teardown.
+
+    The child inherits this process's environment unchanged, so DISPLAY and GL
+    settings reach a rendered client; nothing is added or removed here.
+    """
 
     def __init__(self, artifacts: RuntimeArtifacts, layout: RunLayout) -> None:
         self.artifacts = artifacts
@@ -348,14 +369,18 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
-ENGINE_BINARY = "spring-headless"
+def render_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The inherited variables that affect rendering, as the engine will see them."""
+    environ = os.environ if environ is None else environ
+    return {key: environ[key] for key in sorted(environ) if key.startswith(RENDER_ENV_PREFIXES)}
 
 
-def other_engines(own_pgid: int | None = None, *, binary: str = ENGINE_BINARY) -> list[int]:
+def other_engines(own_pgid: int | None = None, *,
+                  binary: str | tuple[str, ...] = ENGINE_BINARIES) -> list[int]:
     """Pids of engine processes outside our own process group (Linux /proc).
 
     A process is an engine when its executable (/proc/PID/exe) is a file named
-    spring-headless, however it was started; a script or a symlink to another
+    spring-headless or spring, however it was started; a script or a symlink to another
     program merely named so is not. Only when the executable cannot be read
     does the process name (argv[0]) decide, and the record says so.
     """
@@ -363,8 +388,9 @@ def other_engines(own_pgid: int | None = None, *, binary: str = ENGINE_BINARY) -
 
 
 def engine_processes(own_pgid: int | None = None, *,
-                     binary: str = ENGINE_BINARY) -> dict[int, dict[str, str]]:
+                     binary: str | tuple[str, ...] = ENGINE_BINARIES) -> dict[int, dict[str, str]]:
     """Engine pids with their command line and how each was identified."""
+    names = {binary} if isinstance(binary, str) else set(binary)
     found = {}
     for entry in Path("/proc").glob("[0-9]*"):
         try:
@@ -373,10 +399,10 @@ def engine_processes(own_pgid: int | None = None, *,
             try:
                 exe = os.readlink(entry / "exe").removesuffix(" (deleted)")
                 identified_by = "exe"
-                is_engine = os.path.basename(exe) == binary
+                is_engine = os.path.basename(exe) in names
             except OSError:
                 identified_by = "argv0 (exe unreadable)"
-                is_engine = os.path.basename(argv[0].decode("utf-8", "replace")) == binary
+                is_engine = os.path.basename(argv[0].decode("utf-8", "replace")) in names
             if not is_engine:
                 continue
             if own_pgid is not None and os.getpgid(pid) == own_pgid:
