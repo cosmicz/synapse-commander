@@ -568,14 +568,30 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
     if principal is None:
         _bounded_expedition(value, result, scenario_table)
     else:
+        # The engine's pre-run distress item is historical: it has an observed
+        # frame but no separate delivery timestamp.  Its age is public and
+        # derivable from this observation frame, so add only that bounded value
+        # before handing reports to the strict typed projection.
+        principal_value: Mapping[str, Any] = value
+        reports = value.get("reports")
+        if isinstance(reports, list):
+            normalized_reports = []
+            for report in reports:
+                if (isinstance(report, Mapping) and report.get("kind") == "distress"
+                        and "age_frames" not in report and isinstance(report.get("observed_frame"), int)
+                        and not isinstance(report.get("observed_frame"), bool)):
+                    normalized_reports.append({**report, "age_frames": max(0, frame - report["observed_frame"])})
+                else:
+                    normalized_reports.append(report)
+            principal_value = {**value, "reports": normalized_reports}
         # Commander roster is a separately declared public inventory view;
         # leave richer delivered reports to the principal-report projection.
-        if "roster" in value:
-            expedition = dict(value)
-            expedition["reports"] = [report for report in value.get("reports", [])
+        if "roster" in principal_value:
+            expedition = dict(principal_value)
+            expedition["reports"] = [report for report in principal_value.get("reports", [])
                                       if isinstance(report, Mapping) and report.get("kind") == "distress"]
             _bounded_expedition(expedition, result, scenario_table)
-        _bounded_principal_body(value, result, scenario_table)
+        _bounded_principal_body(principal_value, result, scenario_table)
     permitted = value.get("permitted_intents", [])
     if not isinstance(permitted, list) or len(permitted) > 16:
         raise ProtocolError("invalid_observation", "invalid permitted intents")
