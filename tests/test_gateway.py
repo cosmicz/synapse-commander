@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import http.client
 import json
+from pathlib import Path
+import tempfile
 import threading
 import unittest
 
 from synapse_commander.gateway import LoopbackGateway
+from synapse_commander.recording import Recorder, verify_ledger
 from synapse_commander.transport import MemoryTransport
+from tests.test_recording import manifest
 
 
 class Ledger:
@@ -189,6 +193,44 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(ledger.events[0]["payload"]["observation"]["observation_id"], "obs-1")
         self.assertEqual(ledger.events[1]["payload"]["envelope"]["payload"]["factory"], "F0")
         self.assertEqual(ledger.events[2]["payload"], {"intent_id": "intent-1", "status": "accepted"})
+
+    def test_real_recorder_captures_flat_metadata_and_full_evidence(self) -> None:
+        self.server.shutdown()
+        self.thread.join()
+        self.server.server_close()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run.jsonl"
+            recorder = Recorder.create(path, manifest(), fsync=False)
+            recorder.run_start(0)
+            self.server = LoopbackGateway(self.transport, principal="agent-alpha", team="blue", origin="scripted", ledger=recorder).make_server()
+            self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+            self.thread.start()
+            self.request("GET", "/v1/observation")
+            self.request("POST", "/v1/intents", produce())
+            recorder.run_end(100, {"success": False})
+            result = verify_ledger(path)
+        self.assertTrue(result.ok, result.errors)
+        observation_record = next(record for record in result.records if record["kind"] == "OBSERVATION")
+        submitted = next(record for record in result.records if record["kind"] == "INTENT_SUBMITTED")
+        self.assertEqual(observation_record["payload"]["observation_id"], "obs-1")
+        self.assertEqual(submitted["payload"]["intent_id"], "intent-1")
+        self.assertEqual(submitted["payload"]["envelope"]["payload"]["factory"], "F0")
+
+    def test_history_allows_an_observation_until_its_simulation_age_expires(self) -> None:
+        self.transport.publish_observation("blue", observation("old", 100))
+        self.transport.publish_observation("blue", observation("new", 115))
+        self.transport.frame = 500
+        status, receipt = self.request("POST", "/v1/intents", produce("old", 800))
+        self.assertEqual(status, 202)
+        self.assertTrue(receipt["accepted"])
+
+    def test_code_like_identifiers_are_not_forwarded(self) -> None:
+        request = produce()
+        request["payload"]["controller"] = "loadstring('os.exit()')()"
+        status, result = self.request("POST", "/v1/intents", request)
+        self.assertEqual(status, 400)
+        self.assertEqual(result["error"], "invalid_payload")
+        self.assertEqual(self.transport.accepted, [])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,676 @@
+"""Run manifest, append-only JSONL ledger and replay verification.
+
+The recorder writes one JSON object per line.  The first record is the
+pre-run ``MANIFEST``; exactly one ``RUN_START`` follows it; the last record
+is a recorder-written ``RUN_END`` trailer carrying the record count and the
+hash-chain head.  Every record carries the previous record's digest, so a
+flipped byte, deleted, reordered or appended line, or a truncated tail is
+detected by :func:`verify_ledger`.
+
+Integrity is tamper-evident against accidental corruption and truncation,
+not against deliberate forgery: there is no signing key, because credentials
+never enter the ledger.  A rewritten file with recomputed digests is caught
+only by the semantic checks (ordering, causal links, classification rules).
+
+Classification is fail-closed.  A ledger that is not complete and valid is
+not classified at all.  Only an affirmative, linked chain of live inference
+for every caller-declared required decision yields ``agent_only``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import hashlib
+import json
+import os
+import re
+import sys
+import threading
+import time
+from typing import Any, Callable, Iterable, Mapping, Sequence
+
+LEDGER_SCHEMA = "synapse.ledger/v1"
+MANIFEST_SCHEMA = "synapse.manifest/v1"
+GENESIS = "0" * 64
+MAX_RECORD_BYTES = 256 * 1024
+
+# Record kinds.  MANIFEST, RUN_START and RUN_END are written only by the
+# recorder; all others arrive through Recorder.record().
+MANIFEST = "MANIFEST"
+RUN_START = "RUN_START"
+RUN_END = "RUN_END"
+OBSERVATION = "OBSERVATION"
+INFERENCE = "INFERENCE"
+INTENT_SUBMITTED = "INTENT_SUBMITTED"
+INTENT_RECEIPT = "INTENT_RECEIPT"
+RADIO = "RADIO"
+CONTROLLER_STEP = "CONTROLLER_STEP"
+EFFECT = "EFFECT"
+SCENARIO_EVENT = "SCENARIO_EVENT"
+OPERATOR_INTERVENTION = "OPERATOR_INTERVENTION"
+CLOCK_MODE = "CLOCK_MODE"
+PRESENTATION = "PRESENTATION"
+
+# Permitted origins per caller-recorded kind.  Human and agent player
+# commands share INTENT_SUBMITTED, distinguished by the gateway-derived
+# origin, because both use the same intent envelope and dispatcher.
+KIND_ORIGINS: dict[str, frozenset[str]] = {
+    OBSERVATION: frozenset({"gateway", "engine"}),
+    INFERENCE: frozenset({"agent"}),
+    INTENT_SUBMITTED: frozenset({"agent", "human", "scripted"}),
+    INTENT_RECEIPT: frozenset({"gateway", "engine"}),
+    RADIO: frozenset({"engine", "gateway"}),
+    CONTROLLER_STEP: frozenset({"controller"}),
+    EFFECT: frozenset({"engine"}),
+    SCENARIO_EVENT: frozenset({"scenario"}),
+    OPERATOR_INTERVENTION: frozenset({"operator"}),
+    CLOCK_MODE: frozenset({"engine", "scenario", "operator"}),
+    PRESENTATION: frozenset({"spectator", "human"}),
+}
+RECORDER_KINDS = frozenset({MANIFEST, RUN_START, RUN_END})
+
+# Kinds an EFFECT may cite: something that can make the engine change state.
+_EFFECT_CAUSES = frozenset(
+    {INTENT_RECEIPT, RADIO, CONTROLLER_STEP, SCENARIO_EVENT, EFFECT, OPERATOR_INTERVENTION}
+)
+_RADIO_CAUSES = frozenset({INTENT_RECEIPT, CONTROLLER_STEP, RADIO, EFFECT})
+_RADIO_STATUSES = frozenset({"queued", "transmitted", "delivered", "expired"})
+_RECEIPT_STATUSES = frozenset({"accepted", "rejected"})
+
+MANIFEST_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "schema": str,
+    "run_id": str,
+    "rig_commit": str,
+    "app_commit": str,
+    "engine": dict,
+    "game": dict,
+    "map": dict,
+    "scenario": dict,
+    "controller_images": dict,
+    "adapter_version": str,
+    "principals": list,
+    "config_hashes": dict,
+    "model_id": (str, type(None)),
+    "external_budgets": dict,
+    "clock_mode": str,
+    "fps": int,
+    "presentation": str,
+    "required_decisions": list,
+}
+_COMMIT = re.compile(r"^[0-9a-f]{7,64}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SECRET_KEY = re.compile(
+    r"(^|_)(api_?key|secret|password|passwd|credentials?|authorization|"
+    r"auth_?token|access_?token|refresh_?token|bearer|private_?key|cookie)($|_)",
+    re.IGNORECASE,
+)
+_SECRET_VALUE = re.compile(r"(\bsk-[A-Za-z0-9_-]{16,}|\bBearer\s+\S{8,}|-----BEGIN [A-Z ]*PRIVATE KEY)")
+_PRIVATE_PATH = re.compile(
+    r"(^|[\s\"'=:(,])(/Users/|/home/|/root/|/data/|/private/|/tmp/|/var/folders/|~/|[A-Za-z]:\\Users\\)"
+)
+_RAW_CONVERSATION_KEY = re.compile(r"^(conversation|transcript|messages|raw_prompt|chat_log)$", re.IGNORECASE)
+
+
+class LedgerError(ValueError):
+    """A record that would make the ledger invalid."""
+
+    def __init__(self, code: str, detail: str = "") -> None:
+        super().__init__(f"{code}: {detail}" if detail else code)
+        self.code = code
+        self.detail = detail
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+
+def record_digest(record: Mapping[str, Any]) -> str:
+    body = {k: v for k, v in record.items() if k != "digest"}
+    return hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
+
+
+def scan_sensitive(value: Any, where: str = "payload") -> None:
+    """Reject credential-shaped keys/values and absolute private paths."""
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise LedgerError("invalid_payload", f"{where} has a non-string key")
+            if _SECRET_KEY.search(key):
+                raise LedgerError("credential_rejected", f"{where}.{key}")
+            if _RAW_CONVERSATION_KEY.match(key):
+                raise LedgerError("raw_conversation_rejected", f"{where}.{key}")
+            scan_sensitive(item, f"{where}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            scan_sensitive(item, f"{where}[{index}]")
+    elif isinstance(value, str):
+        if _SECRET_VALUE.search(value):
+            raise LedgerError("credential_rejected", where)
+        if _PRIVATE_PATH.search(value):
+            raise LedgerError("private_path_rejected", where)
+
+
+def validate_manifest(manifest: Mapping[str, Any]) -> None:
+    if not isinstance(manifest, Mapping):
+        raise LedgerError("invalid_manifest", "manifest must be an object")
+    missing = sorted(set(MANIFEST_FIELDS) - set(manifest))
+    if missing:
+        raise LedgerError("invalid_manifest", "missing " + ",".join(missing))
+    for name, expected in MANIFEST_FIELDS.items():
+        value = manifest[name]
+        if not isinstance(value, expected) or (expected is int and isinstance(value, bool)):
+            raise LedgerError("invalid_manifest", f"{name} has the wrong type")
+    if manifest["schema"] != MANIFEST_SCHEMA:
+        raise LedgerError("invalid_manifest", "unsupported manifest schema")
+    for name in ("rig_commit", "app_commit"):
+        if not _COMMIT.match(manifest[name]):
+            raise LedgerError("invalid_manifest", f"{name} must be a hex commit id")
+    for name in ("engine", "game", "map"):
+        if not all(isinstance(manifest[name].get(k), str) and manifest[name][k] for k in ("name", "version")):
+            raise LedgerError("invalid_manifest", f"{name} needs name and version")
+    scenario = manifest["scenario"]
+    if not (isinstance(scenario.get("id"), str) and isinstance(scenario.get("version"), str)):
+        raise LedgerError("invalid_manifest", "scenario needs id and version")
+    if not isinstance(scenario.get("seed"), int) or isinstance(scenario.get("seed"), bool):
+        raise LedgerError("invalid_manifest", "scenario seed must be an integer")
+    for name, digest in manifest["controller_images"].items():
+        if not isinstance(digest, str) or not _SHA256.match(digest):
+            raise LedgerError("invalid_manifest", f"controller image {name} needs a sha256")
+    for name, digest in manifest["config_hashes"].items():
+        if not isinstance(digest, str) or not _SHA256.match(digest):
+            raise LedgerError("invalid_manifest", f"config hash {name} needs a sha256")
+    if manifest["clock_mode"] not in ("continuous", "paused"):
+        raise LedgerError("invalid_manifest", "clock_mode must be continuous or paused")
+    if manifest["fps"] <= 0:
+        raise LedgerError("invalid_manifest", "fps must be positive")
+    if manifest["presentation"] not in ("headless", "rendered"):
+        raise LedgerError("invalid_manifest", "presentation must be headless or rendered")
+    labels = set()
+    for decision in manifest["required_decisions"]:
+        if not isinstance(decision, Mapping) or not isinstance(decision.get("label"), str):
+            raise LedgerError("invalid_manifest", "required decision needs a label")
+        if decision["label"] in labels:
+            raise LedgerError("invalid_manifest", "duplicate required decision label")
+        labels.add(decision["label"])
+        after = decision.get("after_scenario_event")
+        if after is not None and not isinstance(after, str):
+            raise LedgerError("invalid_manifest", "after_scenario_event must be a string")
+        if decision.get("type") is not None and not isinstance(decision["type"], str):
+            raise LedgerError("invalid_manifest", "required decision type must be a string")
+    scan_sensitive(manifest, "manifest")
+
+
+class _LedgerState:
+    """Incremental validator shared by the writer and the verifier."""
+
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+        self.by_id: dict[str, dict[str, Any]] = {}
+        self.manifest: dict[str, Any] | None = None
+        self.started = False
+        self.ended = False
+        self.head = GENESIS
+        self.last_frame = -1
+        self.last_wall = -1
+        self.receipted: set[str] = set()  # submission event ids that have a receipt
+        self.accepted_intents: set[str] = set()
+
+    def accept(self, record: Mapping[str, Any]) -> None:
+        if not isinstance(record, Mapping):
+            raise LedgerError("invalid_record", "record must be an object")
+        seq = len(self.records)
+        if self.ended:
+            raise LedgerError("record_after_end", f"seq {seq}")
+        expected = {"schema", "seq", "event_id", "kind", "origin", "sim_frame", "sim_time_s", "wall_ns",
+                    "causes", "payload", "prev", "digest"}
+        if set(record) != expected:
+            raise LedgerError("invalid_record", f"seq {seq} has unexpected fields")
+        if record["schema"] != LEDGER_SCHEMA:
+            raise LedgerError("invalid_record", f"seq {seq} has an unsupported schema")
+        if record["seq"] != seq or record["event_id"] != event_id_for(seq):
+            raise LedgerError("sequence_gap", f"expected seq {seq}, found {record['seq']!r}")
+        if record["prev"] != self.head:
+            raise LedgerError("chain_broken", f"seq {seq}")
+        if record["digest"] != record_digest(record):
+            raise LedgerError("digest_mismatch", f"seq {seq}")
+        kind, origin, payload = record["kind"], record["origin"], record["payload"]
+        if not isinstance(payload, dict):
+            raise LedgerError("invalid_record", f"seq {seq} payload must be an object")
+        self._check_time(record, seq)
+        causes = record["causes"]
+        if not isinstance(causes, list) or not all(isinstance(c, str) for c in causes):
+            raise LedgerError("invalid_causes", f"seq {seq}")
+        if len(set(causes)) != len(causes):
+            raise LedgerError("invalid_causes", f"seq {seq} repeats a cause")
+        for cause in causes:
+            if cause not in self.by_id:
+                raise LedgerError("unknown_cause", f"seq {seq} cites {cause}")
+        scan_sensitive(payload)
+
+        if seq == 0:
+            if kind != MANIFEST or origin != "recorder":
+                raise LedgerError("manifest_not_first")
+            validate_manifest(payload)
+            self.manifest = dict(payload)
+        elif kind == MANIFEST:
+            raise LedgerError("duplicate_manifest", f"seq {seq}")
+        elif kind == RUN_START:
+            if self.started or seq != 1 or origin != "recorder":
+                raise LedgerError("run_start_misplaced", f"seq {seq}")
+            self.started = True
+        elif not self.started:
+            raise LedgerError("record_before_run_start", f"seq {seq}")
+        elif kind == RUN_END:
+            if origin != "recorder":
+                raise LedgerError("invalid_origin", f"seq {seq} RUN_END")
+            if payload.get("record_count") != seq + 1 or payload.get("chain_head") != self.head:
+                raise LedgerError("trailer_mismatch", f"seq {seq}")
+            if not isinstance(payload.get("outcome"), dict):
+                raise LedgerError("trailer_mismatch", "outcome must be an object")
+            self.ended = True
+        else:
+            if kind not in KIND_ORIGINS:
+                raise LedgerError("unknown_kind", f"seq {seq} {kind!r}")
+            if origin not in KIND_ORIGINS[kind]:
+                raise LedgerError("invalid_origin", f"seq {seq} {kind} from {origin!r}")
+            self._check_kind(kind, payload, causes, seq)
+
+        stored = dict(record)
+        if kind == INTENT_RECEIPT:
+            self.receipted.update(c for c in causes if self.by_id[c]["kind"] == INTENT_SUBMITTED)
+            if payload["status"] == "accepted":
+                self.accepted_intents.add(payload["intent_id"])
+        self.records.append(stored)
+        self.by_id[stored["event_id"]] = stored
+        self.head = stored["digest"]
+        self.last_frame = stored["sim_frame"]
+        self.last_wall = stored["wall_ns"]
+
+    def _check_time(self, record: Mapping[str, Any], seq: int) -> None:
+        frame, wall = record["sim_frame"], record["wall_ns"]
+        for name, value in (("sim_frame", frame), ("wall_ns", wall)):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise LedgerError("invalid_time", f"seq {seq} {name}")
+        if frame < self.last_frame:
+            raise LedgerError("time_backwards", f"seq {seq} sim_frame {frame} < {self.last_frame}")
+        if wall < self.last_wall:
+            raise LedgerError("time_backwards", f"seq {seq} wall_ns")
+        if seq == 0:
+            fps = record["payload"].get("fps") if isinstance(record["payload"], dict) else None
+        else:
+            fps = self.manifest["fps"] if self.manifest else None
+        if isinstance(fps, int) and fps > 0 and record["sim_time_s"] != sim_time(frame, fps):
+            raise LedgerError("invalid_time", f"seq {seq} sim_time_s does not match frame")
+
+    def _cited(self, causes: Iterable[str], kinds: frozenset[str] | set[str]) -> list[dict[str, Any]]:
+        return [self.by_id[c] for c in causes if self.by_id[c]["kind"] in kinds]
+
+    def _check_kind(self, kind: str, payload: dict[str, Any], causes: list[str], seq: int) -> None:
+        if kind == OBSERVATION:
+            if not isinstance(payload.get("observation_id"), str):
+                raise LedgerError("invalid_payload", f"seq {seq} observation_id")
+        elif kind == INFERENCE:
+            if not isinstance(payload.get("inference_id"), str) or not isinstance(payload.get("live"), bool):
+                raise LedgerError("invalid_payload", f"seq {seq} inference needs inference_id and live")
+            if not self._cited(causes, {OBSERVATION}):
+                raise LedgerError("incompatible_cause", f"seq {seq} inference must cite an observation")
+        elif kind == INTENT_SUBMITTED:
+            for name in ("intent_id", "type", "based_on_observation_id"):
+                if not isinstance(payload.get(name), str):
+                    raise LedgerError("invalid_payload", f"seq {seq} {name}")
+            # A repeated intent_id is a new attempt with its own event; the
+            # dispatcher's duplicate rejection is evidence, not dropped.
+        elif kind == INTENT_RECEIPT:
+            if payload.get("status") not in _RECEIPT_STATUSES:
+                raise LedgerError("invalid_payload", f"seq {seq} receipt status")
+            submitted = [r for r in self._cited(causes, {INTENT_SUBMITTED})
+                         if r["payload"]["intent_id"] == payload.get("intent_id")]
+            if len(submitted) != 1:
+                raise LedgerError("incompatible_cause", f"seq {seq} receipt must cite exactly its submission")
+            if submitted[0]["event_id"] in self.receipted:
+                raise LedgerError("duplicate_receipt", f"seq {seq}")
+            if payload["status"] == "accepted" and payload["intent_id"] in self.accepted_intents:
+                raise LedgerError("duplicate_acceptance", f"seq {seq} intent {payload['intent_id']}")
+        elif kind == RADIO:
+            if payload.get("status") not in _RADIO_STATUSES:
+                raise LedgerError("invalid_payload", f"seq {seq} radio status")
+            cited = self._cited(causes, _RADIO_CAUSES)
+            if not cited:
+                raise LedgerError("incompatible_cause", f"seq {seq} radio record needs a cause")
+            self._no_rejected_receipt(cited, seq)
+        elif kind == EFFECT:
+            if not isinstance(payload.get("type"), str):
+                raise LedgerError("invalid_payload", f"seq {seq} effect type")
+            cited = self._cited(causes, _EFFECT_CAUSES)
+            if not cited:
+                raise LedgerError("incompatible_cause", f"seq {seq} effect needs a state-changing cause")
+            self._no_rejected_receipt(cited, seq)
+        elif kind == SCENARIO_EVENT:
+            if not isinstance(payload.get("name"), str):
+                raise LedgerError("invalid_payload", f"seq {seq} scenario event name")
+        elif kind == CLOCK_MODE:
+            if payload.get("mode") not in ("continuous", "paused") or not isinstance(payload.get("declared"), bool):
+                raise LedgerError("invalid_payload", f"seq {seq} clock mode")
+        elif kind == OPERATOR_INTERVENTION:
+            if not isinstance(payload.get("action"), str):
+                raise LedgerError("invalid_payload", f"seq {seq} intervention action")
+
+    @staticmethod
+    def _no_rejected_receipt(cited: list[dict[str, Any]], seq: int) -> None:
+        for record in cited:
+            if record["kind"] == INTENT_RECEIPT and record["payload"]["status"] != "accepted":
+                raise LedgerError("incompatible_cause", f"seq {seq} cites a rejected receipt")
+
+
+def event_id_for(seq: int) -> str:
+    return f"ev-{seq:06d}"
+
+
+def sim_time(frame: int, fps: int) -> float:
+    return round(frame / fps, 6)
+
+
+class Recorder:
+    """Append-only writer.  Implements the gateway's ``LedgerSink.record``.
+
+    Thread-safe: a threaded gateway may call ``record`` concurrently; the
+    clock read, validation and write happen under one lock, so sequence,
+    chain and monotonic wall time stay consistent with file order.
+    """
+
+    def __init__(self, handle: Any, manifest: Mapping[str, Any], clock: Callable[[], int], fsync: bool) -> None:
+        self._lock = threading.RLock()
+        self._handle = handle
+        self._clock = clock
+        self._epoch = clock()
+        self._fsync = fsync
+        self._state = _LedgerState()
+        self._append(MANIFEST, origin="recorder", sim_frame=0, payload=dict(manifest), causes=(), sync=True)
+
+    @classmethod
+    def create(
+        cls,
+        path: str | os.PathLike[str],
+        manifest: Mapping[str, Any],
+        *,
+        clock: Callable[[], int] = time.monotonic_ns,
+        fsync: bool = True,
+    ) -> "Recorder":
+        """Create a new ledger; refuses to overwrite or extend an existing file."""
+        validate_manifest(manifest)
+        handle = open(path, "x", encoding="utf-8", newline="\n")
+        try:
+            return cls(handle, manifest, clock, fsync)
+        except BaseException:
+            handle.close()
+            raise
+
+    @property
+    def manifest(self) -> dict[str, Any]:
+        assert self._state.manifest is not None
+        return dict(self._state.manifest)
+
+    def run_start(self, sim_frame: int = 0) -> str:
+        return self._append(RUN_START, origin="recorder", sim_frame=sim_frame, payload={}, causes=(), sync=True)
+
+    def record(
+        self,
+        kind: str,
+        *,
+        sim_frame: int,
+        origin: str,
+        payload: dict[str, Any],
+        causes: Sequence[str] = (),
+    ) -> str:
+        if kind in RECORDER_KINDS:
+            raise LedgerError("reserved_kind", kind)
+        return self._append(kind, origin=origin, sim_frame=sim_frame, payload=payload, causes=causes,
+                            sync=kind == OPERATOR_INTERVENTION)
+
+    def run_end(self, sim_frame: int, outcome: Mapping[str, Any]) -> str:
+        with self._lock:
+            seq = len(self._state.records)
+            payload = {"record_count": seq + 1, "chain_head": self._state.head, "outcome": dict(outcome)}
+            event_id = self._append(RUN_END, origin="recorder", sim_frame=sim_frame, payload=payload, causes=(),
+                                    sync=True)
+            self.close()
+            return event_id
+
+    def close(self) -> None:
+        with self._lock:
+            if not self._handle.closed:
+                self._handle.close()
+
+    def __enter__(self) -> "Recorder":
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.close()
+
+    def _append(self, kind: str, *, origin: str, sim_frame: int, payload: Mapping[str, Any],
+                causes: Sequence[str], sync: bool) -> str:
+        with self._lock:
+            return self._append_locked(kind, origin=origin, sim_frame=sim_frame, payload=payload, causes=causes,
+                                       sync=sync)
+
+    def _append_locked(self, kind: str, *, origin: str, sim_frame: int, payload: Mapping[str, Any],
+                       causes: Sequence[str], sync: bool) -> str:
+        if self._handle.closed:
+            raise LedgerError("ledger_closed")
+        seq = len(self._state.records)
+        wall = self._clock() - self._epoch
+        fps = payload.get("fps") if kind == MANIFEST else self.manifest["fps"]
+        record: dict[str, Any] = {
+            "schema": LEDGER_SCHEMA,
+            "seq": seq,
+            "event_id": event_id_for(seq),
+            "kind": kind,
+            "origin": origin,
+            "sim_frame": sim_frame,
+            "sim_time_s": sim_time(sim_frame, fps) if isinstance(sim_frame, int) else None,
+            "wall_ns": wall,
+            "causes": list(causes),
+            # Round-trip through JSON so the stored record is exactly what a reader sees.
+            "payload": json.loads(canonical_json(payload)),
+            "prev": self._state.head,
+        }
+        record["digest"] = record_digest(record)
+        line = canonical_json(record)
+        if len(line.encode("utf-8")) + 1 > MAX_RECORD_BYTES:
+            raise LedgerError("record_too_large", f"seq {seq}")
+        self._state.accept(record)  # raises before anything is written
+        try:
+            self._handle.write(line + "\n")
+            self._handle.flush()
+            if sync and self._fsync:
+                os.fsync(self._handle.fileno())
+        except BaseException:
+            # State already advanced; refuse further appends so the file ends
+            # without a trailer and verifies as incomplete, never as complete.
+            self._handle.close()
+            raise
+        return record["event_id"]
+
+
+@dataclass
+class Verification:
+    ok: bool
+    status: str  # complete | truncated | incomplete | corrupt | invalid | empty
+    errors: list[str] = field(default_factory=list)
+    records: list[dict[str, Any]] = field(default_factory=list)
+    manifest: dict[str, Any] | None = None
+    classification: str | None = None
+    autonomous: bool = False
+    evidence_limits: list[str] = field(default_factory=list)
+    counts: dict[str, int] = field(default_factory=dict)
+    outcome: dict[str, Any] | None = None
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "status": self.status,
+            "errors": self.errors,
+            "classification": self.classification,
+            "autonomous": self.autonomous,
+            "evidence_limits": self.evidence_limits,
+            "counts": self.counts,
+            "outcome": self.outcome,
+            "run_id": self.manifest.get("run_id") if self.manifest else None,
+        }
+
+
+_CORRUPT_CODES = frozenset({"digest_mismatch", "chain_broken", "sequence_gap", "record_after_end",
+                            "trailer_mismatch", "invalid_record"})
+
+
+def verify_ledger(path: str | os.PathLike[str]) -> Verification:
+    """Re-validate every record, the chain and the trailer, then classify."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        return Verification(False, "invalid", [f"unreadable: {exc.strerror}"])
+    if not data:
+        return Verification(False, "empty", ["ledger is empty"])
+    state = _LedgerState()
+    lines = data.split(b"\n")
+    tail = lines.pop()  # b"" when the file ends with a newline
+    for number, raw in enumerate(lines, start=1):
+        try:
+            record = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return _failed(state, "corrupt", f"line {number}: not a JSON record")
+        try:
+            state.accept(record)
+        except LedgerError as exc:
+            status = "corrupt" if exc.code in _CORRUPT_CODES else "invalid"
+            return _failed(state, status, f"line {number}: {exc}")
+    if tail:
+        return _failed(state, "truncated", f"line {len(lines) + 1}: partial record without newline")
+    if not state.ended:
+        return _failed(state, "incomplete", "no RUN_END trailer; the capture may be truncated")
+    result = Verification(True, "complete", records=state.records, manifest=state.manifest)
+    result.outcome = state.records[-1]["payload"]["outcome"]
+    _classify(result)
+    return result
+
+
+def replay(path: str | os.PathLike[str]) -> list[dict[str, Any]]:
+    """Return verified records in order, or raise; never replays a partial run."""
+    result = verify_ledger(path)
+    if not result.ok:
+        raise LedgerError(f"replay_refused_{result.status}", "; ".join(result.errors))
+    return result.records
+
+
+def _failed(state: _LedgerState, status: str, error: str) -> Verification:
+    return Verification(False, status, [error], records=list(state.records), manifest=state.manifest)
+
+
+def _classify(result: Verification) -> None:
+    manifest = result.manifest or {}
+    records = result.records
+    by_id = {r["event_id"]: r for r in records}
+    counts: dict[str, int] = {}
+    for record in records:
+        counts[record["kind"]] = counts.get(record["kind"], 0) + 1
+    result.counts = counts
+
+    interventions = [r for r in records if r["kind"] == OPERATOR_INTERVENTION]
+    interventions += [r for r in records if r["kind"] == CLOCK_MODE and not r["payload"]["declared"]]
+    intents = [r for r in records if r["kind"] == INTENT_SUBMITTED]
+    origins = {r["origin"] for r in intents}
+    # Keyed by the submission event each receipt answers, so a repeated
+    # intent_id attempt never borrows another attempt's acceptance.
+    receipts = {c: r for r in records if r["kind"] == INTENT_RECEIPT
+                for c in r["causes"] if by_id[c]["kind"] == INTENT_SUBMITTED}
+    observations = {r["event_id"]: r for r in records if r["kind"] == OBSERVATION}
+
+    def live_chain(intent: dict[str, Any]) -> bool:
+        for cause in intent["causes"]:
+            inference = by_id[cause]
+            if inference["kind"] != INFERENCE or not inference["payload"]["live"]:
+                continue
+            if manifest.get("model_id") is None or inference["payload"].get("model_id") != manifest["model_id"]:
+                continue
+            for observed in inference["causes"]:
+                observation = observations.get(observed)
+                if observation and observation["payload"]["observation_id"] == intent["payload"]["based_on_observation_id"]:
+                    return True
+        return False
+
+    unlinked_agent = [r for r in intents if r["origin"] == "agent" and not live_chain(r)]
+
+    if interventions:
+        classification = "assisted"
+    elif "scripted" in origins:
+        classification = "scripted_replay"
+    elif unlinked_agent:
+        classification = "unattributed"
+    elif {"agent", "human"} <= origins:
+        classification = "centaur"
+    elif origins == {"human"}:
+        classification = "human_only"
+    elif origins == {"agent"}:
+        classification = "agent_only" if _required_decisions_met(manifest, records, intents, receipts) else "agent_partial"
+    else:
+        classification = "scripted_fixture"
+    result.classification = classification
+    result.autonomous = classification == "agent_only"
+
+    limits = []
+    if manifest.get("presentation") == "headless":
+        limits.append("headless capture: not a visual demo")
+    if classification in ("scripted_fixture", "scripted_replay"):
+        limits.append("scripted: not autonomous gameplay")
+    if classification == "assisted":
+        limits.append("operator intervention after start: not autonomous")
+    if classification in ("unattributed", "agent_partial"):
+        limits.append("agent decisions lack complete live-inference evidence: not autonomous")
+    limits.append("hash chain detects accidental corruption, not deliberate forgery")
+    result.evidence_limits = limits
+
+
+def _required_decisions_met(manifest: Mapping[str, Any], records: list[dict[str, Any]],
+                            intents: list[dict[str, Any]], receipts: Mapping[str, dict[str, Any]]) -> bool:
+    required = manifest.get("required_decisions") or []
+    if not required:
+        return False
+    for decision in required:
+        after = decision.get("after_scenario_event")
+        after_seq = None
+        if after is not None:
+            fired = [r["seq"] for r in records if r["kind"] == SCENARIO_EVENT and r["payload"]["name"] == after]
+            if not fired:
+                return False
+            after_seq = fired[0]
+        satisfied = False
+        for intent in intents:
+            payload = intent["payload"]
+            if payload.get("decision") != decision["label"]:
+                continue
+            if decision.get("type") is not None and payload["type"] != decision["type"]:
+                continue
+            if after_seq is not None and intent["seq"] < after_seq:
+                continue
+            receipt = receipts.get(intent["event_id"])
+            if receipt and receipt["payload"]["status"] == "accepted":
+                satisfied = True
+                break
+        if not satisfied:
+            return False
+    return True
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) != 2 or args[0] != "verify":
+        print("usage: python -m synapse_commander.recording verify LEDGER.jsonl", file=sys.stderr)
+        return 2
+    result = verify_ledger(args[1])
+    print(json.dumps(result.summary(), indent=2, sort_keys=True))
+    return 0 if result.ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

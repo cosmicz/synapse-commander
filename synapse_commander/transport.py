@@ -23,6 +23,8 @@ class EngineTransport(Protocol):
 
     def observation_for(self, team: str) -> Mapping[str, object]: ...
 
+    def current_frame(self) -> int: ...
+
     def submit_intent(self, envelope: IntentEnvelope) -> IntentReceipt: ...
 
 
@@ -38,10 +40,12 @@ class MemoryTransport:
     def __init__(self, *, frame: int = 100) -> None:
         self.frame = frame
         self.observations: dict[str, dict[str, object]] = {}
+        self._history: dict[str, tuple[str, dict[str, object]]] = {}
         self.observation_teams: dict[str, str] = {}
         self.accepted: list[IntentEnvelope] = []
         self._accepted_ids: set[str] = set()
         self._team_tokens: dict[str, tuple[float, int]] = {}
+        self._receipt_count = 0
         self._lock = Lock()
 
     def publish_observation(self, team: str, observation: Mapping[str, object]) -> None:
@@ -49,20 +53,26 @@ class MemoryTransport:
         observation_id = str(stored["observation_id"])
         self.observations[team] = stored
         self.observation_teams[observation_id] = team
+        self._history[observation_id] = (team, stored)
 
     def observation_for(self, team: str) -> Mapping[str, object]:
         return self.observations[team]
 
+    def current_frame(self) -> int:
+        return self.frame
+
     def submit_intent(self, envelope: IntentEnvelope) -> IntentReceipt:
         with self._lock:
-            receipt_id = f"receipt-{len(self.accepted) + 1}"
-            observation = self.observations.get(envelope.team)
+            self._receipt_count += 1
+            receipt_id = f"receipt-{self._receipt_count}"
+            observation_entry = self._history.get(envelope.based_on_observation_id)
+            observation = observation_entry[1] if observation_entry and observation_entry[0] == envelope.team else None
             known_team = self.observation_teams.get(envelope.based_on_observation_id)
             if envelope.intent_id in self._accepted_ids:
                 return IntentReceipt(envelope.intent_id, False, self.frame, receipt_id, "duplicate_intent_id")
             if known_team is not None and known_team != envelope.team:
                 return IntentReceipt(envelope.intent_id, False, self.frame, receipt_id, "wrong_team")
-            if observation is None or str(observation.get("observation_id")) != envelope.based_on_observation_id:
+            if observation is None:
                 return IntentReceipt(envelope.intent_id, False, self.frame, receipt_id, "unknown_observation")
             observed_frame = observation.get("frame")
             if not isinstance(observed_frame, int) or self.frame - observed_frame > MAX_OBSERVATION_AGE_FRAMES:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import re
 from typing import Any, Mapping, Protocol, Sequence
 
 
@@ -21,6 +22,10 @@ MAX_ENTITIES = 32
 MAX_RECENT_EVENTS = 16
 
 INTENT_TYPES = frozenset({"PRODUCE", "TASK", "INSTALL"})
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_CONTROLLERS = frozenset({"haul_v1", "deploy_relay_v1", "haul_detour_v2"})
+_CHASSIS = frozenset({"hauler", "relay_scout"})
+_VERSIONS = _CONTROLLERS
 _REQUIRED_PAYLOAD_FIELDS = {
     "PRODUCE": frozenset({"factory", "chassis", "controller", "parameters"}),
     "TASK": frozenset({"unit", "verb", "args"}),
@@ -39,11 +44,11 @@ class ProtocolError(ValueError):
 
 def compact_json(value: Any) -> bytes:
     """Return deterministic JSON used for all public size limits."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
 
 
 def _bounded_string(value: Any, field: str, limit: int = 128) -> str:
-    if not isinstance(value, str) or not value or len(value) > limit:
+    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value) or len(value) > limit:
         raise ProtocolError("invalid_payload", f"{field} must be a non-empty string up to {limit} characters")
     return value
 
@@ -112,6 +117,12 @@ class IntentEnvelope:
             raise ProtocolError("invalid_payload", "payload fields do not match the typed intent")
         for field in required - {"parameters", "args"}:
             _bounded_string(payload[field], field)
+        if intent_type == "PRODUCE" and (payload["chassis"] not in _CHASSIS or payload["controller"] not in _CONTROLLERS):
+            raise ProtocolError("invalid_payload", "unknown chassis or controller")
+        if intent_type == "INSTALL" and (payload["expected_version"] not in _VERSIONS or payload["replacement_version"] not in _VERSIONS):
+            raise ProtocolError("invalid_payload", "unknown controller version")
+        if intent_type == "TASK" and payload["verb"] != "advance":
+            raise ProtocolError("verb_not_supported", "only the engine-smoke advance task is exposed")
         for field in required & {"parameters", "args"}:
             _bounded_object(payload[field], field)
             if payload[field]:
@@ -196,9 +207,11 @@ def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ProtocolError("invalid_observation", "observation collections must be lists")
     # The port may gather concurrent reports. Canonical ordering makes the
     # bounded frame and its ledger evidence reproducible despite that order.
+    def event_key(item: Any) -> tuple[int, bytes]:
+        return (item.get("frame", -1) if isinstance(item, Mapping) and isinstance(item.get("frame", -1), int) else -1, compact_json(item))
     ordered_entities = sorted(entities, key=compact_json)
-    ordered_receipts = sorted(receipts, key=compact_json)
-    ordered_effects = sorted(effects, key=compact_json)
+    ordered_receipts = sorted(receipts, key=event_key)
+    ordered_effects = sorted(effects, key=event_key)
     clipped_entities = ordered_entities[:MAX_ENTITIES]
     clipped_receipts = ordered_receipts[:MAX_RECENT_EVENTS]
     clipped_effects = ordered_effects[:MAX_RECENT_EVENTS]
@@ -217,6 +230,8 @@ def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
             "recent_effects": max(0, len(effects) - len(clipped_effects)),
         },
     }
+    if not isinstance(result["resources"], dict):
+        raise ProtocolError("invalid_observation", "resources must be an object")
     if len(compact_json(result)) > MAX_OBSERVATION_BYTES:
         raise ProtocolError("observation_too_large", "transport observation exceeds public cap")
     return result
