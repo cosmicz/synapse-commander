@@ -23,6 +23,16 @@ Use bounded tests and fail-capable assertions. Preserve the same rules and
 information boundaries across human, autonomous and mixed-team modes.
 No test suite exists yet; documentation setup does not imply runtime coverage.
 
+* Initial upstream runtime evidence — October 17, 2026
+Recoil 2026.07.04 ARM64 Linux executes in a VM. Stock BAR at
+=f6f07eaf1fbc09eae536444ff3b2755d81e5440b= loaded Supreme Isthmus v2.1 and
+advanced to frame 48 in a bounded headless run. The stock runner reported
+zero passes and 17 skipped tests, alongside widget-environment errors.
+This establishes basic loading/simulation, not passing behavioral checks,
+a graphical client or Synapse Commander gameplay. The external tracker holds
+the reproducible runtime evidence and follow-up diagnosis. Upstream sources
+were not modified; no runtime assets are vendored in this repository.
+
 * Coordination
 Tasks and private evidence live in an external event tracker. Contributor
 worktrees must be explicitly bound to that tracker with the native tooling;
