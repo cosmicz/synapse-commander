@@ -130,7 +130,8 @@ The bridge emits no recent receipts or effects inside its observation frames,
 so the public =recent_receipts= and =recent_effects= lists are empty; the
 authoritative receipts and effects come from the separate outbox stream and are
 recorded in the ledger. Accepted gateway residuals: a GET failure other than a
-ledger error may go unrecorded, the request timeout bounds each receive rather
+ledger error may drop the connection without a recorded response, the request
+timeout bounds each receive rather
 than the whole request, and observation entities are passed through as the
 bridge filters them rather than field-allowlisted by the gateway.
 =tests/test_loop_orchestration.py= exercises the same orchestration with an
