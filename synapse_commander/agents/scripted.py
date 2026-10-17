@@ -35,15 +35,18 @@ class ClientError(RuntimeError):
 class GatewayClient:
     """Minimal JSON-over-HTTP client for the two gateway routes."""
 
-    def __init__(self, base_url: str, *, timeout_s: float = 5.0) -> None:
+    def __init__(self, base_url: str, *, timeout_s: float = 5.0, token: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
+        self.token = token
 
     def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
         data = None if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
         request = urllib.request.Request(self.base_url + path, data=data, method=method)
         if data is not None:
             request.add_header("Content-Type", "application/json")
+        if self.token is not None:
+            request.add_header("Authorization", f"Bearer {self.token}")
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
                 return response.status, json.loads(response.read() or b"{}")

@@ -22,3 +22,7 @@ class MailboxTests(unittest.TestCase):
     def test_events_preserve_sequence(self):
         self.t.outbox.write_text('{"seq":1,"frame":2,"kind":"hello","body":{}}\n{"seq":2,"frame":3,"kind":"bye","body":{}}\n')
         self.assertEqual([x["seq"] for x in self.t.events_since(0)], [1,2])
+    def test_principal_observation_streams_are_kept_separately(self):
+        self.t.outbox.write_text('{"seq":1,"frame":3,"kind":"observation","body":{"team":0,"principal":"commander","observation_id":"obs-commander-3"}}\n{"seq":2,"frame":3,"kind":"observation","body":{"team":0,"principal":"M1","observation_id":"obs-M1-3"}}\n')
+        self.assertEqual(self.t.observation_for("0", "commander")["observation_id"], "obs-commander-3")
+        self.assertEqual(self.t.observation_for("0", "M1")["observation_id"], "obs-M1-3")

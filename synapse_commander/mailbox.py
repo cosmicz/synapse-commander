@@ -56,7 +56,7 @@ class MailboxTransport:
         self.dir = Path(mailbox_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.inbox, self.outbox = self.dir / "inbox.jsonl", self.dir / "outbox.jsonl"
-        self.inbox.touch(); self.outbox.touch(); self._offset = 0; self._seq = 0; self._events: list[dict[str, Any]] = []; self._receipts: dict[str, dict[str, Any]] = {}; self._observation: dict[str, Any] | None = None; self._hello: dict[str, Any] | None = None
+        self.inbox.touch(); self.outbox.touch(); self._offset = 0; self._seq = 0; self._events: list[dict[str, Any]] = []; self._receipts: dict[str, dict[str, Any]] = {}; self._observation: dict[str, Any] | None = None; self._principal_observations: dict[str, dict[str, Any]] = {}; self._hello: dict[str, Any] | None = None
         self._read_lock = RLock()
         self._submit_lock = RLock()
         self._receipt_seq: dict[str, int] = {}
@@ -88,14 +88,18 @@ class MailboxTransport:
                     self._hello = body
                 elif event["kind"] == "observation" and str(body.get("team")) == self.team:
                     self._observation = body
+                    if isinstance(body.get("principal"), str): self._principal_observations[body["principal"]] = body
                 elif event["kind"] == "receipt":
                     self._receipts[body["intent_id"]] = body
                     self._receipt_seq[body["intent_id"]] = event["seq"]
     def hello(self) -> dict[str, Any] | None: self._read(); return self._hello
     def current_frame(self) -> int: self._read(); return int(self._events[-1].get("frame", 0)) if self._events else 0
-    def observation_for(self, team: str) -> Mapping[str, object]:
+    def observation_for(self, team: str, principal: str | None = None) -> Mapping[str, object]:
         self._read()
         if str(team) != self.team or self._observation is None: raise KeyError(team)
+        if principal is not None:
+            if principal not in self._principal_observations: raise KeyError(principal)
+            return self._principal_observations[principal]
         return self._observation
     def receipt(self, intent_id: str) -> dict[str, Any] | None: self._read(); return self._receipts.get(intent_id)
     def events_since(self, seq: int, limit: int = 256) -> list[dict[str, Any]]: self._read(); return [e for e in self._events if int(e.get("seq", 0)) > seq][:limit]

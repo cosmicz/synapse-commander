@@ -81,6 +81,29 @@ def new_run_id() -> str:
     return "loop0-" + _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(2)
 
 
+def mint_principal_tokens(run_dir: Path, principals: list[str]) -> dict[str, str]:
+    """Create per-run session credentials only in the private evidence tree."""
+    if not principals or len(set(principals)) != len(principals):
+        raise ValueError("principals must be unique and non-empty")
+    if any(not isinstance(principal, str) or not principal for principal in principals):
+        raise ValueError("principal names must be non-empty strings")
+    tokens = {principal: secrets.token_urlsafe(32) for principal in principals}
+    path = run_dir / "principals.json"
+    path.write_text(json.dumps(tokens, sort_keys=True) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return tokens
+
+
+def gateway_sessions(principal_tokens: dict[str, str]) -> dict[str, str]:
+    """Invert a private principal-token file for the in-memory gateway only."""
+    if not principal_tokens or len(set(principal_tokens.values())) != len(principal_tokens):
+        raise ValueError("principal tokens must be unique and non-empty")
+    if any(not isinstance(principal, str) or not principal or not isinstance(token, str) or not token
+           for principal, token in principal_tokens.items()):
+        raise ValueError("principal tokens must be non-empty strings")
+    return {token: principal for principal, token in principal_tokens.items()}
+
+
 def app_identity() -> tuple[str, int]:
     """HEAD of the repository holding this package, and its modified-file count."""
     root = Path(__file__).resolve().parent.parent
@@ -279,8 +302,13 @@ def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, iden
                    config_hashes: dict[str, str], principal: str = PRINCIPAL, model_id: str | None = None,
                    presentation: str = "headless", scenario: dict[str, Any] | None = None,
                    external_budgets: dict[str, Any] | None = None,
-                   required_decisions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    return {
+                   required_decisions: list[dict[str, Any]] | None = None,
+                   principals: list[str] | None = None,
+                   principal_sources: dict[str, str] | None = None) -> dict[str, Any]:
+    declared_principals = [principal] if principals is None else list(principals)
+    if not declared_principals or len(set(declared_principals)) != len(declared_principals):
+        raise ValueError("manifest principals must be unique and non-empty")
+    manifest = {
         "schema": "synapse.manifest/v1",
         "run_id": run_id,
         "rig_commit": rig_commit,
@@ -291,7 +319,7 @@ def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, iden
         "scenario": dict(scenario or SCENARIO),
         "controller_images": {},
         "adapter_version": ADAPTER_VERSION,
-        "principals": [principal],
+        "principals": declared_principals,
         "config_hashes": config_hashes,
         "model_id": model_id,
         "external_budgets": external_budgets or {},
@@ -300,6 +328,11 @@ def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, iden
         "presentation": presentation,
         "required_decisions": required_decisions or [],
     }
+    if principal_sources is not None:
+        if set(principal_sources) != set(declared_principals) or any(source not in {"scripted", "agent"} for source in principal_sources.values()):
+            raise ValueError("principal_sources must name every declared principal")
+        manifest["principal_sources"] = dict(principal_sources)
+    return manifest
 
 
 def scenario_seed(table: dict[str, Any] | None) -> int:

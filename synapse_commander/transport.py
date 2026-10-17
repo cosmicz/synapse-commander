@@ -21,7 +21,7 @@ class EngineTransport(Protocol):
     typed envelope to a reducer, but never accept a Lua string or engine order.
     """
 
-    def observation_for(self, team: str) -> Mapping[str, object]: ...
+    def observation_for(self, team: str, principal: str | None = None) -> Mapping[str, object]: ...
 
     def current_frame(self) -> int: ...
 
@@ -40,6 +40,7 @@ class MemoryTransport:
     def __init__(self, *, frame: int = 100) -> None:
         self.frame = frame
         self.observations: dict[str, dict[str, object]] = {}
+        self.principal_observations: dict[tuple[str, str], dict[str, object]] = {}
         self._history: dict[str, tuple[str, dict[str, object]]] = {}
         self.observation_teams: dict[str, str] = {}
         self.accepted: list[IntentEnvelope] = []
@@ -55,8 +56,12 @@ class MemoryTransport:
         self.observation_teams[observation_id] = team
         self._history[observation_id] = (team, stored)
 
-    def observation_for(self, team: str) -> Mapping[str, object]:
-        return self.observations[team]
+    def observation_for(self, team: str, principal: str | None = None) -> Mapping[str, object]:
+        return self.observations[team] if principal is None else self.principal_observations[(team, principal)]
+
+    def publish_principal_observation(self, team: str, principal: str, observation: Mapping[str, object]) -> None:
+        self.principal_observations[(team, principal)] = dict(observation)
+
 
     def current_frame(self) -> int:
         return self.frame

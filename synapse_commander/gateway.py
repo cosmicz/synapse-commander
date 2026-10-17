@@ -39,12 +39,14 @@ class LoopbackGateway:
         origin: str = "agent",
         ledger: LedgerSink | None = None,
         scenario: str | None = None,
+        sessions: dict[str, str] | None = None,
     ) -> None:
         self.transport = transport
         self.principal = principal
         self.team = team
         self.origin = origin
         self.ledger = ledger
+        self._sessions = dict(sessions or {})
         self._scenario = None
         if scenario is not None:
             try:
@@ -52,16 +54,19 @@ class LoopbackGateway:
             except ScenarioError as error:
                 raise ValueError("scenario_unavailable") from error
         self._observation_events: dict[str, str] = {}
+        self._observation_principals: dict[str, str] = {}
+        self._submission_meta: dict[str, tuple[int | None, str]] = {}
         self._ledger_lock = RLock()
 
-    def _record_observation(self, observation: dict[str, Any]) -> None:
+    def _record_observation(self, observation: dict[str, Any], principal: str) -> None:
         if self.ledger is None:
             return
         event_id = self.ledger.record(
             "OBSERVATION",
             sim_frame=self.transport.current_frame(),
             origin="gateway",
-            payload={"observation_id": observation["observation_id"], "team": self.team, "observation": observation},
+            payload={"observation_id": observation["observation_id"], "team": self.team,
+                     "principal": principal, "observation": observation},
         )
         self._observation_events[observation["observation_id"]] = event_id
 
@@ -69,20 +74,29 @@ class LoopbackGateway:
         if self.ledger is None:
             return None
         observation_event = self._observation_events.get(envelope.based_on_observation_id)
+        received = getattr(self.ledger, "now_ns", lambda: None)()
+        payload = {"intent_id": envelope.intent_id, "type": envelope.type,
+                   "based_on_observation_id": envelope.based_on_observation_id, "principal": envelope.principal,
+                   "envelope": envelope.to_wire(), "client": envelope.principal}
+        if received is not None:
+            payload["received_wall_ns"] = received
+        self._submission_meta[envelope.intent_id] = (received, envelope.principal)
         return self.ledger.record(
             "INTENT_SUBMITTED",
             sim_frame=self.transport.current_frame(),
             origin=self.origin,
-            payload={"intent_id": envelope.intent_id, "type": envelope.type,
-                     "based_on_observation_id": envelope.based_on_observation_id,
-                     "envelope": envelope.to_wire()},
+            payload=payload,
             causes=(observation_event,) if observation_event else (),
         )
 
-    def _record_receipt(self, receipt: Any, submission_event: str | None) -> None:
+    def _record_receipt(self, receipt: Any, submission_event: str | None, principal: str) -> None:
         if self.ledger is None:
             return
-        payload = {"intent_id": receipt.intent_id, "status": "accepted" if receipt.accepted else "rejected"}
+        payload = {"intent_id": receipt.intent_id, "status": "accepted" if receipt.accepted else "rejected",
+                   "principal": principal, "client": principal}
+        received, _client = self._submission_meta.get(receipt.intent_id, (None, principal))
+        if received is not None:
+            payload["received_wall_ns"] = received
         payload["frame"] = receipt.frame
         if receipt.reason:
             payload["reason_code"] = receipt.reason
@@ -94,22 +108,35 @@ class LoopbackGateway:
             causes=(submission_event,) if submission_event else (),
         )
 
-    def observation(self) -> dict[str, Any]:
+    def observation(self, principal: str | None = None) -> dict[str, Any]:
         with self._ledger_lock:
-            observation = bounded_observation(self.transport.observation_for(self.team), scenario_table=self._scenario)
-            self._record_observation(observation)
+            principal = self.principal if principal is None else principal
+            source = (self.transport.observation_for(self.team, principal)
+                      if self._sessions else self.transport.observation_for(self.team))
+            observation = bounded_observation(source, scenario_table=self._scenario,
+                                              principal=principal if self._sessions else None)
+            self._observation_principals[observation["observation_id"]] = principal
+            self._record_observation(observation, principal)
             return observation
 
-    def submit(self, value: Any) -> Any:
+    def submit(self, value: Any, principal: str | None = None) -> Any:
         with self._ledger_lock:
-            envelope = IntentEnvelope.from_untrusted(value, principal=self.principal, team=self.team,
+            principal = self.principal if principal is None else principal
+            if self._sessions and isinstance(value, dict) and value.get("principal") not in (None, principal):
+                raise ProtocolError("principal_mismatch", "session principal does not match envelope")
+            if self._sessions and isinstance(value, dict):
+                owner = self._observation_principals.get(value.get("based_on_observation_id"))
+                if owner is not None and owner != principal:
+                    raise ProtocolError("unknown_observation", "observation belongs to another principal")
+            envelope = IntentEnvelope.from_untrusted(value, principal=principal, team=self.team,
                                                      chassis=None if self._scenario is None else frozenset(self._scenario["chassis"]),
-                                                     controllers=None if self._scenario is None else frozenset(self._scenario["chips"]))
+                                                     controllers=None if self._scenario is None else frozenset(self._scenario["chips"]),
+                                                     principals=None if not self._sessions else frozenset(self._sessions.values()))
             submission_event = self._record_submission(envelope)
             receipt = self.transport.submit_intent(envelope)
             if receipt.reason in {"pending", "receipt_timeout"}:
                 raise TimeoutError("engine receipt is not yet known")
-            self._record_receipt(receipt, submission_event)
+            self._record_receipt(receipt, submission_event, principal)
             return receipt
 
     def make_server(self, port: int = 0, *, host: str = "127.0.0.1") -> ThreadingHTTPServer:
@@ -147,14 +174,27 @@ class LoopbackGateway:
                     return False
                 return True
 
+            def _principal(self) -> str | None:
+                if not gateway._sessions:
+                    return gateway.principal
+                authorization = self.headers.get("Authorization", "")
+                prefix = "Bearer "
+                principal = gateway._sessions.get(authorization[len(prefix):]) if authorization.startswith(prefix) else None
+                if principal is None:
+                    self._send(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                return principal
+
             def do_GET(self) -> None:  # noqa: N802
                 if self.path != "/v1/observation":
                     self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
                     return
                 if not self._trusted_headers(body=False):
                     return
+                principal = self._principal()
+                if principal is None:
+                    return
                 try:
-                    observation = gateway.observation()
+                    observation = gateway.observation(principal)
                     self._send(HTTPStatus.OK, observation)
                 except (KeyError, ProtocolError, ValueError):
                     self._send(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "observation_unavailable"})
@@ -164,6 +204,9 @@ class LoopbackGateway:
                     self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
                     return
                 if not self._trusted_headers(body=True):
+                    return
+                principal = self._principal()
+                if principal is None:
                     return
                 if self.headers.get("Content-Length") is None:
                     self._send(HTTPStatus.LENGTH_REQUIRED, {"error": "length_required"})
@@ -178,7 +221,7 @@ class LoopbackGateway:
                 raw = self.rfile.read(length)
                 try:
                     value = json.loads(raw.decode("utf-8"), parse_constant=lambda _x: (_ for _ in ()).throw(ValueError()))
-                    receipt = gateway.submit(value)
+                    receipt = gateway.submit(value, principal)
                     self._send(HTTPStatus.ACCEPTED if receipt.accepted else HTTPStatus.CONFLICT, receipt.to_wire())
                 except LedgerError:
                     self._send(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "gateway_unavailable"})

@@ -27,12 +27,13 @@ MAX_FACTORIES = 4
 MAX_FACTORY_JOBS = 8
 MAX_BUDGET = 2**31 - 1
 
-INTENT_TYPES = frozenset({"PRODUCE", "TASK", "INSTALL"})
+INTENT_TYPES = frozenset({"PRODUCE", "TASK", "INSTALL", "MESSAGE"})
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _REQUIRED_PAYLOAD_FIELDS = {
     "PRODUCE": frozenset({"factory", "chassis", "controller", "parameters"}),
     "TASK": frozenset({"unit", "verb", "args"}),
     "INSTALL": frozenset({"unit", "expected_version", "replacement_version", "parameters"}),
+    "MESSAGE": frozenset({"to", "text"}),
 }
 
 
@@ -80,7 +81,7 @@ class IntentEnvelope:
     payload: dict[str, Any]
 
     @classmethod
-    def from_untrusted(cls, value: Any, *, principal: str, team: str, chassis: frozenset[str] | None = None, controllers: frozenset[str] | None = None) -> "IntentEnvelope":
+    def from_untrusted(cls, value: Any, *, principal: str, team: str, chassis: frozenset[str] | None = None, controllers: frozenset[str] | None = None, principals: frozenset[str] | None = None) -> "IntentEnvelope":
         """Parse a client request and inject, rather than trust, identity."""
         if not isinstance(value, dict):
             raise ProtocolError("malformed_json", "body must be a JSON object")
@@ -100,8 +101,15 @@ class IntentEnvelope:
         required = _REQUIRED_PAYLOAD_FIELDS[intent_type]
         if set(payload) != required:
             raise ProtocolError("invalid_payload", "payload fields do not match the typed intent")
-        for field in required - {"parameters", "args"}:
+        for field in required - {"parameters", "args", "text"}:
             _bounded_string(payload[field], field)
+        if intent_type == "MESSAGE":
+            if principals is None:
+                raise ProtocolError("intent_not_allowed", "MESSAGE requires a principal scenario")
+            if payload["to"] not in principals:
+                raise ProtocolError("unknown_principal", "unknown message recipient")
+            if not isinstance(payload["text"], str) or len(payload["text"]) > 256:
+                raise ProtocolError("invalid_parameters", "message text must be at most 256 characters")
         if intent_type == "PRODUCE" and chassis is not None and controllers is not None:
             if payload["chassis"] not in chassis:
                 raise ProtocolError("unknown_chassis", "unknown chassis")
@@ -387,11 +395,13 @@ def _bounded_expedition(value: Mapping[str, Any], result: dict[str, Any], scenar
     result["reports"] = sorted(public_reports, key=compact_json)
 
 
-def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str, Any] | None = None, principal: str | None = None) -> dict[str, Any]:
     """Normalize a port result into the small, bounded public smoke schema."""
     if not isinstance(value, Mapping):
         raise ProtocolError("invalid_observation", "transport returned no observation object")
     observation_id = _bounded_string(value.get("observation_id"), "observation_id")
+    if principal is not None and value.get("principal") != principal:
+        raise ProtocolError("invalid_observation", "principal stream mismatch")
     frame = value.get("frame")
     if not isinstance(frame, int) or isinstance(frame, bool) or frame < 0:
         raise ProtocolError("invalid_observation", "frame must be a non-negative integer")
@@ -425,6 +435,8 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
             "recent_effects": max(0, len(effects) - len(clipped_effects)),
         },
     }
+    if principal is not None:
+        result["principal"] = principal
     if not isinstance(result["resources"], dict):
         raise ProtocolError("invalid_observation", "resources must be an object")
     # The smoke client needs its declared fixed goal, not the engine's private

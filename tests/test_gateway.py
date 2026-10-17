@@ -10,11 +10,12 @@ import unittest
 from unittest.mock import patch
 
 from synapse_commander.gateway import LoopbackGateway
-from synapse_commander.protocol import IntentReceipt
+from synapse_commander.protocol import IntentReceipt, ProtocolError
 from synapse_commander.recording import Recorder, verify_ledger
 from synapse_commander.recording import LedgerError
 from synapse_commander.transport import MemoryTransport
 from synapse_commander.scenarios import ScenarioError
+from synapse_commander.run import build_manifest, gateway_sessions, mint_principal_tokens
 from tests.test_recording import manifest
 from tests.test_smoke_observation import provisioning_observation
 
@@ -98,6 +99,52 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(len(result["recent_effects"]), 16)
         self.assertEqual(result["recent_receipts"][0]["frame"], 4)
         self.assertEqual(result["recent_effects"][-1]["frame"], 19)
+
+    def test_principal_session_requires_bearer_token_and_binds_envelope(self) -> None:
+        transport = MemoryTransport(frame=100)
+        transport.publish_principal_observation("blue", "commander", observation("obs-commander-100", principal="commander"))
+        server = LoopbackGateway(transport, principal="legacy", team="blue",
+                                 sessions={"private-token": "commander"}).make_server()
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+        try:
+            connection.request("GET", "/v1/observation")
+            self.assertEqual(connection.getresponse().status, 401)
+            connection.close(); connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+            connection.request("GET", "/v1/observation", headers={"Authorization": "Bearer private-token"})
+            self.assertEqual(connection.getresponse().status, 200)
+        finally:
+            connection.close(); server.shutdown(); thread.join(); server.server_close()
+
+    def test_session_rejects_principal_mismatch_and_cross_stream_observation(self) -> None:
+        transport = MemoryTransport(frame=100)
+        transport.publish_principal_observation("blue", "commander", observation("obs-commander-100", principal="commander"))
+        transport.publish_principal_observation("blue", "M1", observation("obs-M1-100", principal="M1"))
+        gateway = LoopbackGateway(transport, principal="legacy", team="blue", sessions={"c": "commander", "m": "M1"})
+        gateway.observation("commander")
+        task = {"schema": "IntentEnvelope/v1", "intent_id": "cross", "based_on_observation_id": "obs-commander-100", "expires_at_frame": 200, "type": "TASK", "payload": {"unit": "7", "verb": "advance", "args": {}}}
+        with self.assertRaisesRegex(ProtocolError, "another principal"):
+            gateway.submit(task, "M1")
+        task["principal"] = "commander"
+        with self.assertRaisesRegex(ProtocolError, "session principal"):
+            gateway.submit(task, "M1")
+
+    def test_principal_tokens_are_private_run_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            tokens = mint_principal_tokens(path, ["commander", "M1"])
+            self.assertEqual(set(tokens), {"commander", "M1"})
+            self.assertEqual(json.loads((path / "principals.json").read_text()), tokens)
+            self.assertEqual((path / "principals.json").stat().st_mode & 0o777, 0o600)
+            self.assertEqual(set(gateway_sessions(tokens).values()), {"commander", "M1"})
+
+    def test_manifest_declares_all_principal_sources(self) -> None:
+        identity = {name: {"name": name, "version": "1"} for name in ("engine", "game", "map")}
+        manifest_value = build_manifest(run_id="r", rig_commit="a" * 40, app_commit="b" * 40,
+                                        identity=identity, config_hashes={}, principals=["commander", "M1"],
+                                        principal_sources={"commander": "scripted", "M1": "agent"})
+        self.assertEqual(manifest_value["principals"], ["commander", "M1"])
+        self.assertEqual(manifest_value["principal_sources"]["M1"], "agent")
 
     def test_server_is_loopback_only(self) -> None:
         self.assertEqual(self.server.server_address[0], "127.0.0.1")
@@ -202,6 +249,11 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual((status, result["error"]), (400, "verb_not_supported"))
         self.assertEqual(self.transport.accepted, [])
 
+    def test_message_requires_principal_scenario_and_is_bounded(self) -> None:
+        message = {"schema": "IntentEnvelope/v1", "intent_id": "message-1", "based_on_observation_id": "obs-1", "expires_at_frame": 200, "type": "MESSAGE", "payload": {"to": "M1", "text": "hello"}}
+        status, result = self.request("POST", "/v1/intents", message)
+        self.assertEqual((status, result["error"]), (400, "intent_not_allowed"))
+
     def test_non_finite_json_is_rejected_at_parse_boundary(self) -> None:
         request = produce(); request["expires_at_frame"] = float("nan")
         status, result = self.request("POST", "/v1/intents", request)
@@ -261,7 +313,7 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(ledger.events[2]["causes"], ("event-2",))
         self.assertEqual(ledger.events[0]["payload"]["observation"]["observation_id"], "obs-1")
         self.assertEqual(ledger.events[1]["payload"]["envelope"]["payload"]["factory"], "F0")
-        self.assertEqual(ledger.events[2]["payload"], {"intent_id": "intent-1", "status": "accepted", "frame": 100})
+        self.assertEqual(ledger.events[2]["payload"], {"intent_id": "intent-1", "status": "accepted", "principal": "agent-alpha", "client": "agent-alpha", "frame": 100})
 
     def test_transport_timeout_returns_503_without_a_receipt_record(self) -> None:
         class TimeoutTransport(MemoryTransport):
