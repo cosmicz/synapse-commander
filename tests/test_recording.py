@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import random
 import re
 import tempfile
 import threading
@@ -440,7 +441,7 @@ class CorruptionAndTruncation(LedgerCase):
         lines = self.lines()
         lines[3] = b"\xff\xfe not json"
         self.write_lines(lines)
-        self.assert_refused("corrupt", "not a JSON record")
+        self.assert_refused("corrupt", "not a strict JSON record")
 
     def test_empty_and_missing_files(self):
         self.path.write_bytes(b"")
@@ -456,6 +457,202 @@ class CorruptionAndTruncation(LedgerCase):
         lines[-1] = rec.canonical_json(trailer).encode()
         self.write_lines(lines)
         self.assert_refused("corrupt", "trailer_mismatch")
+
+
+class UntrustedInput(LedgerCase):
+    """verify_ledger must return a failed Verification, never raise, on any input."""
+
+    PALETTE = [None, True, False, 0, -1, 1.5, "", "x", [], [1], ["ev-000000"], {}, {"a": 1}]
+
+    def verify_total(self):
+        try:
+            return verify_ledger(self.path)
+        except Exception as exc:  # the property under test
+            self.fail(f"verify_ledger raised {type(exc).__name__}: {exc}")
+
+    def replace_value(self, line_index, old, new):
+        lines = self.lines()
+        self.assertIn(old, lines[line_index])
+        lines[line_index] = lines[line_index].replace(old, new, 1)
+        self.write_lines(lines)
+
+    def test_non_finite_constants_rejected_at_parse(self):
+        for constant in (b"NaN", b"Infinity", b"-Infinity"):
+            with self.subTest(constant=constant):
+                self.path.unlink(missing_ok=True)
+                self.write_run()
+                self.replace_value(6, b'"ops":12', b'"ops":' + constant)
+                result = self.verify_total()
+                self.assertEqual(result.status, "corrupt")
+                self.assertIn("non_finite_number", result.errors[0])
+
+    def test_non_finite_with_matching_shape_is_still_corrupt(self):
+        # Even a NaN in sim_time_s, where the verifier would compare floats.
+        self.write_run()
+        self.replace_value(6, b'"sim_time_s":13.5', b'"sim_time_s":NaN')
+        self.assertEqual(self.verify_total().status, "corrupt")
+
+    def test_unhashable_kind_with_recomputed_digest(self):
+        self.write_run()
+        for field in ("kind", "origin", "event_id", "schema", "prev"):
+            for bad in ([], {}, ["OBSERVATION"]):
+                with self.subTest(field=field, bad=bad):
+                    self.path.unlink()
+                    self.write_run()
+                    records = [json.loads(line) for line in self.lines()]
+                    records[3][field] = bad
+                    records[3]["digest"] = rec.record_digest(records[3])
+                    self.write_lines([rec.canonical_json(r).encode() for r in records])
+                    result = self.verify_total()
+                    self.assertFalse(result.ok)
+                    self.assertIn("wrong type", result.errors[0])
+
+    def test_unhashable_payload_status_with_recomputed_digest(self):
+        self.write_run()
+
+        def bad_status(rs):
+            for record in rs:
+                if record["kind"] in (rec.INTENT_RECEIPT, rec.RADIO):
+                    record["payload"]["status"] = ["accepted"]
+            return rs
+        self.rewrite(bad_status)
+        result = self.verify_total()
+        self.assertFalse(result.ok)
+        self.assertIn("status", result.errors[0])
+
+    def test_lone_surrogate_escape(self):
+        self.write_run()
+        self.replace_value(6, b'"program":"haul_v1"', b'"program":"\\ud800"'.replace(b"\\\\", b"\\"))
+        self.assertIn(b"\\ud800", self.lines()[6])
+        result = self.verify_total()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "corrupt")
+
+    def test_lone_surrogate_with_matching_digest_field(self):
+        # The digest itself cannot be computed for such a record.
+        self.write_run()
+        self.replace_value(6, b'"origin":"controller"', b'"origin":"\\udfff"'.replace(b"\\\\", b"\\"))
+        self.assertFalse(self.verify_total().ok)
+
+    def test_oversized_integer_and_deep_nesting(self):
+        for replacement in (b'"ops":' + b"9" * 5000, b'"ops":' + b"[" * 100000 + b"]" * 100000,
+                            b'"ops":' + b"[" * 40 + b"]" * 40):
+            with self.subTest(size=len(replacement)):
+                self.path.unlink(missing_ok=True)
+                self.write_run()
+                self.replace_value(6, b'"ops":12', replacement)
+                result = self.verify_total()
+                self.assertFalse(result.ok)
+
+    def test_counters_beyond_range_with_recomputed_digest(self):
+        for field, value in (("sim_frame", 10 ** 400), ("wall_ns", 2 ** 63), ("seq", 10 ** 30)):
+            with self.subTest(field=field):
+                self.path.unlink(missing_ok=True)
+                self.write_run()
+                records = [json.loads(line) for line in self.lines()]
+                records[6][field] = value
+                records[6]["digest"] = rec.record_digest(records[6])
+                self.write_lines([rec.canonical_json(r).encode() for r in records])
+                self.assertFalse(self.verify_total().ok)
+
+    def test_trailer_cannot_cite_records(self):
+        self.write_run()
+        records = [json.loads(line) for line in self.lines()]
+        records[-1]["causes"] = [records[0]["event_id"]]
+        records[-1]["digest"] = rec.record_digest(records[-1])
+        self.write_lines([rec.canonical_json(r).encode() for r in records])
+        result = self.verify_total()
+        self.assertFalse(result.ok)
+        self.assertIn("cannot cite", result.errors[0])
+
+    def test_non_object_records(self):
+        for line in (b"[]", b"1", b'"x"', b"null", b"true"):
+            with self.subTest(line=line):
+                self.path.unlink(missing_ok=True)
+                self.write_run()
+                lines = self.lines()
+                lines[3] = line
+                self.write_lines(lines)
+                self.assertFalse(self.verify_total().ok)
+
+    def test_field_type_fuzz_never_raises_or_verifies(self):
+        self.write_run()
+        original = [json.loads(line) for line in self.lines()]
+        cases = 0
+        for index, record in enumerate(original):
+            targets = [(None, name) for name in record if name != "digest"]
+            targets += [("payload", name) for name in record["payload"]]
+            for parent, name in targets:
+                for bad in self.PALETTE:
+                    mutated = json.loads(json.dumps(record))
+                    holder = mutated if parent is None else mutated["payload"]
+                    if holder[name] == bad and type(holder[name]) is type(bad):
+                        continue
+                    holder[name] = bad
+                    try:
+                        mutated["digest"] = rec.record_digest(mutated)
+                    except LedgerError:
+                        pass
+                    lines = [rec.canonical_json(r).encode() for r in original]
+                    lines[index] = json.dumps(mutated, ensure_ascii=False).encode()
+                    self.write_lines(lines)
+                    cases += 1
+                    result = self.verify_total()
+                    # Documented limit: rewriting the final trailer's free-form
+                    # outcome with a recomputed digest is an unkeyed forgery.
+                    forgeable = (index == len(original) - 1 and parent == "payload"
+                                 and name == "outcome" and isinstance(bad, dict))
+                    if forgeable:
+                        continue
+                    self.assertFalse(result.ok, f"record {index} {parent}.{name}={bad!r} verified")
+                    self.assertIsNone(result.classification)
+        self.assertGreater(cases, 500)
+
+    def test_raw_byte_fuzz_never_raises(self):
+        self.write_run()
+        data = self.path.read_bytes()
+        reference = [json.loads(line) for line in self.lines()]
+        rng = random.Random(20261017)
+        for _ in range(400):
+            mutated = bytearray(data)
+            for _ in range(rng.randint(1, 4)):
+                op = rng.randrange(3)
+                at = rng.randrange(len(mutated))
+                if op == 0:
+                    mutated[at] = rng.randrange(256)
+                elif op == 1:
+                    mutated.insert(at, rng.choice(b'{}[]",:\\0aeNIu \n\xff'))
+                else:
+                    del mutated[at]
+            self.path.write_bytes(bytes(mutated))
+            result = self.verify_total()
+            if result.ok:  # only harmless changes may verify
+                self.assertEqual(result.records, reference)
+
+    def test_writer_rejects_unrepresentable_input_without_writing(self):
+        r = self.recorder()
+        r.run_start(0)
+        before = self.path.read_bytes()
+        bad_calls = [
+            dict(kind=rec.OBSERVATION, sim_frame=0, origin="gateway", payload={"observation_id": "o", "x": float("nan")}),
+            dict(kind=rec.OBSERVATION, sim_frame=0, origin="gateway", payload={"observation_id": "\ud800"}),
+            dict(kind=rec.OBSERVATION, sim_frame=0, origin="gateway", payload={"observation_id": "o", "x": object()}),
+            dict(kind=[], sim_frame=0, origin="gateway", payload={"observation_id": "o"}),
+            dict(kind=rec.OBSERVATION, sim_frame=True, origin="gateway", payload={"observation_id": "o"}),
+            dict(kind=rec.OBSERVATION, sim_frame=0, origin=["gateway"], payload={"observation_id": "o"}),
+            dict(kind=rec.OBSERVATION, sim_frame=0, origin="gateway", payload=["o"]),
+            dict(kind=rec.OBSERVATION, sim_frame=0, origin="gateway", payload={"observation_id": "o"},
+                 causes="ev-000001"),
+            dict(kind=rec.OBSERVATION, sim_frame=10 ** 5000, origin="gateway", payload={"observation_id": "o"}),
+            dict(kind=rec.OBSERVATION, sim_frame=2 ** 63, origin="gateway", payload={"observation_id": "o"}),
+        ]
+        for number, call in enumerate(bad_calls):
+            kind = call.pop("kind")
+            with self.subTest(case=number), self.assertRaises(LedgerError):
+                r.record(kind, **call)
+        self.assertEqual(self.path.read_bytes(), before)
+        r.run_end(0, {})
+        self.assertTrue(verify_ledger(self.path).ok)
 
 
 class CausalTyping(LedgerCase):
@@ -769,6 +966,35 @@ class Classification(LedgerCase):
                 out.append(record)
             return out
         self.rewrite(reject)
+        self.assertEqual(self.classify().classification, "agent_partial")
+
+    def test_recovery_must_respond_to_post_event_observation(self):
+        # Intent submitted after collapse_1, but its inference and observation
+        # precede the event: not evidence of a response to it.
+        self.write_run(origin="agent", **AGENT_MANIFEST)
+
+        def stale(rs):
+            opening_inference = next(r["event_id"] for r in rs if r["kind"] == rec.INFERENCE)
+            for record in rs:
+                if record["kind"] == rec.INTENT_SUBMITTED and record["payload"]["intent_id"] == "i2":
+                    record["causes"] = [opening_inference]
+                    record["payload"]["based_on_observation_id"] = "o1"
+            return rs
+        self.rewrite(stale)
+        self.assertEqual(self.classify().classification, "agent_partial")
+
+    def test_post_event_inference_over_pre_event_observation_is_not_a_response(self):
+        self.write_run(origin="agent", **AGENT_MANIFEST)
+
+        def stale(rs):
+            obs1 = next(r["event_id"] for r in rs if r["kind"] == rec.OBSERVATION)
+            for record in rs:
+                if record["kind"] == rec.INFERENCE and record["payload"]["inference_id"] == "inf-i2":
+                    record["causes"] = [obs1]
+                if record["kind"] == rec.INTENT_SUBMITTED and record["payload"]["intent_id"] == "i2":
+                    record["payload"]["based_on_observation_id"] = "o1"
+            return rs
+        self.rewrite(stale)
         self.assertEqual(self.classify().classification, "agent_partial")
 
     def test_missing_scenario_event_fails_required_decision(self):

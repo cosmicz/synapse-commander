@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -33,6 +34,8 @@ LEDGER_SCHEMA = "synapse.ledger/v1"
 MANIFEST_SCHEMA = "synapse.manifest/v1"
 GENESIS = "0" * 64
 MAX_RECORD_BYTES = 256 * 1024
+MAX_PAYLOAD_DEPTH = 32
+MAX_COUNTER = 2 ** 63 - 1  # bound for seq, sim_frame and wall_ns
 
 # Record kinds.  MANIFEST, RUN_START and RUN_END are written only by the
 # recorder; all others arrive through Recorder.record().
@@ -120,13 +123,69 @@ class LedgerError(ValueError):
         self.detail = detail
 
 
+_RECORD_FIELD_TYPES: dict[str, type | tuple[type, ...]] = {
+    "schema": str,
+    "seq": int,
+    "event_id": str,
+    "kind": str,
+    "origin": str,
+    "sim_frame": int,
+    "sim_time_s": (int, float),
+    "wall_ns": int,
+    "causes": list,
+    "payload": dict,
+    "prev": str,
+    "digest": str,
+}
+
+
+def _one_of(value: Any, options: Iterable[str]) -> bool:
+    """Membership that is safe for unhashable or wrong-typed input."""
+    return isinstance(value, str) and value in options
+
+
+def _depth_within(value: Any, limit: int) -> bool:
+    stack = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if depth > limit:
+            return False
+        if isinstance(item, dict):
+            stack.extend((v, depth + 1) for v in item.values())
+        elif isinstance(item, list):
+            stack.extend((v, depth + 1) for v in item)
+    return True
+
+
+def _reject_constant(name: str) -> Any:
+    raise LedgerError("non_finite_number", name)
+
+
+def parse_record(raw: bytes) -> Any:
+    """Strict JSON: no NaN/Infinity.  Raises LedgerError on any bad line."""
+    try:
+        return json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+    except LedgerError:
+        raise
+    # ValueError covers JSONDecodeError and over-long integer literals;
+    # RecursionError covers pathological nesting.
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise LedgerError("not_json", type(exc).__name__) from None
+
+
 def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
 def record_digest(record: Mapping[str, Any]) -> str:
     body = {k: v for k, v in record.items() if k != "digest"}
-    return hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
+    try:
+        encoded = canonical_json(body).encode("utf-8")
+    # Lone surrogates, non-finite floats, over-long integers, unserializable
+    # values and pathological nesting cannot have a stable digest.
+    except (UnicodeEncodeError, TypeError, ValueError, RecursionError) as exc:
+        raise LedgerError("invalid_record", f"not digestible: {type(exc).__name__}") from None
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def scan_sensitive(value: Any, where: str = "payload") -> None:
@@ -151,8 +210,8 @@ def scan_sensitive(value: Any, where: str = "payload") -> None:
 
 
 def validate_manifest(manifest: Mapping[str, Any]) -> None:
-    if not isinstance(manifest, Mapping):
-        raise LedgerError("invalid_manifest", "manifest must be an object")
+    if not isinstance(manifest, Mapping) or not all(isinstance(k, str) for k in manifest):
+        raise LedgerError("invalid_manifest", "manifest must be an object with string keys")
     missing = sorted(set(MANIFEST_FIELDS) - set(manifest))
     if missing:
         raise LedgerError("invalid_manifest", "missing " + ",".join(missing))
@@ -166,7 +225,7 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         if not _COMMIT.match(manifest[name]):
             raise LedgerError("invalid_manifest", f"{name} must be a hex commit id")
     for name in ("engine", "game", "map"):
-        if not all(isinstance(manifest[name].get(k), str) and manifest[name][k] for k in ("name", "version")):
+        if not all(isinstance(manifest[name].get(k), str) and manifest[name].get(k) for k in ("name", "version")):
             raise LedgerError("invalid_manifest", f"{name} needs name and version")
     scenario = manifest["scenario"]
     if not (isinstance(scenario.get("id"), str) and isinstance(scenario.get("version"), str)):
@@ -179,11 +238,11 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     for name, digest in manifest["config_hashes"].items():
         if not isinstance(digest, str) or not _SHA256.match(digest):
             raise LedgerError("invalid_manifest", f"config hash {name} needs a sha256")
-    if manifest["clock_mode"] not in ("continuous", "paused"):
+    if not _one_of(manifest["clock_mode"], ("continuous", "paused")):
         raise LedgerError("invalid_manifest", "clock_mode must be continuous or paused")
     if manifest["fps"] <= 0:
         raise LedgerError("invalid_manifest", "fps must be positive")
-    if manifest["presentation"] not in ("headless", "rendered"):
+    if not _one_of(manifest["presentation"], ("headless", "rendered")):
         raise LedgerError("invalid_manifest", "presentation must be headless or rendered")
     labels = set()
     for decision in manifest["required_decisions"]:
@@ -224,6 +283,19 @@ class _LedgerState:
                     "causes", "payload", "prev", "digest"}
         if set(record) != expected:
             raise LedgerError("invalid_record", f"seq {seq} has unexpected fields")
+        for name, types in _RECORD_FIELD_TYPES.items():
+            value = record[name]
+            if not isinstance(value, types) or isinstance(value, bool):
+                raise LedgerError("invalid_record", f"seq {seq} {name} has the wrong type")
+        for name in ("seq", "sim_frame", "wall_ns"):
+            if not 0 <= record[name] <= MAX_COUNTER:
+                raise LedgerError("invalid_record", f"seq {seq} {name} is out of range")
+        if not math.isfinite(record["sim_time_s"]):
+            raise LedgerError("invalid_record", f"seq {seq} sim_time_s is not finite")
+        if not all(isinstance(c, str) for c in record["causes"]):
+            raise LedgerError("invalid_record", f"seq {seq} causes must be event ids")
+        if not _depth_within(record["payload"], MAX_PAYLOAD_DEPTH):
+            raise LedgerError("invalid_record", f"seq {seq} payload nests too deeply")
         if record["schema"] != LEDGER_SCHEMA:
             raise LedgerError("invalid_record", f"seq {seq} has an unsupported schema")
         if record["seq"] != seq or record["event_id"] != event_id_for(seq):
@@ -233,18 +305,16 @@ class _LedgerState:
         if record["digest"] != record_digest(record):
             raise LedgerError("digest_mismatch", f"seq {seq}")
         kind, origin, payload = record["kind"], record["origin"], record["payload"]
-        if not isinstance(payload, dict):
-            raise LedgerError("invalid_record", f"seq {seq} payload must be an object")
         self._check_time(record, seq)
         causes = record["causes"]
-        if not isinstance(causes, list) or not all(isinstance(c, str) for c in causes):
-            raise LedgerError("invalid_causes", f"seq {seq}")
         if len(set(causes)) != len(causes):
             raise LedgerError("invalid_causes", f"seq {seq} repeats a cause")
         for cause in causes:
             if cause not in self.by_id:
                 raise LedgerError("unknown_cause", f"seq {seq} cites {cause}")
         scan_sensitive(payload)
+        if kind in RECORDER_KINDS and causes:
+            raise LedgerError("invalid_causes", f"seq {seq} {kind} cannot cite records")
 
         if seq == 0:
             if kind != MANIFEST or origin != "recorder":
@@ -268,9 +338,9 @@ class _LedgerState:
                 raise LedgerError("trailer_mismatch", "outcome must be an object")
             self.ended = True
         else:
-            if kind not in KIND_ORIGINS:
+            if not _one_of(kind, KIND_ORIGINS):
                 raise LedgerError("unknown_kind", f"seq {seq} {kind!r}")
-            if origin not in KIND_ORIGINS[kind]:
+            if not _one_of(origin, KIND_ORIGINS[kind]):
                 raise LedgerError("invalid_origin", f"seq {seq} {kind} from {origin!r}")
             self._check_kind(kind, payload, causes, seq)
 
@@ -293,10 +363,11 @@ class _LedgerState:
         if wall < self.last_wall:
             raise LedgerError("time_backwards", f"seq {seq} wall_ns")
         if seq == 0:
-            fps = record["payload"].get("fps") if isinstance(record["payload"], dict) else None
+            fps = record["payload"].get("fps")
         else:
             fps = self.manifest["fps"] if self.manifest else None
-        if isinstance(fps, int) and fps > 0 and record["sim_time_s"] != sim_time(frame, fps):
+        if isinstance(fps, int) and not isinstance(fps, bool) and fps > 0 \
+                and record["sim_time_s"] != sim_time(frame, fps):
             raise LedgerError("invalid_time", f"seq {seq} sim_time_s does not match frame")
 
     def _cited(self, causes: Iterable[str], kinds: frozenset[str] | set[str]) -> list[dict[str, Any]]:
@@ -318,7 +389,7 @@ class _LedgerState:
             # A repeated intent_id is a new attempt with its own event; the
             # dispatcher's duplicate rejection is evidence, not dropped.
         elif kind == INTENT_RECEIPT:
-            if payload.get("status") not in _RECEIPT_STATUSES:
+            if not _one_of(payload.get("status"), _RECEIPT_STATUSES) or not isinstance(payload.get("intent_id"), str):
                 raise LedgerError("invalid_payload", f"seq {seq} receipt status")
             submitted = [r for r in self._cited(causes, {INTENT_SUBMITTED})
                          if r["payload"]["intent_id"] == payload.get("intent_id")]
@@ -327,7 +398,7 @@ class _LedgerState:
             if submitted[0]["event_id"] in self.receipted:
                 raise LedgerError("duplicate_receipt", f"seq {seq}")
         elif kind == RADIO:
-            if payload.get("status") not in _RADIO_STATUSES:
+            if not _one_of(payload.get("status"), _RADIO_STATUSES):
                 raise LedgerError("invalid_payload", f"seq {seq} radio status")
             cited = self._cited(causes, _RADIO_CAUSES)
             if not cited:
@@ -344,7 +415,7 @@ class _LedgerState:
             if not isinstance(payload.get("name"), str):
                 raise LedgerError("invalid_payload", f"seq {seq} scenario event name")
         elif kind == CLOCK_MODE:
-            if payload.get("mode") not in ("continuous", "paused") or not isinstance(payload.get("declared"), bool):
+            if not _one_of(payload.get("mode"), ("continuous", "paused")) or not isinstance(payload.get("declared"), bool):
                 raise LedgerError("invalid_payload", f"seq {seq} clock mode")
         elif kind == OPERATOR_INTERVENTION:
             if not isinstance(payload.get("action"), str):
@@ -355,6 +426,15 @@ class _LedgerState:
         for record in cited:
             if record["kind"] == INTENT_RECEIPT and record["payload"]["status"] != "accepted":
                 raise LedgerError("incompatible_cause", f"seq {seq} cites a rejected receipt")
+
+
+def _json_copy(payload: Any, seq: int) -> Any:
+    try:
+        text = canonical_json(payload)
+        text.encode("utf-8")
+        return json.loads(text)
+    except (UnicodeEncodeError, TypeError, ValueError, RecursionError) as exc:
+        raise LedgerError("invalid_payload", f"seq {seq} is not finite JSON: {type(exc).__name__}") from None
 
 
 def event_id_for(seq: int) -> str:
@@ -417,7 +497,7 @@ class Recorder:
         payload: dict[str, Any],
         causes: Sequence[str] = (),
     ) -> str:
-        if kind in RECORDER_KINDS:
+        if _one_of(kind, RECORDER_KINDS):
             raise LedgerError("reserved_kind", kind)
         return self._append(kind, origin=origin, sim_frame=sim_frame, payload=payload, causes=causes,
                             sync=kind == OPERATOR_INTERVENTION)
@@ -462,11 +542,13 @@ class Recorder:
             "kind": kind,
             "origin": origin,
             "sim_frame": sim_frame,
-            "sim_time_s": sim_time(sim_frame, fps) if isinstance(sim_frame, int) else None,
+            "sim_time_s": (sim_time(sim_frame, fps)
+                           if isinstance(sim_frame, int) and not isinstance(sim_frame, bool)
+                           and 0 <= sim_frame <= MAX_COUNTER else None),
             "wall_ns": wall,
-            "causes": list(causes),
+            "causes": list(causes) if isinstance(causes, (list, tuple)) else causes,
             # Round-trip through JSON so the stored record is exactly what a reader sees.
-            "payload": json.loads(canonical_json(payload)),
+            "payload": _json_copy(payload, seq),
             "prev": self._state.head,
         }
         record["digest"] = record_digest(record)
@@ -515,7 +597,7 @@ class Verification:
 
 
 _CORRUPT_CODES = frozenset({"digest_mismatch", "chain_broken", "sequence_gap", "record_after_end",
-                            "trailer_mismatch", "invalid_record"})
+                            "trailer_mismatch", "invalid_record", "not_json", "non_finite_number"})
 
 
 def verify_ledger(path: str | os.PathLike[str]) -> Verification:
@@ -532,9 +614,9 @@ def verify_ledger(path: str | os.PathLike[str]) -> Verification:
     tail = lines.pop()  # b"" when the file ends with a newline
     for number, raw in enumerate(lines, start=1):
         try:
-            record = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return _failed(state, "corrupt", f"line {number}: not a JSON record")
+            record = parse_record(raw)
+        except LedgerError as exc:
+            return _failed(state, "corrupt", f"line {number}: not a strict JSON record ({exc})")
         try:
             state.accept(record)
         except LedgerError as exc:
@@ -581,7 +663,9 @@ def _classify(result: Verification) -> None:
                 for c in r["causes"] if by_id[c]["kind"] == INTENT_SUBMITTED}
     observations = {r["event_id"]: r for r in records if r["kind"] == OBSERVATION}
 
-    def live_chain(intent: dict[str, Any]) -> bool:
+    def live_chain(intent: dict[str, Any]) -> list[dict[str, Any]]:
+        """Observations reached via a cited live inference of the declared model."""
+        found = []
         for cause in intent["causes"]:
             inference = by_id[cause]
             if inference["kind"] != INFERENCE or not inference["payload"]["live"]:
@@ -591,10 +675,11 @@ def _classify(result: Verification) -> None:
             for observed in inference["causes"]:
                 observation = observations.get(observed)
                 if observation and observation["payload"]["observation_id"] == intent["payload"]["based_on_observation_id"]:
-                    return True
-        return False
+                    found.append(observation)
+        return found
 
-    unlinked_agent = [r for r in intents if r["origin"] == "agent" and not live_chain(r)]
+    chains = {r["event_id"]: live_chain(r) for r in intents if r["origin"] == "agent"}
+    unlinked_agent = [event_id for event_id, chain in chains.items() if not chain]
 
     if interventions:
         classification = "assisted"
@@ -607,7 +692,8 @@ def _classify(result: Verification) -> None:
     elif origins == {"human"}:
         classification = "human_only"
     elif origins == {"agent"}:
-        classification = "agent_only" if _required_decisions_met(manifest, records, intents, receipts) else "agent_partial"
+        met = _required_decisions_met(manifest, records, intents, receipts, chains)
+        classification = "agent_only" if met else "agent_partial"
     else:
         classification = "scripted_fixture"
     result.classification = classification
@@ -634,7 +720,8 @@ def _classify(result: Verification) -> None:
 
 
 def _required_decisions_met(manifest: Mapping[str, Any], records: list[dict[str, Any]],
-                            intents: list[dict[str, Any]], receipts: Mapping[str, dict[str, Any]]) -> bool:
+                            intents: list[dict[str, Any]], receipts: Mapping[str, dict[str, Any]],
+                            chains: Mapping[str, list[dict[str, Any]]]) -> bool:
     required = manifest.get("required_decisions") or []
     if not required:
         return False
@@ -653,7 +740,12 @@ def _required_decisions_met(manifest: Mapping[str, Any], records: list[dict[str,
                 continue
             if decision.get("type") is not None and payload["type"] != decision["type"]:
                 continue
-            if after_seq is not None and intent["seq"] < after_seq:
+            chain = chains.get(intent["event_id"], [])
+            if after_seq is not None:
+                # The decision must respond to the event: its observation (and
+                # therefore its inference and the intent) all follow it.
+                chain = [observation for observation in chain if observation["seq"] > after_seq]
+            if not chain:
                 continue
             receipt = receipts.get(intent["event_id"])
             if receipt and receipt["payload"]["status"] == "accepted":
