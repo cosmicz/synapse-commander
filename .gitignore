@@ -10,3 +10,6 @@
 .embead/
 .dorg/
 .meld/
+
+__pycache__/
+*.py[cod]

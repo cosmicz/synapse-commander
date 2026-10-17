@@ -21,7 +21,39 @@ Headless simulation and rendered interaction need separate checks.
 
 Use bounded tests and fail-capable assertions. Preserve the same rules and
 information boundaries across human, autonomous and mixed-team modes.
-No test suite exists yet; documentation setup does not imply runtime coverage.
+The bounded gateway smoke check below is the first application test coverage;
+it does not imply runtime, gameplay, or rendered-client coverage.
+
+* Bounded loopback gateway smoke check
+The application now has a Python-standard-library boundary smoke check:
+=python3 -m unittest discover -v=.  It starts an HTTP server bound only to
+=127.0.0.1= in-process and exercises =GET /v1/observation= and
+=POST /v1/intents=.  The gateway injects a fixed principal and team, emits a
+bounded =synapse-smoke/v1= observation, and submits only typed =PRODUCE=,
+=TASK=, or =INSTALL= =IntentEnvelope/v1= envelopes to a two-method replaceable
+transport port. The listener rejects every non-loopback address.
+The in-memory transport is a deterministic test double, not an engine round
+trip. Its reference validation enforces a simulation-frame token bucket of two
+accepted intents per second with a burst of four and rejects duplicate IDs.
+That limiter represents the authoritative synchronized dispatcher in test; the
+HTTP gateway does not invent acceptance authority. The smoke payload's
+=parameters= and =args= objects are intentionally empty, so later
+controller-specific Broken Relay arguments cannot become an untyped escape
+hatch here.
+
+This smoke schema is intentionally narrower than the selected Broken Relay
+contract: it does not implement a Recoil bridge, radio delivery, controller
+semantics, production legality, or effects.  An accepted intent receipt is
+explicitly not an effect; physical effects remain the future authoritative
+engine's separate records.  The port lives outside synchronized simulation and
+does not accept raw Lua, console, or generic engine commands.
+
+When a compatible recorder is supplied, the gateway emits =OBSERVATION=,
+=INTENT_SUBMITTED=, and =INTENT_RECEIPT= ledger records with stable causal
+links. The configured gateway origin is trusted configuration, never a caller
+field. It records the whole normalized observation and typed envelope, not only
+their identifiers. It emits no =EFFECT= record: that can only come from an
+authoritative engine-side state change.
 
 * Initial upstream runtime evidence — October 17, 2026
 Recoil 2026.07.04 ARM64 Linux executes in a VM. Stock BAR at
