@@ -32,7 +32,7 @@ if gadgetHandler:IsSyncedCode() then
   local principal_mode, principals, principal_order, unit_principal = false, {}, {}, {}
   local links, delivered_reports, queued_reports, entity_names = {}, {}, {}, {}
   local local_status, factory_name = {}, "F0"
-  local effect
+  local effect, body_for_principal
   local scenario_failed = false
 
   local function identifier(value)
@@ -664,7 +664,7 @@ if gadgetHandler:IsSyncedCode() then
     })
   end
 
-  local function body_for_principal(principal)
+  body_for_principal = function(principal)
     for unitID, owner in pairs(unit_principal) do
       if owner == principal and Spring.ValidUnitID(unitID) then return unitID end
     end
