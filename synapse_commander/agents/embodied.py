@@ -180,7 +180,8 @@ class LiveMind:
         live = reply.error is None and self.route.model in reply.model_ids
         decision = (parse_mind_decision(reply.text, observation, self.principal, self.principals,
                                         self._used_ids, intent_id) if live else
-                    Decision('invalid', rejected='model unavailable or reported model mismatch'))
+                    Decision('invalid', rejected=(f'route: {reply.error}' if reply.error
+                                                  else 'model unavailable or reported model mismatch')))
         with self._lock:
             canceled = (self._stop.is_set() or generation != self._human_generation
                         or time.monotonic() - self._began >= self.wall_deadline_s)

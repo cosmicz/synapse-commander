@@ -29,7 +29,7 @@ DEFAULT_MAX_TOKENS = 512
 OPENROUTER_MAX_TOKENS = 4096
 # A reasoning budget keeps room for the answer: replayed commander prompts that
 # failed at 1200 answered 3 of 3 with this budget under the 4096 cap.
-OPENROUTER_REASONING = {"enabled": True, "max_tokens": 1500}
+OPENROUTER_REASONING = {"enabled": True, "max_tokens": 1500, "effort": "low", "exclude": True}
 RESERVED_BODY_KEYS = frozenset({"model", "messages", "stream", "max_tokens"})
 USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "cost")
 
@@ -98,12 +98,12 @@ class OpenAICompatibleRoute:
             return ModelReply("", [], _ms_since(begin), "", error="invalid prompt")
         try:
             body = json.dumps({
+                **self.extra_body,
                 "model": self.model,
                 "messages": [
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": prompt},
                 ],
-                **self.extra_body,
                 "stream": False,
                 "max_tokens": self.max_tokens,
             }, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -131,21 +131,19 @@ class OpenAICompatibleRoute:
             return ModelReply("", [], _ms_since(begin), raw, error="response has invalid shape")
         reported_model = value.get("model")
         choices = value.get("choices")
-        if (isinstance(reported_model, str) and reported_model and len(reported_model) <= MAX_MODEL_CHARS
-                and isinstance(choices, list) and choices and isinstance(choices[0], dict)
-                and choices[0].get("finish_reason") == "length"):
-            # Reasoning or text hit max_tokens: whatever came back is not a complete decision.
-            return ModelReply("", [reported_model], _ms_since(begin), raw, error="max_tokens exhausted",
-                              usage=_usage(value.get("usage")))
-        if (not isinstance(reported_model, str) or not reported_model or len(reported_model) > MAX_MODEL_CHARS
-                or not isinstance(choices, list) or not choices or not isinstance(choices[0], dict)
-                or not isinstance(choices[0].get("message"), dict)
-                or not isinstance(choices[0]["message"].get("content"), str)):
+        valid_model = isinstance(reported_model, str) and bool(reported_model) and len(reported_model) <= MAX_MODEL_CHARS
+        if not valid_model or not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             return ModelReply("", [], _ms_since(begin), raw, error="response has invalid shape")
-        text = choices[0]["message"]["content"]
+        choice = choices[0]
+        usage = _usage(value.get("usage"))
+        if choice.get("finish_reason") == "length":
+            return ModelReply("", [reported_model], _ms_since(begin), raw, error="max_tokens exhausted", usage=usage)
+        if not isinstance(choice.get("message"), dict) or not isinstance(choice["message"].get("content"), str):
+            return ModelReply("", [], _ms_since(begin), raw, error="response has invalid shape")
+        text = choice["message"]["content"]
         if len(text) > MAX_OUTPUT_CHARS:
             return ModelReply("", [reported_model], _ms_since(begin), raw, error="model output too large")
-        return ModelReply(text, [reported_model], _ms_since(begin), raw, usage=_usage(value.get("usage")))
+        return ModelReply(text, [reported_model], _ms_since(begin), raw, usage=usage)
 
 
 class OpenRouterRoute(OpenAICompatibleRoute):

@@ -284,6 +284,8 @@ class AgentCommander:
                                  "model_id": self.model_id if live else ",".join(reply.model_ids) or None,
                                  **{k: record[k] for k in ("call", "route", "latency_ms", "prompt_sha256",
                                                            "output_sha256", "action", "rejected")}}
+            if reply.usage:
+                inference_payload["usage"] = reply.usage
             label = None
             if decision.action == "intent":
                 envelope = decision.envelope
