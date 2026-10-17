@@ -5,7 +5,7 @@
   "seed": 1017,
   "factory": {"name": "F0", "def": "armlab", "offset": [120, 120]},
   "bodies": 6,
-  "chips": {"reasoner_large_v1": 1, "reasoner_small_v1": 1, "escort_fixed_v1": 3},
+  "chips": {"reasoner_large_v1": 1, "reasoner_small_v1": 1, "escort_fixed_v1": 4},
   "chassis": {
     "scout_v1": {"def": "armflea", "build_frames": 90, "commission_frames": 30, "capabilities": ["move", "sense"]},
     "carrier_v1": {"def": "armck", "build_frames": 120, "commission_frames": 30, "capabilities": ["move", "assist"]},
