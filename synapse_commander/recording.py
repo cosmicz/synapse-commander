@@ -479,11 +479,13 @@ class _LedgerState:
             submitted = self._cited(causes, {INTENT_SUBMITTED})[0]
             if submitted["payload"].get("principal") != principal:
                 raise LedgerError("principal_mismatch", f"seq {seq} receipt for another principal's submission")
-            # Citing another principal's observation is a valid probe only when refused.
+            # An intent may rest only on its principal's own recorded observation;
+            # another principal's, or one never recorded, is valid only as a refused probe.
             owner = self.observation_principals.get(submitted["payload"]["based_on_observation_id"])
-            if payload["status"] == "accepted" and owner is not None and owner != principal:
+            if payload["status"] == "accepted" and owner != principal:
                 raise LedgerError("cross_principal_citation",
-                                  f"seq {seq} accepted {principal} intent based on {owner}'s observation")
+                                  f"seq {seq} accepted {principal} intent based on "
+                                  + (f"{owner}'s observation" if owner else "an unrecorded observation"))
         elif kind == OBSERVATION:
             # A re-delivered observation keeps its id; an id never changes owner.
             owner = self.observation_principals.setdefault(payload["observation_id"], principal)
@@ -734,9 +736,10 @@ def _principal_problem(state: _LedgerState) -> str | None:
             continue
         payload = record["payload"]
         owner = state.observation_principals.get(payload["based_on_observation_id"])
-        if owner is not None and owner != payload["principal"] and answered.get(record["event_id"]) != "rejected":
+        if owner != payload["principal"] and answered.get(record["event_id"]) != "rejected":
+            cited = f"{owner}'s observation" if owner else "an unrecorded observation"
             return (f"cross_principal_citation: {record['event_id']} {payload['principal']} intent based on "
-                    f"{owner}'s observation was {answered.get(record['event_id'], 'never answered')}")
+                    f"{cited} was {answered.get(record['event_id'], 'never answered')}")
     return None
 
 

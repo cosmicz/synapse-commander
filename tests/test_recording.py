@@ -1128,6 +1128,34 @@ class PrincipalStreams(LedgerCase):
         self.assertFalse(result.ok)
         self.assertIn("never answered", result.errors[0])
 
+    def test_an_unrecorded_observation_is_valid_only_as_a_refused_probe(self):
+        r, ids = self.two_streams(end=False)
+        # Own observation as cause, but based on an id nobody recorded.
+        probe = self.intent(r, "commander", "c-ghost", "obs-never-recorded", [ids["oc"]], frame=3)
+        self.refused("cross_principal_citation", lambda: self.receipt(r, "commander", "c-ghost", probe, frame=3))
+        self.receipt(r, "commander", "c-ghost", probe, status="rejected", reason_code="unknown_observation", frame=3)
+        r.run_end(4, {})
+        self.assertTrue(verify_ledger(self.path).ok)
+
+        def accept(rs):
+            for record in rs:
+                if record["kind"] == rec.INTENT_RECEIPT and record["payload"]["intent_id"] == "c-ghost":
+                    record["payload"]["status"] = "accepted"
+                    record["payload"].pop("reason_code")
+            return rs
+        self.rewrite(accept)
+        result = verify_ledger(self.path)
+        self.assertFalse(result.ok)
+        self.assertIn("an unrecorded observation", result.errors[0])
+
+    def test_an_unanswered_intent_on_an_unrecorded_observation_invalidates(self):
+        r, ids = self.two_streams(end=False)
+        self.intent(r, "M1", "m-ghost", "obs-never-recorded", [ids["om"]], frame=3)
+        r.run_end(4, {})
+        result = verify_ledger(self.path)
+        self.assertFalse(result.ok)
+        self.assertIn("never answered", result.errors[0])
+
     def test_rewritten_cross_citations_fail_verification(self):
         for kind in (rec.INFERENCE, rec.INTENT_SUBMITTED):
             with self.subTest(kind=kind):
