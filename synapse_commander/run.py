@@ -28,6 +28,7 @@ from .agents.scripted import (
     ScriptedSmoke,
     planar_distance,
 )
+from .agents.commander import SYSTEM_PROMPT, AgentCommander, ClaudeCliRoute, displacement_after_receipt
 from .gateway import LoopbackGateway
 from .recording import EFFECT, INTENT_RECEIPT, Recorder, verify_ledger
 
@@ -38,6 +39,9 @@ PRINCIPAL = "scripted-reference"
 TEAM = "0"
 FPS = 30
 ORDER_DONE_LIMIT_FRAMES = 600
+AGENT_PRINCIPAL = "agent-commander"
+AGENT_LABEL = ("agent commander: headless; every intent chosen by a live model from gateway observations; "
+               "autonomy only as the verified ledger classifies it; not visual")
 CLASSIFICATION_LABEL = "scripted fixture: headless, scripted reference client, not autonomous, not visual"
 
 
@@ -104,6 +108,29 @@ class OrderedLedger:
         self.bridge_errors: list[dict[str, Any]] = []
         self.uncited_effects: list[dict[str, Any]] = []
         self.engine_receipts: dict[str, dict[str, Any]] = {}
+        self.observation_events: dict[str, str] = {}
+        self._inference_links: dict[str, tuple[str, str, dict[str, Any]]] = {}
+        self.inference_link_mismatches: list[str] = []
+        self.done_intents: set[str] = set()
+
+    def record_inference(self, observation_id: str, payload: dict[str, Any],
+                         intent: dict[str, Any] | None, label: str | None) -> str | None:
+        """The agent's own INFERENCE record, citing the observation it was shown.
+
+        When the decision is an intent, the gateway's later INTENT_SUBMITTED for
+        the same intent_id cites this record and carries its decision label,
+        provided the submitted envelope is the one the model produced.
+        """
+        with self._lock:
+            observation_event = self.observation_events.get(observation_id)
+            if observation_event is None:
+                return None
+            self._fetch()
+            event_id = self._write("INFERENCE", sim_frame=max(self.transport.current_frame(), self.last_frame),
+                                   origin="agent", payload=payload, causes=[observation_event])
+            if intent is not None and label is not None:
+                self._inference_links[str(intent["intent_id"])] = (event_id, label, intent)
+            return event_id
 
     # LedgerSink, used by the gateway
     def record(self, kind: str, *, sim_frame: int, origin: str, payload: dict[str, Any],
@@ -111,7 +138,22 @@ class OrderedLedger:
         with self._lock:
             self._fetch()
             self._drain(upto=sim_frame)
+            if kind == "INTENT_SUBMITTED":
+                payload, causes = self._link_inference(payload, list(causes))
             return self._write(kind, sim_frame=sim_frame, origin=origin, payload=payload, causes=causes)
+
+    def _link_inference(self, payload: dict[str, Any], causes: list[str]) -> tuple[dict[str, Any], list[str]]:
+        intent_id = str(payload.get("intent_id"))
+        link = self._inference_links.pop(intent_id, None)
+        if link is None:
+            return payload, causes
+        event_id, label, produced = link
+        submitted = payload.get("envelope", {})
+        fields = ("intent_id", "based_on_observation_id", "expires_at_frame", "type", "payload")
+        if any(submitted.get(key) != produced.get(key) for key in fields):
+            self.inference_link_mismatches.append(intent_id)
+            return payload, causes
+        return {**payload, "decision": label}, [*causes, event_id]
 
     def pump(self, *, final: bool = False) -> None:
         with self._lock:
@@ -128,6 +170,8 @@ class OrderedLedger:
             frame = self.last_frame
         event_id = self.recorder.record(kind, sim_frame=frame, origin=origin, payload=payload, causes=list(causes))
         self.last_frame = frame
+        if kind == "OBSERVATION" and isinstance(payload.get("observation_id"), str):
+            self.observation_events[payload["observation_id"]] = event_id
         if kind == INTENT_RECEIPT and payload.get("status") == "accepted":
             self.accepted_receipts[str(payload.get("intent_id"))] = event_id
         return event_id
@@ -184,6 +228,8 @@ class OrderedLedger:
             event_id = self._write(EFFECT, sim_frame=frame, origin="engine",
                                    payload={**body, "type": str(body.get("effect")), **meta}, causes=[cause])
             self._unit_effect[unit] = event_id
+            if body.get("effect") == "order_done" and intent_id is not None:
+                self.done_intents.add(str(intent_id))
         elif kind == "receipt":
             self.engine_receipts[str(body.get("intent_id"))] = {"frame": frame, **body}
         elif kind == "bye":
@@ -208,10 +254,17 @@ class SmokeConfig:
     client_timeout_s: float = 120.0
     client_poll_s: float = 0.25
     lock_wait_s: float = 1200.0
+    mode: str = "scripted"            # "scripted" reference client or "agent" commander
+    model: str = "claude-sonnet-5"    # agent mode: model pinned for the CLI route
+    call_budget: int = 20
+    call_timeout_s: float = 60.0
+    agent_deadline_s: float = 600.0
 
 
 def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, identity: dict[str, Any],
-                   config_hashes: dict[str, str]) -> dict[str, Any]:
+                   config_hashes: dict[str, str], principal: str = PRINCIPAL, model_id: str | None = None,
+                   external_budgets: dict[str, Any] | None = None,
+                   required_decisions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
         "schema": "synapse.manifest/v1",
         "run_id": run_id,
@@ -223,14 +276,14 @@ def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, iden
         "scenario": dict(SCENARIO),
         "controller_images": {},
         "adapter_version": ADAPTER_VERSION,
-        "principals": [PRINCIPAL],
+        "principals": [principal],
         "config_hashes": config_hashes,
-        "model_id": None,
-        "external_budgets": {},
+        "model_id": model_id,
+        "external_budgets": external_budgets or {},
         "clock_mode": "continuous",
         "fps": FPS,
         "presentation": "headless",
-        "required_decisions": [],
+        "required_decisions": required_decisions or [],
     }
 
 
@@ -243,9 +296,17 @@ def run_smoke(config: SmokeConfig, *,
               engine_factory: Callable[[launch.RunLayout], SmokeEngine] | None = None,
               identity: dict[str, Any] | None = None,
               app: tuple[str, int] | None = None,
-              engine_scan: Callable[[int | None], list[int]] = launch.other_engines) -> dict[str, Any]:
-    """Run one Loop 0 smoke and return its verdict; writes evidence under out_dir/run_id."""
+              engine_scan: Callable[[int | None], list[int]] = launch.other_engines,
+              model_route: Any = None) -> dict[str, Any]:
+    """Run one Loop 0 smoke and return its verdict; writes evidence under out_dir/run_id.
+
+    mode "scripted" drives the run with the scripted reference client; mode
+    "agent" with the agent commander, whose decisions come from a live model.
+    """
     run_id = launch.check_run_id(config.run_id)
+    if config.mode not in ("scripted", "agent"):
+        raise launch.LaunchError(f"unknown mode {config.mode!r}")
+    agent = config.mode == "agent"
     if not config.rig_commit:
         raise launch.LaunchError("rig commit is required for the manifest")
     app_commit, app_dirty = app or app_identity()
@@ -272,15 +333,25 @@ def run_smoke(config: SmokeConfig, *,
         config_hashes.update(artifacts.archive_hashes())
     package = Path(__file__).resolve().parent
     for module in ("mailbox.py", "gateway.py", "protocol.py", "recording.py", "run.py", "launch.py",
-                   "agents/scripted.py"):
+                   "agents/scripted.py", "agents/commander.py"):
         path = package / module
         if path.exists():
             config_hashes[f"synapse_commander/{module}"] = launch.sha256_file(path)
     identity = identity or {"engine": {"name": "none", "version": "none"},
                             "game": {"name": "none", "version": "none"},
                             "map": {"name": "none", "version": "none"}}
-    manifest = build_manifest(run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit,
-                              identity=identity, config_hashes=config_hashes)
+    if agent:
+        config_hashes["agent_system_prompt"] = sha256_text(SYSTEM_PROMPT)
+        manifest = build_manifest(
+            run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit, identity=identity,
+            config_hashes=config_hashes, principal=AGENT_PRINCIPAL, model_id=config.model,
+            external_budgets={"model_calls": config.call_budget, "per_call_timeout_s": config.call_timeout_s,
+                              "wall_deadline_s": config.agent_deadline_s,
+                              "route": getattr(model_route, "name", "claude-cli")},
+            required_decisions=[{"label": "advance_to_W1", "type": "TASK"}])
+    else:
+        manifest = build_manifest(run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit,
+                                  identity=identity, config_hashes=config_hashes)
     (mailbox_dir / "run.json").write_text(json.dumps(
         {"run_id": run_id, "game": launch.APP_GAME_TYPE, "map": launch.MAP_NAME,
          "start_script_sha256": config_hashes["start_script"], "app_commit": app_commit}, indent=1) + "\n")
@@ -288,7 +359,9 @@ def run_smoke(config: SmokeConfig, *,
     lock = None
     if config.lock_dir is not None:
         lock = launch.RuntimeLock(config.lock_dir, f"plt-loop {run_id} {utc_now()}", wait_s=config.lock_wait_s)
-    verdict: dict[str, Any] = {"run_id": run_id, "classification": CLASSIFICATION_LABEL,
+    verdict: dict[str, Any] = {"run_id": run_id, "mode": config.mode,
+                               **({"call_budget": config.call_budget, "model": config.model} if agent else {}),
+                               "classification": AGENT_LABEL if agent else CLASSIFICATION_LABEL,
                                "app_commit": app_commit, "app_modified_files": app_dirty,
                                "rig_commit": config.rig_commit, "wall_start_utc": utc_now(),
                                "lock": None if lock is None else {"name": config.lock_dir.name}}
@@ -323,7 +396,8 @@ def run_smoke(config: SmokeConfig, *,
         verdict["hello_wall_s"] = round(time.monotonic() - t0, 3)
         ordered.pump()
 
-        gateway = LoopbackGateway(transport, principal=PRINCIPAL, team=TEAM, origin="scripted", ledger=ordered)
+        gateway = LoopbackGateway(transport, principal=AGENT_PRINCIPAL if agent else PRINCIPAL, team=TEAM,
+                                  origin="agent" if agent else "scripted", ledger=ordered)
         server = gateway.make_server(0)
         threading.Thread(target=server.serve_forever, name="gateway", daemon=True).start()
 
@@ -351,12 +425,32 @@ def run_smoke(config: SmokeConfig, *,
         threading.Thread(target=pump_loop, name="ledger-pump", daemon=True).start()
 
         client = GatewayClient(f"http://127.0.0.1:{server.server_port}")
-        smoke = ScriptedSmoke(client, wall_timeout_s=config.client_timeout_s, poll_s=config.client_poll_s)
+        if agent:
+            decisions_path = layout.run_dir / "decisions.jsonl"
+
+            def keep_decision(record: dict[str, Any]) -> None:
+                # Raw prompts and model output stay in private evidence, never the ledger.
+                with decisions_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+
+            route = model_route or ClaudeCliRoute(config.model, timeout_s=config.call_timeout_s)
+            driver: Any = AgentCommander(client, route, config.model, sink=ordered, on_decision=keep_decision,
+                                         call_budget=config.call_budget, wall_deadline_s=config.agent_deadline_s,
+                                         poll_s=config.client_poll_s)
+        else:
+            driver = ScriptedSmoke(client, wall_timeout_s=config.client_timeout_s, poll_s=config.client_poll_s)
         try:
-            trace = smoke.run()
+            trace = driver.run()
         except Exception as exc:  # keep the partial transcript as evidence
             error = f"client: {type(exc).__name__}: {exc}"
-            trace = smoke.trace
+            trace = driver.trace
+        if agent and trace.get("accepted_advance"):
+            # The commander stops once it sees the unit at W1; give the engine's
+            # order_done a bounded moment to arrive in the ledger.
+            intent_id = str(trace["accepted_advance"]["envelope"]["intent_id"])
+            deadline = time.monotonic() + 20
+            while intent_id not in ordered.done_intents and time.monotonic() < deadline:
+                time.sleep(0.25)
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     finally:
@@ -378,10 +472,10 @@ def run_smoke(config: SmokeConfig, *,
             except Exception as exc:
                 verdict.setdefault("pump_errors", []).append(repr(exc))
         if recorder is not None:
-            checks = evaluate(trace, ordered, verdict)
+            checks = (evaluate_agent if agent else evaluate)(trace, ordered, verdict)
             outcome = {"pre_ledger_checks": "PASS" if checks and all(c["ok"] for c in checks.values())
                        and not error else "FAIL", "failed": sorted(n for n, c in checks.items() if not c["ok"]),
-                       "error": error, "classification": CLASSIFICATION_LABEL}
+                       "error": error, "classification": AGENT_LABEL if agent else CLASSIFICATION_LABEL}
             try:
                 recorder.run_end(ordered.last_frame if ordered else 0, outcome)
             except Exception as exc:
@@ -394,7 +488,7 @@ def run_smoke(config: SmokeConfig, *,
                 (config.lock_dir / "owner").read_text())
     verdict["wall_end_utc"] = utc_now()
     verdict["error"] = error
-    _finish(verdict, trace, ordered, ledger_path, layout)
+    _finish(verdict, trace, ordered, ledger_path, layout, agent=agent)
     return verdict
 
 
@@ -472,12 +566,103 @@ def evaluate(trace: dict[str, Any], ordered: OrderedLedger | None, verdict: dict
               moved=moves, frames=[pre["frame"], post["frame"]])
     else:
         check("no_movement_after_foreign_probes", False, detail="foreign probes did not run")
+    _host_checks(verdict, check)
+    return checks
+
+
+def _host_checks(verdict: dict[str, Any], check: Callable[..., None]) -> None:
     others = sorted(set(verdict.get("other_engines_at_start", [])) | set(verdict.get("other_engines_during_run", [])))
     check("exclusive_runtime", not others, other_engine_pids=others,
           detail="no other spring-headless process ran on this host during the run")
     teardown = verdict.get("teardown") or {}
     check("teardown_bounded", teardown.get("group_alive_after") is False
           and float(teardown.get("teardown_s", 1e9)) <= 20.0, teardown=teardown)
+
+
+def evaluate_agent(trace: dict[str, Any], ordered: OrderedLedger | None,
+                   verdict: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Agent-commander checks known before RUN_END; ledger checks follow in _finish."""
+    checks: dict[str, dict[str, Any]] = {}
+
+    def check(name: str, ok: bool, **detail: Any) -> None:
+        checks[name] = {"ok": bool(ok), **detail}
+
+    check("hello_seen", ordered is not None and ordered.hello is not None,
+          hello=None if ordered is None else ordered.hello)
+    first = trace.get("first_observation") or {}
+    w1 = ((first.get("scenario") or {}).get("waypoints") or {}).get("W1")
+    check("unit_and_waypoint_observed", bool(first.get("entities")) and w1 is not None, w1=w1)
+    accepted = trace.get("accepted_advance")
+    check("advance_accepted", accepted is not None,
+          intent=None if accepted is None else accepted["envelope"],
+          receipt=None if accepted is None else accepted["receipt"])
+    moved = displacement_after_receipt(trace, ADVANCE_LIMIT_FRAMES, MIN_DISPLACEMENT)
+    check("displacement_observed_within_300_frames", moved["ok"], **{k: v for k, v in moved.items() if k != "ok"})
+    check("receipt_before_displacement", moved.get("observation_frame") is not None
+          and int(moved["receipt_frame"]) < int(moved["observation_frame"]))
+    decisions = trace.get("decisions", [])
+    check("model_calls_within_budget", 0 < int(trace.get("calls", 0)) <= int(verdict.get("call_budget", 20)),
+          calls=trace.get("calls"), budget=verdict.get("call_budget"), stop=trace.get("stop"))
+    # Counted, not failed: rejecting an invalid output client-side is the point.
+    check("invalid_outputs_rejected_and_counted",
+          int(trace.get("invalid_outputs", 0)) == sum(1 for d in decisions if d.get("action") == "invalid"),
+          invalid=trace.get("invalid_outputs"),
+          reasons=[d.get("rejected") for d in decisions if d.get("action") == "invalid"])
+    latencies = [d["latency_ms"] for d in decisions if isinstance(d.get("latency_ms"), int)]
+    verdict["decision_latency_ms"] = {"count": len(latencies), "min": min(latencies, default=None),
+                                      "max": max(latencies, default=None),
+                                      "mean": round(sum(latencies) / len(latencies)) if latencies else None}
+    verdict["model_ids_reported"] = sorted({m for d in decisions for m in d.get("model_ids", [])})
+    if ordered is not None and ordered.inference_link_mismatches:
+        check("submitted_equals_model_output", False, mismatched=ordered.inference_link_mismatches)
+    _host_checks(verdict, check)
+    return checks
+
+
+def agent_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any],
+                        verification: Any) -> dict[str, dict[str, Any]]:
+    checks: dict[str, dict[str, Any]] = {}
+    accepted = trace.get("accepted_advance")
+    intent_id = None if accepted is None else str(accepted["envelope"]["intent_id"])
+    by_id = {r["event_id"]: r for r in records}
+
+    def first(kind: str, **match: Any) -> dict[str, Any] | None:
+        for record in records:
+            if record["kind"] == kind and all(record["payload"].get(k) == v for k, v in match.items()):
+                return record
+        return None
+
+    submitted = first("INTENT_SUBMITTED", intent_id=intent_id)
+    inference = None
+    if submitted is not None:
+        inference = next((by_id[c] for c in submitted["causes"] if by_id[c]["kind"] == "INFERENCE"), None)
+    receipt = first("INTENT_RECEIPT", intent_id=intent_id, status="accepted")
+    started = first("EFFECT", intent_id=intent_id, type="order_started")
+    moved_id = displacement_after_receipt(trace).get("observation_id")
+    moved = first("OBSERVATION", observation_id=moved_id) if moved_id else None
+    chain = [inference, submitted, receipt, started, moved]
+    seqs = [None if r is None else r["seq"] for r in chain]
+    cites = bool(started and receipt and receipt["event_id"] in started["causes"])
+    checks["ledger_causal_order"] = {
+        "ok": None not in seqs and seqs == sorted(seqs) and cites,
+        "seqs": dict(zip(["inference", "submitted", "receipt", "order_started", "moved_observation"], seqs)),
+        "effect_cites_receipt": cites, "submission_cites_inference": inference is not None}
+    done = first("EFFECT", intent_id=intent_id, type="order_done")
+    receipt_frame = None if accepted is None else accepted["receipt"].get("frame")
+    done_frame = None if done is None else done["payload"].get("engine_frame")
+    checks["order_done_effect"] = {
+        "ok": done is not None and receipt_frame is not None and done_frame is not None
+        and 0 <= int(done_frame) - int(receipt_frame) <= ORDER_DONE_LIMIT_FRAMES,
+        "engine_frame": done_frame, "receipt_frame": receipt_frame, "limit_frames": ORDER_DONE_LIMIT_FRAMES}
+    rejected = {r["payload"].get("intent_id") for r in records
+                if r["kind"] == "INTENT_RECEIPT" and r["payload"].get("status") == "rejected"}
+    leaked = [r["seq"] for r in records if r["kind"] == "EFFECT" and r["payload"].get("intent_id") in rejected]
+    checks["rejected_intents_no_effect"] = {"ok": not leaked, "effect_seqs": leaked,
+                                            "rejected_intents": sorted(i for i in rejected if i)}
+    checks["classified_agent_only"] = {
+        "ok": verification.ok and verification.classification == "agent_only" and verification.autonomous is True,
+        "classification": verification.classification, "autonomous": verification.autonomous,
+        "evidence_limits": verification.evidence_limits}
     return checks
 
 
@@ -543,8 +728,8 @@ def _probe_id(trace: dict[str, Any], name: str) -> str | None:
 
 
 def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedger | None,
-            ledger_path: Path, layout: launch.RunLayout) -> None:
-    checks = evaluate(trace, ordered, verdict)
+            ledger_path: Path, layout: launch.RunLayout, *, agent: bool = False) -> None:
+    checks = (evaluate_agent if agent else evaluate)(trace, ordered, verdict)
     verification = verify_ledger(ledger_path) if ledger_path.exists() else None
     if verification is not None:
         checks["ledger_verified"] = {"ok": verification.ok, "status": verification.status,
@@ -553,16 +738,21 @@ def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedg
                                      "autonomous": verification.autonomous,
                                      "evidence_limits": verification.evidence_limits,
                                      "counts": verification.counts}
-        checks.update(ledger_checks(verification.records if verification.ok else _ledger_records(ledger_path), trace))
-        checks["not_autonomous"] = {"ok": verification.autonomous is False
-                                    and verification.classification in ("scripted_replay", "scripted_fixture"),
-                                    "classification": verification.classification}
+        records = verification.records if verification.ok else _ledger_records(ledger_path)
+        if agent:
+            checks.update(agent_ledger_checks(records, trace, verification))
+        else:
+            checks.update(ledger_checks(records, trace))
+            checks["not_autonomous"] = {"ok": verification.autonomous is False
+                                        and verification.classification in ("scripted_replay", "scripted_fixture"),
+                                        "classification": verification.classification}
     else:
         checks["ledger_verified"] = {"ok": False, "status": "missing"}
     if ordered is not None:
         verdict["ingestion"] = {"clamped_frames": ordered.clamped, "uncited_effects": ordered.uncited_effects,
                                 "bridge_errors": ordered.bridge_errors, "bye": ordered.bye,
-                                "late_or_engine_receipts": ordered.engine_receipts}
+                                "late_or_engine_receipts": ordered.engine_receipts,
+                                "inference_link_mismatches": ordered.inference_link_mismatches}
     verdict["checks"] = checks
     verdict["failed_checks"] = sorted(name for name, c in checks.items() if not c["ok"])
     verdict["verdict"] = "PASS" if not verdict["failed_checks"] and not verdict.get("error") else "FAIL"
