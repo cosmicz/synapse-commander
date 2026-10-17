@@ -26,6 +26,11 @@ class ScenarioTableTests(unittest.TestCase):
         table = load_scenario("rescue_baseline")
         self.assertEqual(table["commander"]["position"], [0, 240])
 
+    def test_view_smoke_is_a_separate_principal_fixture(self):
+        table = load_scenario("view_smoke")
+        self.assertEqual(set(table["principals"]), {"commander", "M1"})
+        self.assertEqual(table["predeployed"][1]["name"], "R0")
+
 
 if __name__ == "__main__":
     unittest.main()

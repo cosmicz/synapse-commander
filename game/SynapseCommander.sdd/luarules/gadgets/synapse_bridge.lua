@@ -165,8 +165,8 @@ if gadgetHandler:IsSyncedCode() then
     local ray = Spring.TraceRayGroundBetweenPositions
     if ray then
       local ok, hit = pcall(ray, x1, y1 + 16, z1, x2, y2 + 16, z2)
-      -- Recoil returns nil for a clear segment and hitDistance for terrain.
-      if ok then return hit == nil end
+      -- Recoil returns false/nil for a clear segment and hitDistance for terrain.
+      if ok then return hit == nil or hit == false end
     end
     local distance = math.sqrt(squared_distance(x1, z1, x2, z2))
     local steps = math.max(1, math.ceil(distance / 16))

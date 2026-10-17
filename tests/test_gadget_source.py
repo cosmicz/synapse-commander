@@ -268,7 +268,7 @@ class PrincipalViewSourceTests(unittest.TestCase):
 
     def test_geometry_sensing_is_synced_and_damage_scales_range(self) -> None:
         self.assertIn("Spring.TraceRayGroundBetweenPositions", self.source)
-        self.assertIn("if ok then return hit == nil end", self.source)
+        self.assertIn("if ok then return hit == nil or hit == false end", self.source)
         self.assertIn("math.ceil(distance / 16)", self.source)
         self.assertIn("fraction / 0.5", self.source)
         self.assertNotIn("Spring.GetUnitLosState", self.source)
