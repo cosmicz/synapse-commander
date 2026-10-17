@@ -17,7 +17,7 @@
     "M1": {"chip": "reasoner_small_v1"}
   },
   "reasoner_chips": ["reasoner_large_v1", "reasoner_small_v1"],
-  "sensors": {"corcom": 1600, "armflea": 1600, "armck": 900, "armmark": 900},
+  "sensors": {"corcom": 2200, "armflea": 1600, "armck": 900, "armmark": 900},
   "comms": {"range": 1400, "latency_frames": 30, "relay_chassis": ["relay_support_v1"]},
   "predeployed": [
     {"name": "S0", "def": "armflea", "controller": "escort_fixed_v1", "position": [300, -200], "state": "active", "contact": true},
