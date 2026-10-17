@@ -44,6 +44,10 @@ class GadgetSourceContractTests(unittest.TestCase):
     def test_synced_reducer_requires_the_public_envelope_schema(self) -> None:
         self.assertIn('intent.schema ~= "IntentEnvelope/v1"', self.source)
 
+    def test_far_future_expiry_has_a_stable_rejection(self) -> None:
+        self.assertIn('intent.expires_at_frame > frame + 900', self.source)
+        self.assertIn('"expiry_out_of_range"', self.source)
+
     def test_visible_gaia_probe_stays_near_the_advance_route(self) -> None:
         self.assertIn('x + 200, Spring.GetGroundHeight(x + 200, z + 100), z + 100', self.source)
 

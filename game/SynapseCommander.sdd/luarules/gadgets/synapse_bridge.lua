@@ -186,6 +186,9 @@ if gadgetHandler:IsSyncedCode() then
     if type(intent.expires_at_frame) ~= "number" or intent.expires_at_frame < frame then
       emit_receipt(intent, "rejected", "expired"); return true
     end
+    if intent.expires_at_frame > frame + 900 then
+      emit_receipt(intent, "rejected", "expiry_out_of_range"); return true
+    end
     if pending[unitID] then emit_receipt(intent, "rejected", "unit_busy"); return true end
     if not use_token(teamID, frame) then emit_receipt(intent, "rejected", "rate_limited"); return true end
     local x, _, z = Spring.GetUnitPosition(unitID)
