@@ -42,7 +42,7 @@ def _coordinates(value: Any, field: str, length: int) -> None:
 def _validate(table: Any, scenario_name: str) -> dict[str, Any]:
     root = _mapping(table, "scenario")
     required = {"schema", "id", "version", "factory", "bodies", "chips", "commander", "chassis", "waypoints", "objective"}
-    if set(root) != required or root.get("schema") != SCENARIO_SCHEMA or root.get("id") != scenario_name or not _identifier(root.get("version")):
+    if not required <= set(root) or root.get("schema") != SCENARIO_SCHEMA or root.get("id") != scenario_name or not _identifier(root.get("version")):
         raise ScenarioError("unsupported scenario table")
     factory = _mapping(root["factory"], "factory")
     chassis = _mapping(root["chassis"], "chassis")

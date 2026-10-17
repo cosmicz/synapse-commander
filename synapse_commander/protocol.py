@@ -234,17 +234,22 @@ def _bounded_factory_observation(value: Any, scenario: Mapping[str, Any]) -> tup
 
 def _bounded_provisioning(value: Mapping[str, Any], result: dict[str, Any]) -> None:
     """Add Loop 1 data only when it matches the public scenario declaration."""
-    scenario_table = load_scenario()
     source_scenario = value.get("scenario", {})
     if not isinstance(source_scenario, Mapping):
         raise ProtocolError("invalid_observation", "scenario must be an object")
-    declared = source_scenario.get("id") == scenario_table["id"] and source_scenario.get("version") == scenario_table["version"]
     provisioning_fields = {"commander", "budgets", "factories"}
-    if provisioning_fields & set(value) and not declared:
+    selected = "id" in source_scenario or "version" in source_scenario or bool(provisioning_fields & set(value))
+    if not selected:
+        return
+    try:
+        scenario_table = load_scenario()
+    except ValueError as error:
+        raise ProtocolError("scenario_unavailable") from error
+    declared = source_scenario.get("id") == scenario_table["id"] and source_scenario.get("version") == scenario_table["version"]
+    if not declared:
         raise ProtocolError("invalid_observation", "provisioning observation lacks declared scenario")
-    if declared:
-        result.setdefault("scenario", {})["id"] = scenario_table["id"]
-        result["scenario"]["version"] = scenario_table["version"]
+    result.setdefault("scenario", {})["id"] = scenario_table["id"]
+    result["scenario"]["version"] = scenario_table["version"]
     commander = value.get("commander")
     if commander is not None:
         if not isinstance(commander, Mapping) or set(commander) != {"unit_id", "chip"}:
@@ -369,12 +374,19 @@ def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
             factories = intent.get("factories", [])
             chassis = intent.get("chassis", [])
             controllers = intent.get("controllers", [])
-            if not all(isinstance(items, list) and len(items) <= 8 for items in (factories, chassis, controllers)):
+            if not (isinstance(factories, list) and len(factories) <= 4 and isinstance(chassis, list) and len(chassis) <= 8 and isinstance(controllers, list) and len(controllers) <= 8):
                 raise ProtocolError("invalid_observation", "invalid PRODUCE permission")
-            table = load_scenario()
-            public_factories = sorted({item for item in factories if isinstance(item, str) and item == table["factory"]["name"]})
-            public_chassis = sorted({item for item in chassis if isinstance(item, str) and item in table["chassis"]})
-            public_controllers = sorted({item for item in controllers if isinstance(item, str) and item in table["chips"]})
+            try:
+                table = load_scenario()
+            except ValueError as error:
+                raise ProtocolError("scenario_unavailable") from error
+            def entries(items, key, allowed):
+                if not all(isinstance(item, Mapping) and set(item) == {"id", key} and isinstance(item.get("id"), str) and item["id"] in allowed and _public_count(item.get(key), key) >= 0 for item in items):
+                    raise ProtocolError("invalid_observation", "invalid PRODUCE permission")
+                return [{"id": item["id"], key: item[key]} for item in items]
+            public_factories = entries(factories, "jobs_free", {table["factory"]["name"]})
+            public_chassis = entries(chassis, "remaining", set(table["chassis"]))
+            public_controllers = entries(controllers, "remaining", set(table["chips"]))
             if public_factories and public_chassis and public_controllers:
                 result["permitted_intents"].append({
                     "type": "PRODUCE",
