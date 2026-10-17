@@ -169,6 +169,7 @@ def start_script(
     seed: int = 1,
     player_name: str = "SynapseCommander",
     host_port: int = 8452,
+    scenario: str | None = None,
 ) -> str:
     """One player on team 0, no cheats or debug commands, no test runner.
 
@@ -179,11 +180,16 @@ def start_script(
     game never ends by itself; the launcher stops it.
     """
     check_run_id(run_id)
+    if scenario is not None and not RUN_ID.fullmatch(scenario):
+        raise LaunchError("scenario name must be 1-64 characters of [A-Za-z0-9_-]")
     if not 1024 <= int(host_port) <= 65535:
         raise LaunchError("host port out of range")
     for value in (game_type, map_name, player_name):
         if any(ch in value for ch in ";{}\n\r"):
             raise LaunchError("start script value contains a structural character")
+    # No scenario keeps Loop 0 exactly as before; a named one selects the
+    # archive's scenarios/<name>.json in the gadget.
+    scenario_line = "" if scenario is None else f"\n\t\tsynapse_scenario={scenario};"
     return f"""[GAME]
 {{
 \tMapName={map_name};
@@ -199,7 +205,7 @@ def start_script(
 \t[MODOPTIONS]
 \t{{
 \t\tdeathmode=neverend;
-\t\tsynapse_run_id={run_id};
+\t\tsynapse_run_id={run_id};{scenario_line}
 \t}}
 \t[ALLYTEAM0]
 \t{{

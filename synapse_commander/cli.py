@@ -28,6 +28,9 @@ def add_run_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument("--lock-dir", type=Path,
                          help="project runtime lock directory (atomic mkdir, vmlock.sh compatible)")
     command.add_argument("--rig-commit", required=True, help="exact rig commit recorded in the manifest")
+    command.add_argument("--scenario", default=None,
+                         help="ScenarioTable/v1 name in the app archive (e.g. rescue_smoke), passed to the "
+                              "engine as synapse_scenario; omitted, the run is the Loop 0 smoke")
     command.add_argument("--run-id", default=None, help="run id [A-Za-z0-9_-]{1,64} (default: generated)")
     command.add_argument("--hello-timeout", type=float, default=180.0, help="seconds to wait for the engine hello")
     command.add_argument("--allow-dirty", action="store_true",
@@ -70,7 +73,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = SmokeConfig(engine_dir=args.engine_dir, data_dir=args.data_dir, game_dir=args.game_dir,
                              out_dir=args.out, lock_dir=args.lock_dir, rig_commit=args.rig_commit,
                              run_id=args.run_id or new_run_id(), allow_dirty=args.allow_dirty,
-                             hello_timeout_s=args.hello_timeout, engine_binary=args.engine_binary, **extra)
+                             hello_timeout_s=args.hello_timeout, engine_binary=args.engine_binary,
+                             scenario=args.scenario, **extra)
         try:
             verdict = run_smoke(config)
         except launch.LaunchError as exc:

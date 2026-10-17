@@ -30,6 +30,7 @@ from .agents.scripted import (
 )
 from .agents.commander import SYSTEM_PROMPT, AgentCommander, ClaudeCliRoute, displacement_after_receipt
 from .gateway import LoopbackGateway
+from .scenarios import ScenarioError, load_scenario
 from .recording import EFFECT, INTENT_RECEIPT, Recorder, verify_ledger
 
 
@@ -265,6 +266,7 @@ class SmokeConfig:
     lock_wait_s: float = 1200.0
     mode: str = "scripted"            # "scripted" reference client or "agent" commander
     engine_binary: str = launch.HEADLESS_BINARY  # or "spring", the rendered client
+    scenario: str | None = None       # a ScenarioTable/v1 name in the archive; None is Loop 0
     model: str = "claude-sonnet-5"    # agent mode: model pinned for the CLI route
     call_budget: int = 20
     call_timeout_s: float = 60.0
@@ -273,7 +275,7 @@ class SmokeConfig:
 
 def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, identity: dict[str, Any],
                    config_hashes: dict[str, str], principal: str = PRINCIPAL, model_id: str | None = None,
-                   presentation: str = "headless",
+                   presentation: str = "headless", scenario: dict[str, Any] | None = None,
                    external_budgets: dict[str, Any] | None = None,
                    required_decisions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {
@@ -284,7 +286,7 @@ def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, iden
         "engine": identity["engine"],
         "game": identity["game"],
         "map": identity["map"],
-        "scenario": dict(SCENARIO),
+        "scenario": dict(scenario or SCENARIO),
         "controller_images": {},
         "adapter_version": ADAPTER_VERSION,
         "principals": [principal],
@@ -296,6 +298,13 @@ def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, iden
         "presentation": presentation,
         "required_decisions": required_decisions or [],
     }
+
+
+def scenario_identity(table: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Manifest scenario for a selected table; None keeps the Loop 0 smoke identity."""
+    if table is None:
+        return None
+    return {"id": table["id"], "version": table["version"], "seed": SCENARIO["seed"]}
 
 
 def sha256_text(text: str) -> str:
@@ -332,7 +341,13 @@ def run_smoke(config: SmokeConfig, *,
         identity = identity or artifacts.identity()
     else:
         layout.write_dir.mkdir(parents=True)
-    script = launch.start_script(run_id=run_id, host_port=launch.free_udp_port())
+    table = None
+    if config.scenario is not None:
+        try:
+            table = load_scenario(config.scenario)  # fail closed before anything starts
+        except ScenarioError as exc:
+            raise launch.LaunchError(f"scenario {config.scenario!r}: {exc}") from exc
+    script = launch.start_script(run_id=run_id, host_port=launch.free_udp_port(), scenario=config.scenario)
     settings = launch.engine_settings()
     layout.write_config(script, settings)
     mailbox_dir = layout.mailbox_dir
@@ -347,6 +362,8 @@ def run_smoke(config: SmokeConfig, *,
                      "engine_render_environment": sha256_text(json.dumps(render_env, sort_keys=True))}
     if artifacts is not None:
         config_hashes.update(artifacts.archive_hashes())
+    if table is not None:
+        config_hashes[f"scenario_table/{config.scenario}"] = sha256_text(json.dumps(table, sort_keys=True))
     package = Path(__file__).resolve().parent
     for module in ("mailbox.py", "gateway.py", "protocol.py", "recording.py", "run.py", "launch.py",
                    "agents/scripted.py", "agents/commander.py"):
@@ -361,13 +378,15 @@ def run_smoke(config: SmokeConfig, *,
         manifest = build_manifest(
             run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit, identity=identity,
             config_hashes=config_hashes, principal=AGENT_PRINCIPAL, model_id=config.model, presentation=presentation,
+            scenario=scenario_identity(table),
             external_budgets={"model_calls": config.call_budget, "per_call_timeout_s": config.call_timeout_s,
                               "wall_deadline_s": config.agent_deadline_s,
                               "route": getattr(model_route, "name", "claude-cli")},
             required_decisions=[{"label": "advance_to_W1", "type": "TASK"}])
     else:
         manifest = build_manifest(run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit,
-                                  identity=identity, config_hashes=config_hashes, presentation=presentation)
+                                  identity=identity, config_hashes=config_hashes, presentation=presentation,
+                                  scenario=scenario_identity(table))
     (mailbox_dir / "run.json").write_text(json.dumps(
         {"run_id": run_id, "game": launch.APP_GAME_TYPE, "map": launch.MAP_NAME,
          "start_script_sha256": config_hashes["start_script"], "app_commit": app_commit}, indent=1) + "\n")

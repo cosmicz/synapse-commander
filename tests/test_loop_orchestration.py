@@ -297,6 +297,26 @@ class LoopOrchestrationTests(unittest.TestCase):
         self.assertTrue(verdict["lock"]["released"])
         self.assertFalse((self.out / "locks" / "fake").exists())
 
+    def test_selected_scenario_reaches_start_script_and_manifest(self) -> None:
+        engine = FakeEngine("fake-scenario")
+        config = SmokeConfig(engine_dir=self.out, data_dir=self.out, out_dir=self.out, run_id="fake-scenario",
+                             rig_commit="b" * 40, hello_timeout_s=10, client_timeout_s=20, client_poll_s=0.02,
+                             scenario="rescue_smoke")
+        run_smoke(config, transport_factory=lambda _d, _i: engine, engine_factory=lambda _l: engine,
+                  app=("a" * 40, 0), engine_scan=lambda _p: [])
+        run_dir = self.out / "fake-scenario"
+        self.assertIn("synapse_scenario=rescue_smoke;", (run_dir / "write" / "_synapse_script.txt").read_text())
+        manifest = json.loads((run_dir / "ledger.jsonl").read_text().splitlines()[0])["payload"]
+        self.assertEqual(manifest["scenario"]["id"], "rescue_smoke")
+        self.assertIn("scenario_table/rescue_smoke", manifest["config_hashes"])
+
+    def test_unknown_scenario_fails_before_anything_starts(self) -> None:
+        config = SmokeConfig(engine_dir=self.out, data_dir=self.out, out_dir=self.out, run_id="bad-scenario",
+                             rig_commit="b" * 40, scenario="no_such_table")
+        with self.assertRaises(launch.LaunchError):
+            run_smoke(config, transport_factory=lambda _d, _i: FakeEngine("x"),
+                      engine_factory=lambda _l: FakeEngine("x"), app=("a" * 40, 0))
+
     def test_rig_commit_required(self) -> None:
         config = SmokeConfig(engine_dir=self.out, data_dir=self.out, out_dir=self.out, run_id="x", rig_commit=None)
         with self.assertRaises(launch.LaunchError):

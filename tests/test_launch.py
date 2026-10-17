@@ -48,6 +48,16 @@ class StartScriptTests(unittest.TestCase):
         self.assertNotIn("runtestsheadless", script)
         self.assertEqual(script.count("{"), script.count("}"))
 
+    def test_scenario_selection_is_a_modoption_and_absent_by_default(self) -> None:
+        self.assertNotIn("synapse_scenario", launch.start_script(run_id="r"))
+        script = launch.start_script(run_id="r", scenario="rescue_smoke")
+        modoptions = script[script.index("[MODOPTIONS]"):script.index("[ALLYTEAM0]")]
+        self.assertIn("\t\tsynapse_scenario=rescue_smoke;\n", modoptions)
+        self.assertIn("synapse_run_id=r;", modoptions)
+        for bad in ("", "a;b", "../x", "a b"):
+            with self.assertRaises(launch.LaunchError):
+                launch.start_script(run_id="r", scenario=bad)
+
     def test_rejects_unsafe_values(self) -> None:
         for run_id in ("", "a;b", "a/b", "x" * 65, "a\nb"):
             with self.assertRaises(launch.LaunchError):

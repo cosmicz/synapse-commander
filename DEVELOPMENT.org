@@ -80,6 +80,13 @@ rendered frame shows presentation; it does not change how the run's decisions
 are classified. The exclusivity check counts both =spring-headless= and
 =spring= processes.
 
+=--scenario NAME= (for example =rescue_smoke=) selects a =ScenarioTable/v1=
+from =game/SynapseCommander.sdd/scenarios/= by adding =synapse_scenario=NAME=
+to the start script's =[MODOPTIONS]=; omitted, the run is the unchanged Loop 0
+smoke. The table is loaded and validated before anything starts, and the
+manifest records its id, version and hash. The scripted Loop 0 client and its
+verdict assume no scenario.
+
 | Layer | Module |
 |-------+--------|
 | Native launcher: run directory, start script, process group, lock | =synapse_commander/launch.py= |
