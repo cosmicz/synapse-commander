@@ -304,7 +304,8 @@ def run_smoke(config: SmokeConfig, *,
     try:
         if lock is not None:
             lock.acquire()
-            verdict["lock"]["waited_s"] = lock.waited_s
+            verdict["lock"].update(waited_s=lock.waited_s, owner=lock.owner_line,
+                                   held_by="enclosing with-vmlock.sh" if lock.inherited else "launcher")
         recorder = Recorder.create(ledger_path, manifest)
         recorder.run_start(0)
         transport = (transport_factory or _mailbox_factory)(mailbox_dir, run_id)
@@ -383,6 +384,9 @@ def run_smoke(config: SmokeConfig, *,
                 recorder.close()
         if lock is not None and lock.held:
             lock.release()
+            verdict["lock"]["released"] = not config.lock_dir.exists() or (
+                (config.lock_dir / "owner").exists() and lock.owner_line not in
+                (config.lock_dir / "owner").read_text())
     verdict["wall_end_utc"] = utc_now()
     verdict["error"] = error
     _finish(verdict, trace, ordered, ledger_path, layout)

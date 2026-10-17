@@ -161,6 +161,30 @@ class LockTests(unittest.TestCase):
             self.assertIn(f"pid={os.getpid()}", (lock_dir / "owner").read_text())
             lock.release()
 
+    def test_enclosing_wrapper_holder_is_inherited_not_released(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_dir = Path(tmp) / "docker-vm"
+            lock_dir.mkdir()
+            line = f"plt-loop final pid={os.getpid()} 2026-10-17T19:00:00Z"
+            (lock_dir / "owner").write_text(line + "\n")
+            lock = launch.RuntimeLock(lock_dir, "inner", wait_s=0.2, poll_s=0.05,
+                                      environ={"VMLOCK_OWNER": line, "VMLOCK_WAITED": "3"})
+            lock.acquire()
+            self.assertEqual(lock.owner_line, line)
+            self.assertEqual(lock.waited_s, 3.0)
+            lock.release()
+            self.assertEqual((lock_dir / "owner").read_text().strip(), line)
+
+    def test_foreign_owner_in_env_does_not_grant_the_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_dir = Path(tmp) / "docker-vm"
+            lock_dir.mkdir()
+            (lock_dir / "owner").write_text(f"someone else pid={os.getpid()}\n")
+            lock = launch.RuntimeLock(lock_dir, "inner", wait_s=0.2, poll_s=0.05,
+                                      environ={"VMLOCK_OWNER": "plt-loop other pid=1"})
+            with self.assertRaises(launch.LaunchError):
+                lock.acquire()
+
     def test_fresh_empty_lock_is_not_broken(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             lock_dir = Path(tmp) / "docker-vm"

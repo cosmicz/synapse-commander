@@ -390,15 +390,25 @@ class RuntimeLock:
     given bound and fails.
     """
 
-    def __init__(self, lock_dir: Path, owner_text: str, *, wait_s: float = 1200.0, poll_s: float = 1.0) -> None:
+    def __init__(self, lock_dir: Path, owner_text: str, *, wait_s: float = 1200.0, poll_s: float = 1.0,
+                 environ: Mapping[str, str] | None = None) -> None:
         self.lock_dir = lock_dir
         self.owner_text = owner_text
         self.wait_s = wait_s
         self.poll_s = poll_s
+        self.environ = os.environ if environ is None else environ
         self.held = False
+        self.inherited: str | None = None
         self.waited_s = 0.0
 
     def acquire(self) -> None:
+        # The rig's with-vmlock.sh exports its owner line; when that line is the
+        # lock's current owner, this process tree already holds the lock.
+        enclosing = self.environ.get("VMLOCK_OWNER")
+        if enclosing and self._owner() == enclosing:
+            self.inherited = enclosing
+            self.waited_s = float(self.environ.get("VMLOCK_WAITED") or 0)
+            return
         self.lock_dir.parent.mkdir(parents=True, exist_ok=True)
         begin = time.monotonic()
         while True:
@@ -414,9 +424,16 @@ class RuntimeLock:
             self.waited_s = round(time.monotonic() - begin, 3)
             return
 
+    @property
+    def owner_line(self) -> str | None:
+        """The owner line this run holds the lock under, or None."""
+        if self.inherited is not None:
+            return self.inherited
+        return f"{self.owner_text} pid={os.getpid()}" if self.held else None
+
     def release(self) -> None:
         if not self.held:
-            return
+            return  # never release an enclosing holder's lock
         owner = self._owner()
         if owner is not None and f"pid={os.getpid()}" not in owner.split():
             raise LaunchError("runtime lock is owned by someone else; not releasing")

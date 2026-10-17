@@ -89,7 +89,10 @@ and must not shadow BAR files: an archive =modoptions.lua= replaced BAR's and
 aborted unit-definition loading. The engine runs in its own process group;
 teardown sends SIGTERM to that group only, escalates to SIGKILL after a bound
 and records the result. The lock is the rig's atomic =mkdir= lock with a
-=pid== owner line, compatible with its shell =vmlock.sh=.
+=pid== owner line, compatible with its shell =vmlock.sh=. Run under the rig's
+=with-vmlock.sh=, the launcher inherits that wrapper's hold (its exported
+=VMLOCK_OWNER= matches the lock's owner line), records the owner line, and
+leaves the release to the wrapper.
 
 Order of a run: manifest (rig/app commits, engine/map hashes, game commit,
 start-script, settings, archive and module hashes, scenario, clock mode,
