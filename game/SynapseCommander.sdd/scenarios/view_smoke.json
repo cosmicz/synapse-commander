@@ -27,6 +27,6 @@
   ],
   "distress": {"asset": "M1", "last_known": {"position": [-1312, 2176], "age_frames": 900}, "symptom": "no_heartbeat", "cause_hidden": "terrain_entrapment"},
   "recovery_responses": ["relay", "rendezvous", "extract"],
-  "waypoints": {"W1": [-1536, 0, 2176]},
+  "waypoints": {"W1": [-1456, 0, 2176]},
   "objective": {"type": "rescue_return", "target": "rescue_target_v1", "extraction": "extraction_v1"}
 }
