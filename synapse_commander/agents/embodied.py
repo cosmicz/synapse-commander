@@ -59,13 +59,15 @@ def parse_mind_decision(text, observation, principal, principals, used_ids, inte
 
 class LiveMind:
     """No body means no model call. All decisions use only this mind's delivered view."""
-    def __init__(self, principal, client, route, sink, *, principals, on_decision=None,
+    def __init__(self, principal, client, route, sink, *, principals, on_decision=None, on_order=None,
                  call_budget=40, wall_deadline_s=600, poll_s=.5,
                  min_frames_between_calls=90, task_label='mind_task'):
         if principal not in principals or not 1 <= call_budget <= 200 or not 0 < wall_deadline_s <= 3600:
             raise ValueError('invalid principal or model budget')
         self.principal, self.client, self.route, self.sink = principal, client, route, sink
         self.principals, self.on_decision = frozenset(principals), on_decision
+        self.on_order = on_order
+        self._human_generation, self._human_order, self._paused = 0, None, False
         self.call_budget, self.wall_deadline_s, self.poll_s = call_budget, wall_deadline_s, poll_s
         self.min_frames_between_calls, self.task_label = min_frames_between_calls, task_label
         self._stop, self._lock = threading.Event(), threading.RLock()
@@ -75,6 +77,34 @@ class LiveMind:
         self._nonce = uuid.uuid4().hex[:12]
         self._status = 'Waiting for an embodied local view'
         self.trace = {'principal': principal, 'calls': 0, 'decisions': [], 'live': True}
+
+    def accept_order(self, text):
+        if self.on_order is None:
+            raise ValueError('Human control is not enabled for this mind')
+        if (not isinstance(text, str) or not text.strip() or len(text) > 1000
+                or any(ord(c) < 32 and c not in '\n\t' for c in text)):
+            raise ValueError('Order must contain 1-1000 characters')
+        with self._lock:
+            if self._stop.is_set() or self.trace['calls'] >= self.call_budget:
+                raise ValueError('This run is no longer accepting orders')
+            generation = self._human_generation + 1
+            self.on_order(text.strip(), generation)
+            self._human_generation, self._human_order = generation, text.strip()
+            self._paused, self._last_frame = False, -100000
+            self._status = 'Order received; reading the local situation'
+            return {'order_id': generation, 'status': self._status}
+
+    def pause(self):
+        if self.on_order is None:
+            raise ValueError('Human control is not enabled for this mind')
+        with self._lock:
+            if self._stop.is_set():
+                raise ValueError('This run has stopped')
+            generation = self._human_generation + 1
+            self.on_order('', generation)
+            self._human_generation, self._paused = generation, True
+            self._status = 'Mind paused. Existing game orders may finish.'
+            return {'order_id': generation, 'status': self._status}
 
     def snapshot(self):
         with self._lock:
@@ -95,7 +125,7 @@ class LiveMind:
                 self._status = 'Mission terminal'
                 self._stop.set()
                 return
-            if self._stop.is_set() or not observation.get('body'):
+            if self._stop.is_set() or self._paused or not observation.get('body'):
                 return
             if self.trace['calls'] >= self.call_budget or time.monotonic() - self._began >= self.wall_deadline_s:
                 self._status = 'Model budget reached'
@@ -107,8 +137,10 @@ class LiveMind:
             call = self.trace['calls']
             self._last_frame = observation['frame']
             intent_id = f'{self.principal}-{self._nonce}-{call}'
+            generation = self._human_generation
             prompt = json.dumps({'principal': self.principal, 'current_observation': observation,
                                  'own_recent_actions': self._history[-8:], 'next_intent_id': intent_id,
+                                 'human_order': self._human_order,
                                  'reply_contract': 'One JSON decision. For an intent use next_intent_id, current observation_id and expiry current frame + 600.'},
                                 sort_keys=True)
             self._status = 'Thinking from local observations'
@@ -118,7 +150,8 @@ class LiveMind:
                                         self._used_ids, intent_id) if live else
                     Decision('invalid', rejected='model unavailable or reported model mismatch'))
         with self._lock:
-            canceled = self._stop.is_set() or time.monotonic() - self._began >= self.wall_deadline_s
+            canceled = (self._stop.is_set() or generation != self._human_generation
+                        or time.monotonic() - self._began >= self.wall_deadline_s)
             envelope = decision.envelope if decision.action == 'intent' and not canceled else None
             label = None
             if envelope:
@@ -129,12 +162,15 @@ class LiveMind:
                        'action': 'discarded' if canceled else decision.action}
             if envelope:
                 payload.update(intent_id=envelope['intent_id'], decision=label)
+            if generation:
+                payload['human_order_id'] = generation
             event = self.sink.record_inference(observation['observation_id'], payload, envelope, label)
             record = {**payload, 'inference_event': event, 'parsed': envelope, 'rejected': decision.rejected}
             self.trace['decisions'].append(record)
             if self.on_decision:
                 self.on_decision({**record, 'prompt': prompt, 'raw_output': reply.raw})
-            if self._stop.is_set() or time.monotonic() - self._began >= self.wall_deadline_s:
+            if (self._stop.is_set() or generation != self._human_generation
+                    or time.monotonic() - self._began >= self.wall_deadline_s):
                 return
             if not event:
                 self._status = 'Stopped: inference evidence unavailable'

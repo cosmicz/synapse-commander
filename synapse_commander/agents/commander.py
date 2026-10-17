@@ -102,9 +102,10 @@ class ClaudeCliRoute:
         except json.JSONDecodeError:
             return ModelReply("", [], latency, raw, error="cli output is not JSON")
         if isinstance(result, list):
-            # Some CLI configurations print the whole event stream; the reply is its final result event.
-            result = next((event for event in reversed(result)
-                           if isinstance(event, dict) and event.get("type") == "result"), None)
+            # Some authenticated CLI runners wrap --output-format json in an
+            # event array. Only the terminal result is the model's reply.
+            results = [event for event in result if isinstance(event, dict) and event.get("type") == "result"]
+            result = results[-1] if results else None
         if not isinstance(result, dict) or result.get("is_error"):
             return ModelReply("", [], latency, raw, error="cli reported an error")
         usage = result.get("modelUsage")

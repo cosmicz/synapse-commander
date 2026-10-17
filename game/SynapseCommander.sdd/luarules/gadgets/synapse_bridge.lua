@@ -37,6 +37,7 @@ if gadgetHandler:IsSyncedCode() then
   local local_status, factory_name = {}, "F0"
   local terrain_method = Spring.TraceRayGroundBetweenPositions and "native" or "sampled"
   local effect, body_for_principal
+  local waypoints_world = {}
   local scenario_failed = false
 
   local function identifier(value)
@@ -610,6 +611,12 @@ if gadgetHandler:IsSyncedCode() then
     -- factory, [dx, ignored, dz] for waypoints); heights come from the ground.
     local w1 = scenario.waypoints.W1
     waypoint = { x + w1[1], Spring.GetGroundHeight(x + w1[1], z + w1[3]), z + w1[3] }
+    waypoints_world = {}
+    for name, w in pairs(scenario.waypoints) do
+      if type(w) == "table" and type(w[1]) == "number" and type(w[3]) == "number" then
+        waypoints_world[name] = { x + w[1], Spring.GetGroundHeight(x + w[1], z + w[3]), z + w[3] }
+      end
+    end
     budgets = { bodies_remaining = scenario.bodies, chips = {} }
     for id, n in pairs(scenario.chips) do budgets.chips[id] = n end
     out("scenario", { name = "factory_spawn", id = scenario.id, version = scenario.version, waypoints = { W1 = waypoint } })
@@ -1024,7 +1031,7 @@ if gadgetHandler:IsSyncedCode() then
                          observation_id = "obs-" .. principal .. "-" .. frame, team = TEAM0, frame = frame,
                          body = entity_for(bodyID, "own_body"), entities = entities,
                          reports = listed_reports, truncated = false, omitted = 0,
-                         scenario = { id = scenario.id, version = scenario.version, waypoints = { W1 = waypoint } },
+                         scenario = { id = scenario.id, version = scenario.version, waypoints = next(waypoints_world) and waypoints_world or { W1 = waypoint } },
                          permitted_intents = { { type = "TASK", verbs = { "advance", "move_to" } }, { type = "MESSAGE" } } }
           if scenario.objective and scenario.extraction_zones then
             local zone = scenario.extraction_zones[scenario.objective.extraction]
@@ -1034,6 +1041,10 @@ if gadgetHandler:IsSyncedCode() then
           end
           if principal == "commander" then
             body.budgets = { bodies_remaining = budgets.bodies_remaining, chips = budgets.chips }
+            body.permitted_intents[#body.permitted_intents + 1] = {
+              type = "PRODUCE", factories = { factory.name },
+              chassis = sorted_keys(scenario.chassis), controllers = sorted_keys(scenario.chips),
+            }
             if scenario.objective then
               local target = scenario.objective.target
               body.objective = { type = scenario.objective.type, target = target,
