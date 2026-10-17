@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 import stat
 import subprocess
@@ -118,36 +119,42 @@ class TeardownTests(unittest.TestCase):
 
 
 class OtherEnginesTests(unittest.TestCase):
-    def _named(self, tmp: str) -> str:
-        named = Path(tmp) / "bin" / "spring-headless"
-        named.parent.mkdir()
-        named.symlink_to(sys.executable)
-        return str(named)
+    """Engines are identified by their executable, not by the name they run under."""
 
-    def test_sees_a_foreign_engine_run_but_not_own_group(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            proc = subprocess.Popen([self._named(tmp), "-c", "import time; time.sleep(30)",
-                                     "--isolation", "--write-dir", tmp], start_new_session=True)
-            try:
-                time.sleep(0.3)
-                self.assertIn(proc.pid, launch.other_engines())
-                self.assertNotIn(proc.pid, launch.other_engines(own_pgid=proc.pid))
-                self.assertIn("--write-dir", launch.engine_command_lines()[proc.pid])
-            finally:
-                proc.kill()
-                proc.wait()
+    def _start(self, program: Path, *args: str) -> subprocess.Popen:
+        proc = subprocess.Popen([str(program), *args], start_new_session=True)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        time.sleep(0.3)
+        return proc
 
-    def test_ignores_a_spring_headless_named_process_without_a_write_dir(self) -> None:
-        # Such as this very test's helper: concurrent test runs must not look like engines.
+    def test_sees_a_foreign_engine_executable_but_not_own_group(self) -> None:
+        # A unique stand-in name, so this test never looks like an engine to a
+        # capture running concurrently on the same host.
+        name = f"synapse-test-engine-{os.getpid()}"
         with tempfile.TemporaryDirectory() as tmp:
-            proc = subprocess.Popen([self._named(tmp), "-c", "import time; time.sleep(30)"],
-                                    start_new_session=True)
-            try:
-                time.sleep(0.3)
-                self.assertNotIn(proc.pid, launch.other_engines())
-            finally:
-                proc.kill()
-                proc.wait()
+            binary = Path(tmp) / name
+            shutil.copy(shutil.which("sleep"), binary)  # a real executable file of that name
+            proc = self._start(binary, "30")
+            self.assertIn(proc.pid, launch.other_engines(binary=name))
+            self.assertNotIn(proc.pid, launch.other_engines(own_pgid=proc.pid, binary=name))
+            self.assertEqual(launch.engine_processes(binary=name)[proc.pid]["identified_by"], "exe")
+            self.assertNotIn(proc.pid, launch.other_engines())
+
+    def test_ignores_a_symlink_or_script_merely_named_like_the_engine(self) -> None:
+        # Such as this suite's own helpers: a concurrent test run must not look like an engine.
+        with tempfile.TemporaryDirectory() as tmp:
+            link = Path(tmp) / "bin" / "spring-headless"
+            link.parent.mkdir()
+            link.symlink_to(shutil.which("sleep"))
+            script = Path(tmp) / "spring-headless"
+            script.write_text("#!/bin/sh\nexec sleep 30\n")
+            script.chmod(0o755)
+            linked = self._start(link, "30")
+            scripted = self._start(script)
+            engines = launch.other_engines()
+            self.assertNotIn(linked.pid, engines)
+            self.assertNotIn(scripted.pid, engines)
 
 
 class LockTests(unittest.TestCase):

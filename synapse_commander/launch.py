@@ -348,28 +348,42 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
-def other_engines(own_pgid: int | None = None) -> list[int]:
-    """Pids of engine runs outside our own process group (Linux /proc).
+ENGINE_BINARY = "spring-headless"
 
-    An engine run is a process whose argv[0] is a spring-headless binary and
-    which was given a --write-dir, as every launcher here starts it.
+
+def other_engines(own_pgid: int | None = None, *, binary: str = ENGINE_BINARY) -> list[int]:
+    """Pids of engine processes outside our own process group (Linux /proc).
+
+    A process is an engine when its executable (/proc/PID/exe) is a file named
+    spring-headless, however it was started; a script or a symlink to another
+    program merely named so is not. Only when the executable cannot be read
+    does the process name (argv[0]) decide, and the record says so.
     """
-    return sorted(engine_command_lines(own_pgid))
+    return sorted(engine_processes(own_pgid, binary=binary))
 
 
-def engine_command_lines(own_pgid: int | None = None) -> dict[int, str]:
+def engine_processes(own_pgid: int | None = None, *,
+                     binary: str = ENGINE_BINARY) -> dict[int, dict[str, str]]:
+    """Engine pids with their command line and how each was identified."""
     found = {}
     for entry in Path("/proc").glob("[0-9]*"):
         try:
-            argv = (entry / "cmdline").read_bytes().split(b"\0")
-            if not argv[0].endswith(b"spring-headless") or b"--write-dir" not in argv:
-                continue
             pid = int(entry.name)
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+            try:
+                exe = os.readlink(entry / "exe").removesuffix(" (deleted)")
+                identified_by = "exe"
+                is_engine = os.path.basename(exe) == binary
+            except OSError:
+                identified_by = "argv0 (exe unreadable)"
+                is_engine = os.path.basename(argv[0].decode("utf-8", "replace")) == binary
+            if not is_engine:
+                continue
             if own_pgid is not None and os.getpgid(pid) == own_pgid:
                 continue
-        except (OSError, ValueError, IndexError):
+        except (OSError, ValueError):
             continue
-        found[pid] = b" ".join(argv).decode("utf-8", "replace")[:300]
+        found[pid] = {"cmdline": b" ".join(argv).decode("utf-8", "replace")[:300], "identified_by": identified_by}
     return found
 
 

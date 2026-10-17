@@ -115,9 +115,9 @@ frames of the receipt, at a frame later than the receipt; =order_done= within
 order; each probe rejected with its stable code (gateway or engine layer) and
 no effect or acceptance in the ledger; no movement after the probes; ledger
 verified and classified as not autonomous; no other engine run on the host
-during the run (a =spring-headless= process given a =--write-dir=, sampled
-every 0.2 s; its command line is kept in the private verdict); bounded
-teardown. The probes are an
+during the run (a process whose executable is a file named
+=spring-headless=, sampled every 0.2 s; its command line is kept in the private
+verdict); bounded teardown. The probes are an
 unsupported verb, =PRODUCE=, a raw-engine payload, an unknown observation, an
 expired intent, an expiry more than 900 frames ahead, a repeat advance of the
 unit already at =W1=, a foreign (Gaia) unit, a caller-supplied identity, and a stale
