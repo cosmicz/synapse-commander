@@ -33,3 +33,9 @@ the gateway; it never forwards a raw engine command.
 
 This repository is independent of event coordination and contains no tracker
 database, private event records, engine binaries or BAR assets.
+
+* License
+GPL-2.0-or-later: GNU General Public License version 2, or (at your option)
+any later version. See [[file:LICENSE][LICENSE]]. The game code must stay
+compatible with the GPL-2 Recoil engine and Beyond All Reason content it
+depends on at runtime; no BAR art is included in this repository.
