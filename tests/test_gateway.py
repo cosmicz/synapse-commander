@@ -161,10 +161,10 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(result["error"], "intent_not_allowed")
         raw_payload = produce()
-        raw_payload["payload"] = {"factory": "F0", "chassis": "hauler", "controller": "haul_v1", "parameters": {"lua": "Spring.KillUnit()"}}
+        raw_payload["payload"] = {"factory": "F0", "chassis": "scout_v1", "controller": "reasoner_large_v1", "parameters": {"lua": "Spring.KillUnit()"}}
         status, result = self.request("POST", "/v1/intents", raw_payload)
         self.assertEqual(status, 400)
-        self.assertEqual(result["error"], "invalid_payload")
+        self.assertEqual(result["error"], "invalid_parameters")
         self.assertEqual(self.transport.accepted, [])
 
     def test_unsupported_intent_schema_is_rejected(self) -> None:
@@ -184,7 +184,17 @@ class GatewayTests(unittest.TestCase):
         request["payload"]["parameters"] = {"unrecognized": True}
         status, result = self.request("POST", "/v1/intents", request)
         self.assertEqual(status, 400)
-        self.assertEqual(result["error"], "invalid_payload")
+        self.assertEqual(result["error"], "invalid_parameters")
+
+    def test_selected_production_vocabulary_has_stable_reason_codes(self) -> None:
+        request = produce()
+        request["payload"]["chassis"] = "not_a_chassis"
+        status, result = self.request("POST", "/v1/intents", request)
+        self.assertEqual((status, result["error"]), (400, "unknown_chassis"))
+        request = produce()
+        request["payload"]["controller"] = "not_a_controller"
+        status, result = self.request("POST", "/v1/intents", request)
+        self.assertEqual((status, result["error"]), (400, "unknown_controller"))
 
     def test_only_engine_smoke_advance_task_verb_is_allowed(self) -> None:
         request = {"schema": "IntentEnvelope/v1", "intent_id": "task-1", "based_on_observation_id": "obs-1", "expires_at_frame": 200, "type": "TASK", "payload": {"unit": "H1", "verb": "move", "args": {}}}
@@ -353,15 +363,15 @@ class GatewayTests(unittest.TestCase):
     def test_closed_controller_and_install_version_enums_reject_validly_shaped_unknowns(self) -> None:
         request = produce(); request["payload"]["controller"] = "haul_v9"
         status, result = self.request("POST", "/v1/intents", request)
-        self.assertEqual((status, result["error"]), (400, "invalid_payload"))
+        self.assertEqual((status, result["error"]), (400, "unknown_controller"))
 
     def test_closed_chassis_enum_rejects_validly_shaped_unknown(self) -> None:
         request = produce(); request["payload"]["chassis"] = "hauler_v9"
         status, result = self.request("POST", "/v1/intents", request)
-        self.assertEqual((status, result["error"]), (400, "invalid_payload"))
+        self.assertEqual((status, result["error"]), (400, "unknown_chassis"))
         install = {"schema": "IntentEnvelope/v1", "intent_id": "install-1", "based_on_observation_id": "obs-1", "expires_at_frame": 200, "type": "INSTALL", "payload": {"unit": "H1", "expected_version": "reasoner_large_v1", "replacement_version": "haul_v9", "parameters": {}}}
         status, result = self.request("POST", "/v1/intents", install)
-        self.assertEqual((status, result["error"]), (400, "invalid_payload"))
+        self.assertEqual((status, result["error"]), (400, "unknown_controller"))
 
     def test_declared_produce_shape_reaches_transport_even_when_inventory_is_empty(self) -> None:
         self.transport.publish_observation("blue", provisioning_observation())

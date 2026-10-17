@@ -102,10 +102,14 @@ class IntentEnvelope:
             raise ProtocolError("invalid_payload", "payload fields do not match the typed intent")
         for field in required - {"parameters", "args"}:
             _bounded_string(payload[field], field)
-        if intent_type == "PRODUCE" and chassis is not None and controllers is not None and (payload["chassis"] not in chassis or payload["controller"] not in controllers):
-            raise ProtocolError("invalid_payload", "unknown chassis or controller")
-        if intent_type == "INSTALL" and controllers is not None and (payload["expected_version"] not in controllers or payload["replacement_version"] not in controllers):
-            raise ProtocolError("invalid_payload", "unknown controller version")
+        if intent_type == "PRODUCE" and chassis is not None and controllers is not None:
+            if payload["chassis"] not in chassis:
+                raise ProtocolError("unknown_chassis", "unknown chassis")
+            if payload["controller"] not in controllers:
+                raise ProtocolError("unknown_controller", "unknown controller")
+        if intent_type == "INSTALL" and controllers is not None:
+            if payload["expected_version"] not in controllers or payload["replacement_version"] not in controllers:
+                raise ProtocolError("unknown_controller", "unknown controller version")
         if intent_type == "TASK" and payload["verb"] != "advance":
             raise ProtocolError("verb_not_supported", "only the engine-smoke advance task is exposed")
         for field in required & {"parameters", "args"}:
@@ -114,7 +118,7 @@ class IntentEnvelope:
                 # The smoke schema deliberately has no controller-specific
                 # argument vocabulary. Broken Relay parameters belong in its
                 # later engine adapter, not an untyped escape hatch here.
-                raise ProtocolError("invalid_payload", f"{field} is empty in the smoke schema")
+                raise ProtocolError("invalid_parameters", f"{field} is empty in the smoke schema")
         expiry = value.get("expires_at_frame")
         if not isinstance(expiry, int) or isinstance(expiry, bool) or expiry < 0:
             raise ProtocolError("invalid_expiry", "expires_at_frame must be a non-negative integer")
