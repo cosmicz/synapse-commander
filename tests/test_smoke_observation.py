@@ -239,6 +239,32 @@ class SmokeObservationTests(unittest.TestCase):
         self.assertNotIn("controller", observed["entities"][0])
         self.assertNotIn("private_target", observed["entities"][0])
 
+    def test_loop0_entity_keeps_typed_public_telemetry_while_filtering_unknown_keys(self):
+        source = engine_observation()
+        source["entities"] = [{
+            "id": 42, "def": "armck", "pos": [100, 0, 100], "source": "own_unit", "team": 0,
+            "health": 750.5, "max_health": 1000, "commands": 2, "observed_frame": 15,
+            "age_frames": 0, "controller": "not_public_in_loop0", "private_plan": "secret",
+        }]
+        observed = bounded_observation(source)
+        self.assertEqual(observed["entities"], [{
+            "id": 42, "def": "armck", "pos": [100, 0, 100], "source": "own_unit", "team": 0,
+            "health": 750.5, "max_health": 1000, "commands": 2, "observed_frame": 15,
+            "age_frames": 0,
+        }])
+
+    def test_roster_names_are_unique(self):
+        source = engine_observation()
+        source.update({
+            "scenario": {"id": "rescue_baseline", "version": load_scenario("rescue_baseline")["version"]},
+            "roster": [
+                {"name": "M1", "def": "armck", "controller": "reasoner_small_v1", "status": "no_contact"},
+                {"name": "M1", "def": "armck", "controller": "reasoner_small_v1", "status": "no_contact"},
+            ],
+        })
+        with self.assertRaisesRegex(ProtocolError, "duplicate roster"):
+            bounded_observation(source, scenario_table=load_scenario("rescue_baseline"))
+
     def test_produce_permissions_reject_unknown_ids_and_dedupe_task_advance(self):
         source = provisioning_observation()
         source["permitted_intents"].insert(0, {"type": "TASK", "verbs": ["advance"]})

@@ -292,17 +292,32 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
     """Preserve the Loop 0 entity view while filtering the new identity field."""
     public: list[Any] = []
     controllers = frozenset() if scenario_table is None else frozenset(scenario_table["chips"])
-    fields = frozenset({"id", "pos", "source", "team", "observed_frame", "age_frames", "controller"})
+    fields = frozenset({
+        "id", "pos", "source", "team", "observed_frame", "age_frames",
+        "def", "health", "max_health", "commands", "controller",
+    })
     for entity in value:
         if not isinstance(entity, Mapping):
             public.append(entity)
             continue
         projected = {key: item for key, item in entity.items() if key in fields}
+        if "def" in projected:
+            projected["def"] = _public_identifier(projected["def"], "entity def")
+        for field in ("health", "max_health"):
+            if field in projected:
+                amount = projected[field]
+                if type(amount) not in (int, float) or not math.isfinite(amount) or amount < 0:
+                    raise ProtocolError("invalid_observation", f"entity {field} must be finite and non-negative")
+        if "commands" in projected:
+            projected["commands"] = _public_count(projected["commands"], "entity commands")
         if "controller" in projected:
             if scenario_table is None or projected.get("source") != "own_unit":
                 projected.pop("controller")
             elif not isinstance(projected["controller"], str) or projected["controller"] not in controllers:
                 raise ProtocolError("invalid_observation", "unknown entity controller")
+        if projected.get("source") != "own_unit":
+            for field in ("health", "max_health", "commands"):
+                projected.pop(field, None)
         public.append(projected)
     return public
 
@@ -329,6 +344,7 @@ def _bounded_expedition(value: Mapping[str, Any], result: dict[str, Any], scenar
     if not isinstance(roster, list) or len(roster) > 8:
         raise ProtocolError("invalid_observation", "invalid roster")
     public_roster: list[dict[str, Any]] = []
+    roster_names: set[str] = set()
     for item in roster:
         if not isinstance(item, Mapping):
             raise ProtocolError("invalid_observation", "invalid roster entry")
@@ -337,6 +353,9 @@ def _bounded_expedition(value: Mapping[str, Any], result: dict[str, Any], scenar
         if set(item) != expected or status not in {"in_contact", "no_contact"}:
             raise ProtocolError("invalid_observation", "invalid roster entry")
         name = _public_identifier(item.get("name"), "roster name")
+        if name in roster_names:
+            raise ProtocolError("invalid_observation", "duplicate roster name")
+        roster_names.add(name)
         declared = known.get(name)
         if (declared is None
                 or not isinstance(declared.get("def"), str)
