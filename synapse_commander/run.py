@@ -356,6 +356,8 @@ def install_render_files(layout: launch.RunLayout, springsettings: Path | None,
     if extra_widgets_dir is not None:
         widgets = layout.write_dir / "LuaUI" / "Widgets"
         widgets.mkdir(parents=True, exist_ok=True)
+        # LuaUI/Config is a user-widget write path; a capture widget saves frames there.
+        (layout.write_dir / "LuaUI" / "Config" / "frames").mkdir(parents=True, exist_ok=True)
         for source in sorted(Path(extra_widgets_dir).glob("*.lua")):
             (widgets / source.name).write_bytes(source.read_bytes())
             hashes[f"extra_widget/{source.name}"] = launch.sha256_file(widgets / source.name)
