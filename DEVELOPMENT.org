@@ -171,6 +171,23 @@ required =advance_to_W1= decision. Limits: one unit, fixed waypoint, headless,
 not visual; agent-only autonomy on this smoke task says nothing about play
 quality on a real mission.
 
+* Loop 1 provisioning contract
+The provisioned-rescue extension shares one checked-in scenario declaration
+between the Recoil gadget and Python gateway:
+=game/SynapseCommander.sdd/scenarios/rescue_smoke.json=.  The gadget selects
+it only through =synapse_scenario=rescue_smoke= and both consumers require
+=ScenarioTable/v1=.  It declares the one factory, versioned chassis and chip
+controller identifiers, provisional total body/chip inventory, commander chip,
+waypoint and objective. The gateway does not duplicate this allow-list.
+
+When the engine declares this scenario, the bounded public observation may add
+=commander=, =budgets=, up to four =factories= with at most eight jobs each, and a typed
+=PRODUCE= permission. It keeps only declared factory/chassis/controller IDs
+and has the same 32 KiB public cap. Known choices remain visible when their
+body or chip count is zero: inventory and queue legality stay authoritative in
+the engine, which reports =budget_exhausted= or =chip_unavailable=. Loop 0's
+fixed =TASK advance= boundary and W1 observation remain unchanged.
+
 * Initial upstream runtime evidence — October 17, 2026
 Recoil 2026.07.04 ARM64 Linux executes in a VM. Stock BAR at
 =f6f07eaf1fbc09eae536444ff3b2755d81e5440b= loaded Supreme Isthmus v2.1 and

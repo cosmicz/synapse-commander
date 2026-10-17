@@ -12,6 +12,8 @@ import math
 import re
 from typing import Any, Mapping, Protocol, Sequence
 
+from .scenarios import load_scenario, supported_chassis, supported_controllers
+
 
 SCHEMA_VERSION = "synapse-smoke/v1"
 INTENT_SCHEMA_VERSION = "IntentEnvelope/v1"
@@ -21,12 +23,12 @@ MAX_OBSERVATION_AGE_FRAMES = 900
 MAX_EXPIRY_AHEAD_FRAMES = 900
 MAX_ENTITIES = 32
 MAX_RECENT_EVENTS = 16
+MAX_FACTORIES = 4
+MAX_FACTORY_JOBS = 8
+MAX_BUDGET = 2**31 - 1
 
 INTENT_TYPES = frozenset({"PRODUCE", "TASK", "INSTALL"})
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-_CONTROLLERS = frozenset({"haul_v1", "deploy_relay_v1", "haul_detour_v2"})
-_CHASSIS = frozenset({"hauler", "relay_scout"})
-_VERSIONS = _CONTROLLERS
 _REQUIRED_PAYLOAD_FIELDS = {
     "PRODUCE": frozenset({"factory", "chassis", "controller", "parameters"}),
     "TASK": frozenset({"unit", "verb", "args"}),
@@ -100,9 +102,9 @@ class IntentEnvelope:
             raise ProtocolError("invalid_payload", "payload fields do not match the typed intent")
         for field in required - {"parameters", "args"}:
             _bounded_string(payload[field], field)
-        if intent_type == "PRODUCE" and (payload["chassis"] not in _CHASSIS or payload["controller"] not in _CONTROLLERS):
+        if intent_type == "PRODUCE" and (payload["chassis"] not in supported_chassis() or payload["controller"] not in supported_controllers()):
             raise ProtocolError("invalid_payload", "unknown chassis or controller")
-        if intent_type == "INSTALL" and (payload["expected_version"] not in _VERSIONS or payload["replacement_version"] not in _VERSIONS):
+        if intent_type == "INSTALL" and (payload["expected_version"] not in supported_controllers() or payload["replacement_version"] not in supported_controllers()):
             raise ProtocolError("invalid_payload", "unknown controller version")
         if intent_type == "TASK" and payload["verb"] != "advance":
             raise ProtocolError("verb_not_supported", "only the engine-smoke advance task is exposed")
@@ -174,6 +176,122 @@ class LedgerSink(Protocol):
     ) -> str: ...
 
 
+def _public_count(value: Any, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= MAX_BUDGET:
+        raise ProtocolError("invalid_observation", f"{field} must be a bounded non-negative integer")
+    return value
+
+
+def _public_identifier(value: Any, field: str) -> str:
+    try:
+        return _bounded_string(value, field)
+    except ProtocolError as error:
+        raise ProtocolError("invalid_observation", error.detail) from error
+
+
+def _bounded_factory_observation(value: Any, scenario: Mapping[str, Any]) -> tuple[list[dict[str, Any]], int, int]:
+    """Project only public factory/job fields from an engine observation."""
+    if value is None:
+        return [], 0, 0
+    if not isinstance(value, list):
+        raise ProtocolError("invalid_observation", "factories must be a list")
+    if any(not isinstance(factory, Mapping) for factory in value):
+        raise ProtocolError("invalid_observation", "factory must be an object")
+    factories = sorted(value, key=lambda factory: compact_json(factory))
+    output: list[dict[str, Any]] = []
+    job_omitted = 0
+    for factory in factories[:MAX_FACTORIES]:
+        if set(factory) != {"name", "unit_id", "jobs"}:
+            raise ProtocolError("invalid_observation", "factory has unsupported fields")
+        name = _public_identifier(factory.get("name"), "factory name")
+        if name != scenario["factory"]["name"]:
+            raise ProtocolError("invalid_observation", "unknown factory")
+        unit_id = _public_count(factory.get("unit_id"), "factory unit_id")
+        jobs = factory.get("jobs")
+        if not isinstance(jobs, list) or any(not isinstance(job, Mapping) for job in jobs):
+            raise ProtocolError("invalid_observation", "factory jobs must be a list")
+        ordered_jobs = sorted(jobs, key=lambda job: compact_json(job))
+        public_jobs: list[dict[str, Any]] = []
+        for job in ordered_jobs[:MAX_FACTORY_JOBS]:
+            if set(job) != {"job_id", "intent_id", "chassis", "controller", "started_frame", "done_frame"}:
+                raise ProtocolError("invalid_observation", "factory job has unsupported fields")
+            chassis = _public_identifier(job.get("chassis"), "job chassis")
+            controller = _public_identifier(job.get("controller"), "job controller")
+            if chassis not in scenario["chassis"] or controller not in scenario["chips"]:
+                raise ProtocolError("invalid_observation", "unknown factory job vocabulary")
+            public_jobs.append({
+                "job_id": _public_identifier(job.get("job_id"), "job_id"),
+                "intent_id": _public_identifier(job.get("intent_id"), "intent_id"),
+                "chassis": chassis,
+                "controller": controller,
+                "started_frame": _public_count(job.get("started_frame"), "started_frame"),
+                "done_frame": None if job.get("done_frame") is None else _public_count(job.get("done_frame"), "done_frame"),
+            })
+        job_omitted += max(0, len(jobs) - len(public_jobs))
+        output.append({"name": name, "unit_id": unit_id, "jobs": public_jobs})
+    return output, max(0, len(factories) - len(output)), job_omitted
+
+
+def _bounded_provisioning(value: Mapping[str, Any], result: dict[str, Any]) -> None:
+    """Add Loop 1 data only when it matches the public scenario declaration."""
+    scenario_table = load_scenario()
+    source_scenario = value.get("scenario", {})
+    if not isinstance(source_scenario, Mapping):
+        raise ProtocolError("invalid_observation", "scenario must be an object")
+    declared = source_scenario.get("id") == scenario_table["id"] and source_scenario.get("version") == scenario_table["version"]
+    provisioning_fields = {"commander", "budgets", "factories"}
+    if provisioning_fields & set(value) and not declared:
+        raise ProtocolError("invalid_observation", "provisioning observation lacks declared scenario")
+    if declared:
+        result.setdefault("scenario", {})["id"] = scenario_table["id"]
+        result["scenario"]["version"] = scenario_table["version"]
+    commander = value.get("commander")
+    if commander is not None:
+        if not isinstance(commander, Mapping) or set(commander) != {"unit_id", "chip"}:
+            raise ProtocolError("invalid_observation", "invalid commander")
+        chip = _public_identifier(commander.get("chip"), "commander chip")
+        if chip not in scenario_table["chips"]:
+            raise ProtocolError("invalid_observation", "unknown commander chip")
+        result["commander"] = {"unit_id": _public_count(commander.get("unit_id"), "commander unit_id"), "chip": chip}
+    elif "commander" in value:
+        result["commander"] = None
+    budgets = value.get("budgets")
+    if budgets is not None:
+        if not isinstance(budgets, Mapping) or set(budgets) != {"bodies_remaining", "chips"} or not isinstance(budgets.get("chips"), Mapping):
+            raise ProtocolError("invalid_observation", "invalid budgets")
+        chips = budgets["chips"]
+        if len(chips) > 16 or set(chips) - set(scenario_table["chips"]):
+            raise ProtocolError("invalid_observation", "unknown chip budget")
+        result["budgets"] = {
+            "bodies_remaining": _public_count(budgets.get("bodies_remaining"), "bodies_remaining"),
+            "chips": {name: _public_count(chips[name], f"chips.{name}") for name in sorted(chips)},
+        }
+    factories, factory_omitted, job_omitted = _bounded_factory_observation(value.get("factories"), scenario_table)
+    if "factories" in value:
+        result["factories"] = factories
+        result["omitted"]["factories"] = factory_omitted
+        result["omitted"]["factory_jobs"] = job_omitted
+        result["truncated"] = result["truncated"] or factory_omitted > 0 or job_omitted > 0
+
+
+def _bounded_entities(value: list[Any]) -> list[Any]:
+    """Preserve the Loop 0 entity view while filtering the new identity field."""
+    public: list[Any] = []
+    controllers = supported_controllers()
+    for entity in value:
+        if not isinstance(entity, Mapping):
+            public.append(entity)
+            continue
+        projected = dict(entity)
+        if "controller" in projected:
+            if projected.get("source") != "own_unit":
+                projected.pop("controller")
+            elif not isinstance(projected["controller"], str) or projected["controller"] not in controllers:
+                raise ProtocolError("invalid_observation", "unknown entity controller")
+        public.append(projected)
+    return public
+
+
 def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize a port result into the small, bounded public smoke schema."""
     if not isinstance(value, Mapping):
@@ -194,7 +312,7 @@ def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
     ordered_entities = sorted(entities, key=compact_json)
     ordered_receipts = sorted(receipts, key=event_key)
     ordered_effects = sorted(effects, key=event_key)
-    clipped_entities = ordered_entities[:MAX_ENTITIES]
+    clipped_entities = _bounded_entities(ordered_entities[:MAX_ENTITIES])
     clipped_receipts = ordered_receipts[-MAX_RECENT_EVENTS:]
     clipped_effects = ordered_effects[-MAX_RECENT_EVENTS:]
     result: dict[str, Any] = {
@@ -233,6 +351,7 @@ def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
         if not valid:
             raise ProtocolError("invalid_observation", "W1 must contain three finite coordinates")
         result["scenario"] = {"waypoints": {"W1": list(goal)}}
+    _bounded_provisioning(value, result)
     permitted = value.get("permitted_intents", [])
     if not isinstance(permitted, list) or len(permitted) > 16:
         raise ProtocolError("invalid_observation", "invalid permitted intents")
@@ -244,8 +363,25 @@ def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(verbs, list):
             raise ProtocolError("invalid_observation", "invalid permitted verbs")
         if intent.get("type") == "TASK" and "advance" in verbs:
-            result["permitted_intents"] = [{"type": "TASK", "verbs": ["advance"]}]
-            break
+            result["permitted_intents"].append({"type": "TASK", "verbs": ["advance"]})
+            continue
+        if intent.get("type") == "PRODUCE":
+            factories = intent.get("factories", [])
+            chassis = intent.get("chassis", [])
+            controllers = intent.get("controllers", [])
+            if not all(isinstance(items, list) and len(items) <= 8 for items in (factories, chassis, controllers)):
+                raise ProtocolError("invalid_observation", "invalid PRODUCE permission")
+            table = load_scenario()
+            public_factories = sorted({item for item in factories if isinstance(item, str) and item == table["factory"]["name"]})
+            public_chassis = sorted({item for item in chassis if isinstance(item, str) and item in table["chassis"]})
+            public_controllers = sorted({item for item in controllers if isinstance(item, str) and item in table["chips"]})
+            if public_factories and public_chassis and public_controllers:
+                result["permitted_intents"].append({
+                    "type": "PRODUCE",
+                    "factories": public_factories,
+                    "chassis": public_chassis,
+                    "controllers": public_controllers,
+                })
     if len(compact_json(result)) > MAX_OBSERVATION_BYTES:
         raise ProtocolError("observation_too_large", "transport observation exceeds public cap")
     return result

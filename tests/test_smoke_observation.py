@@ -21,6 +21,26 @@ def engine_observation():
     }
 
 
+def provisioning_observation():
+    value = engine_observation()
+    value.update({
+        "entities": [{"id": 42, "pos": [100, 0, 100], "source": "own_unit", "controller": "reasoner_large_v1"}],
+        "scenario": {"id": "rescue_smoke", "version": "1-provisional", "waypoints": {"W1": [500, 0, 100]}},
+        "commander": {"unit_id": 42, "chip": "reasoner_large_v1"},
+        "budgets": {"bodies_remaining": 0, "chips": {"reasoner_large_v1": 0, "reasoner_small_v1": 1, "escort_fixed_v1": 1}},
+        "factories": [{"name": "F0", "unit_id": 7, "jobs": [{
+            "job_id": "job-0", "intent_id": "intent-0", "chassis": "scout_v1", "controller": "reasoner_small_v1",
+            "started_frame": 15, "done_frame": 135,
+        }]}],
+        "permitted_intents": [
+            {"type": "TASK", "verbs": ["advance"]},
+            {"type": "PRODUCE", "factories": ["F0"], "chassis": ["scout_v1", "carrier_v1", "relay_support_v1"],
+             "controllers": ["reasoner_large_v1", "reasoner_small_v1", "escort_fixed_v1"]},
+        ],
+    })
+    return value
+
+
 class SmokeObservationTests(unittest.TestCase):
     def test_http_client_observes_unit_and_declared_fixed_goal(self):
         transport = MemoryTransport(frame=15)
@@ -67,3 +87,43 @@ class SmokeObservationTests(unittest.TestCase):
         source["resources"] = {"padding": "x" * 32768}
         with self.assertRaisesRegex(ProtocolError, "exceeds public cap"):
             bounded_observation(source)
+
+    def test_provisioning_data_is_typed_bounded_and_keeps_depleted_choices_visible(self):
+        observed = bounded_observation(provisioning_observation())
+        self.assertEqual(observed["scenario"]["id"], "rescue_smoke")
+        self.assertEqual(observed["scenario"]["version"], "1-provisional")
+        self.assertEqual(observed["commander"], {"unit_id": 42, "chip": "reasoner_large_v1"})
+        self.assertEqual(observed["budgets"]["bodies_remaining"], 0)
+        self.assertEqual(observed["budgets"]["chips"]["reasoner_large_v1"], 0)
+        self.assertEqual(observed["entities"][0]["controller"], "reasoner_large_v1")
+        self.assertEqual(observed["factories"][0]["jobs"][0]["controller"], "reasoner_small_v1")
+        self.assertEqual(observed["factories"][0]["jobs"][0]["done_frame"], 135)
+        produce = next(item for item in observed["permitted_intents"] if item["type"] == "PRODUCE")
+        self.assertEqual(produce["factories"], ["F0"])
+        self.assertIn("reasoner_large_v1", produce["controllers"])
+
+    def test_provisioning_requires_the_declared_scenario_and_known_vocabularies(self):
+        source = provisioning_observation()
+        source["scenario"].pop("version")
+        with self.assertRaisesRegex(ProtocolError, "declared scenario"):
+            bounded_observation(source)
+        source = provisioning_observation()
+        source["factories"][0]["name"] = "hidden_factory"
+        with self.assertRaisesRegex(ProtocolError, "unknown factory"):
+            bounded_observation(source)
+
+    def test_factory_job_list_is_clipped_and_counted(self):
+        source = provisioning_observation()
+        source["factories"][0]["jobs"] = [
+            {"job_id": f"job-{number}", "intent_id": f"intent-{number}", "chassis": "scout_v1", "controller": "escort_fixed_v1", "started_frame": number, "done_frame": number + 1}
+            for number in range(9)
+        ]
+        observed = bounded_observation(source)
+        self.assertEqual(len(observed["factories"][0]["jobs"]), 8)
+        self.assertEqual(observed["omitted"]["factory_jobs"], 1)
+        self.assertTrue(observed["truncated"])
+
+    def test_factory_job_allows_an_unfinished_null_done_frame(self):
+        source = provisioning_observation()
+        source["factories"][0]["jobs"][0]["done_frame"] = None
+        self.assertIsNone(bounded_observation(source)["factories"][0]["jobs"][0]["done_frame"])

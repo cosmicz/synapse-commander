@@ -14,6 +14,7 @@ from synapse_commander.recording import Recorder, verify_ledger
 from synapse_commander.recording import LedgerError
 from synapse_commander.transport import MemoryTransport
 from tests.test_recording import manifest
+from tests.test_smoke_observation import provisioning_observation
 
 
 class Ledger:
@@ -46,7 +47,7 @@ def produce(observation_id: str = "obs-1", expiry: int = 200) -> dict[str, objec
         "based_on_observation_id": observation_id,
         "expires_at_frame": expiry,
         "type": "PRODUCE",
-        "payload": {"factory": "F0", "chassis": "hauler", "controller": "haul_v1", "parameters": {}},
+        "payload": {"factory": "F0", "chassis": "scout_v1", "controller": "reasoner_large_v1", "parameters": {}},
     }
 
 
@@ -351,9 +352,18 @@ class GatewayTests(unittest.TestCase):
         request = produce(); request["payload"]["chassis"] = "hauler_v9"
         status, result = self.request("POST", "/v1/intents", request)
         self.assertEqual((status, result["error"]), (400, "invalid_payload"))
-        install = {"schema": "IntentEnvelope/v1", "intent_id": "install-1", "based_on_observation_id": "obs-1", "expires_at_frame": 200, "type": "INSTALL", "payload": {"unit": "H1", "expected_version": "haul_v1", "replacement_version": "haul_v9", "parameters": {}}}
+        install = {"schema": "IntentEnvelope/v1", "intent_id": "install-1", "based_on_observation_id": "obs-1", "expires_at_frame": 200, "type": "INSTALL", "payload": {"unit": "H1", "expected_version": "reasoner_large_v1", "replacement_version": "haul_v9", "parameters": {}}}
         status, result = self.request("POST", "/v1/intents", install)
         self.assertEqual((status, result["error"]), (400, "invalid_payload"))
+
+    def test_declared_produce_shape_reaches_transport_even_when_inventory_is_empty(self) -> None:
+        self.transport.publish_observation("blue", provisioning_observation())
+        status, receipt = self.request("POST", "/v1/intents", produce("obs-0-15"))
+        self.assertEqual((status, receipt["accepted"]), (202, True))
+        envelope = self.transport.accepted[-1]
+        self.assertEqual(envelope.payload["factory"], "F0")
+        self.assertEqual(envelope.payload["chassis"], "scout_v1")
+        self.assertEqual(envelope.payload["controller"], "reasoner_large_v1")
 
 
 if __name__ == "__main__":

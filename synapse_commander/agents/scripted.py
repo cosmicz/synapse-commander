@@ -15,6 +15,8 @@ from typing import Any, Callable
 import urllib.error
 import urllib.request
 
+from ..scenarios import load_scenario, supported_chassis, supported_controllers
+
 
 INTENT_SCHEMA = "IntentEnvelope/v1"
 ADVANCE_LIMIT_FRAMES = 300
@@ -75,6 +77,13 @@ def _entity(observation: dict[str, Any], entity_id: Any) -> dict[str, Any] | Non
 
 def planar_distance(a: list[float], b: list[float]) -> float:
     return math.hypot(float(a[0]) - float(b[0]), float(a[2]) - float(b[2]))
+
+
+def declared_produce_payload() -> dict[str, Any]:
+    """A PRODUCE payload using the first declared factory, chassis and controller."""
+    table = load_scenario()
+    return {"factory": table["factory"]["name"], "chassis": min(supported_chassis()),
+            "controller": min(supported_controllers()), "parameters": {}}
 
 
 def smoke_unit(observation: dict[str, Any], w1: list[float] | None) -> dict[str, Any]:
@@ -260,9 +269,10 @@ class ScriptedSmoke:
         probes = [
             Probe("unsupported_verb", "verb_not_supported", (400, 409),
                   self.envelope("verb", current, "TASK", {"unit": own, "verb": "move", "args": {}})),
-            Probe("produce_unsupported", "unsupported_type", (400, 409),
-                  self.envelope("produce", current, "PRODUCE",
-                                {"factory": "F0", "chassis": "hauler", "controller": "haul_v1", "parameters": {}})),
+            # Declared vocabulary, so it passes the gateway and the Loop 0 engine,
+            # which runs no provisioning scenario, must refuse the type itself.
+            Probe("produce_unsupported", "unsupported_type", (409,),
+                  self.envelope("produce", current, "PRODUCE", declared_produce_payload())),
             Probe("raw_engine_payload", "invalid_payload", (400,),
                   self.envelope("raw", current, "TASK",
                                 {"unit": own, "verb": "advance", "args": {"lua": "Spring.Echo('x')"}})),

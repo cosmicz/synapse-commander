@@ -1,0 +1,16 @@
+{
+  "schema": "ScenarioTable/v1",
+  "id": "rescue_smoke",
+  "version": "1-provisional",
+  "factory": {"name": "F0", "def": "armlab", "offset": [120, 120]},
+  "bodies": 4,
+  "chips": {"reasoner_large_v1": 1, "reasoner_small_v1": 1, "escort_fixed_v1": 1},
+  "chassis": {
+    "scout_v1": {"def": "armflea", "build_frames": 90, "commission_frames": 30},
+    "carrier_v1": {"def": "armck", "build_frames": 120, "commission_frames": 30},
+    "relay_support_v1": {"def": "armmark", "build_frames": 105, "commission_frames": 30}
+  },
+  "commander": {"chip": "reasoner_large_v1"},
+  "waypoints": {"W1": [500, 0, 100]},
+  "objective": {"type": "rescue_return", "target": "rescue_target_v1", "extraction": "extraction_v1"}
+}
