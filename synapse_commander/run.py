@@ -32,7 +32,7 @@ from .agents.scripted import (
 from .agents.provision import ProvisionSmoke
 from .agents.world import WorldObserver
 from .agents.view import ViewSmoke
-from .agents.rescue import RescuePlay, RescueRehearsal, rescue_points
+from .agents.rescue import BondedRescue, RescuePlay, RescueRehearsal, rescue_points
 from .agents.commander import SYSTEM_PROMPT, AgentCommander, ClaudeCliRoute, displacement_after_receipt
 from .gateway import LoopbackGateway
 from .scenarios import ScenarioError, load_scenario
@@ -298,6 +298,7 @@ class SmokeConfig:
     lock_wait_s: float = 1200.0
     mode: str = "scripted"            # scripted, agent, provision, world, view, or rescue
     rescue_mode: str = "scripted"     # rescue: scripted rehearsal or play (a person commands)
+    control_port: int = 8090         # bonded: loopback control surface for the person's orders
     play_stdin: Any = None
     play_stdout: Any = None
     engine_binary: str = launch.HEADLESS_BINARY  # or "spring", the rendered client
@@ -405,8 +406,9 @@ def run_smoke(config: SmokeConfig, *,
     view = config.mode == "view"
     rescue = config.mode == "rescue"
     play = rescue and config.rescue_mode == "play"
-    if rescue and config.rescue_mode not in ("scripted", "play"):
-        raise launch.LaunchError("rescue mode is scripted or play")
+    bonded = rescue and config.rescue_mode == "bonded"
+    if rescue and config.rescue_mode not in ("scripted", "play", "bonded"):
+        raise launch.LaunchError("rescue mode is scripted, play or bonded")
     if (provision or world or view or rescue) and config.scenario is None:
         raise launch.LaunchError(f"{config.mode} mode needs a scenario table (--scenario)")
     if not config.rig_commit:
@@ -483,8 +485,12 @@ def run_smoke(config: SmokeConfig, *,
             run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit, identity=identity,
             config_hashes=config_hashes, presentation=presentation, scenario=scenario_identity(table),
             principals=view_principals,
-            principal_sources={name: ("human" if play and name == "commander" else "scripted")
+            principal_sources={name: ("human" if play and name == "commander"
+                                      else "agent" if bonded and name == "commander" else "scripted")
                                for name in view_principals},
+            model_id=config.model if bonded else None,
+            external_budgets={"model_calls": config.call_budget, "per_call_timeout_s": config.call_timeout_s,
+                              "wall_deadline_s": config.agent_deadline_s} if bonded else None,
         )
     else:
         manifest = build_manifest(run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit,
@@ -548,6 +554,8 @@ def run_smoke(config: SmokeConfig, *,
 
         if play:
             ordered.principal_origins = {"commander": "human", "M1": "scripted"}
+        elif bonded:
+            ordered.principal_origins = {"commander": "agent", "M1": "scripted"}
         gateway = LoopbackGateway(transport, principal=AGENT_PRINCIPAL if agent else ("commander" if view or rescue else PRINCIPAL),
                                   team=TEAM, origin="agent" if agent else "scripted", ledger=ordered,
                                   scenario=config.scenario,
@@ -597,7 +605,9 @@ def run_smoke(config: SmokeConfig, *,
         elif rescue:
             m1_client = GatewayClient(f"http://127.0.0.1:{server.server_port}", token=principal_tokens["M1"],
                                       timeout_s=client_http_timeout_s)
-            if play:
+            if bonded:
+                driver = make_bonded(config, layout, ordered, transport, client, m1_client, model_route)
+            elif play:
                 driver = RescuePlay(client, m1_client, stdin=config.play_stdin or sys.stdin,
                                     stdout=config.play_stdout or sys.stdout, poll_s=config.client_poll_s)
             else:
@@ -1210,6 +1220,11 @@ def evaluate_rescue(trace: dict[str, Any], ordered: OrderedLedger | None,
               outcome=trace.get("outcome"),
               label="extraction verbs not in the engine yet" if trace.get("outcome") == "pending" else None)
         verdict["rescue_outcome"] = trace.get("outcome")
+    elif trace.get("bonded"):
+        commander = trace.get("commander") or {}
+        check("orders_reached_the_commander", bool(commander.get("orders")), orders=len(commander.get("orders", [])),
+              calls=commander.get("calls"), outcome=trace.get("outcome"))
+        verdict["rescue_outcome"] = trace.get("outcome")
     else:  # play
         intents = trace.get("intents", [])
         check("human_intents_answered", all(i.get("http") in (202, 400, 409) for i in intents),
@@ -1242,6 +1257,12 @@ def rescue_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -
             checks["mission_outcome_extracted"] = {
                 "ok": len(outcome) == 1 and outcome[0]["payload"].get("result") == "extracted",
                 "outcome": None if not outcome else outcome[0]["payload"]}
+    elif trace.get("bonded"):
+        interventions = [r for r in records if r["kind"] == "OPERATOR_INTERVENTION"]
+        inferences = [r for r in records if r["kind"] == "INFERENCE"]
+        checks["orders_recorded_as_interventions"] = {
+            "ok": len(interventions) == len((trace.get("commander") or {}).get("orders", [])) and bool(interventions),
+            "interventions": len(interventions), "inferences": len(inferences)}
     else:
         human = [r for r in submitted if r["origin"] == "human"]
         checks["human_inputs_recorded"] = {
@@ -1251,6 +1272,38 @@ def rescue_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -
             "human_intents": len(human),
             "refused_at_gateway": sum(1 for i in trace.get("intents", []) if i.get("http") == 400)}
     return checks
+
+
+def make_bonded(config: SmokeConfig, layout: launch.RunLayout, ordered: OrderedLedger, transport: Any,
+                commander: GatewayClient, m1: GatewayClient, model_route: Any) -> Any:
+    """Wire the bonded commander: private control token, orders as operator interventions."""
+    from .agents.bonded import BondedClaudeRoute
+    token = secrets.token_urlsafe(32)
+    token_path = layout.run_dir / "control_token"
+    token_path.write_text(token + "\n", encoding="utf-8")
+    token_path.chmod(0o600)
+    orders_path = layout.run_dir / "orders.jsonl"
+    decisions_path = layout.run_dir / "decisions.jsonl"
+
+    def on_order(text: str, generation: int) -> None:
+        # Raw words stay in private evidence; the ledger gets the intervention and a hash.
+        with orders_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"order_id": generation, "text": text, "wall_ns": time.monotonic_ns()}) + "\n")
+        ordered.record("OPERATOR_INTERVENTION", sim_frame=transport.current_frame(), origin="operator",
+                       payload={"action": "human_order" if text else "pause", "order_id": generation,
+                                "text_sha256": sha256_text(text), "principal": "commander"})
+
+    def on_decision(record: dict[str, Any]) -> None:
+        with decisions_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+
+    route = model_route or BondedClaudeRoute(config.model, timeout_s=config.call_timeout_s)
+    out = config.play_stdout or sys.stdout
+    return BondedRescue(commander, m1, route=route, sink=ordered, on_order=on_order, on_decision=on_decision,
+                        control_token=token, control_port=config.control_port, call_budget=config.call_budget,
+                        wall_deadline_s=config.agent_deadline_s, poll_s=config.client_poll_s,
+                        announce=lambda text: (out.write(f"{text}; token file {token_path.name} in the run directory\n"),
+                                               out.flush()))
 
 
 def write_phase_plan(run_dir: Path, trace: dict[str, Any], verdict: dict[str, Any]) -> None:

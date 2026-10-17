@@ -420,3 +420,52 @@ class RescuePlay:
             self.m1_policy.stop.set()
         self.trace["m1_actions"] = self.m1_policy.actions
         return self.trace
+
+
+class BondedRescue:
+    """A person's orders reach a live bonded commander; M1 runs the shared policy.
+
+    The control surface (loopback, token) accepts orders; each order is recorded
+    as an operator intervention before the commander considers it. The run ends
+    at a terminal mission outcome, at the deadline, or when the operator stops it.
+    """
+
+    def __init__(self, commander_client: GatewayClient, m1_client: GatewayClient, *, route: Any, sink: Any,
+                 on_order: Callable[[str, int], None], on_decision: Callable[[dict[str, Any]], None] | None,
+                 control_token: str, control_port: int, call_budget: int, wall_deadline_s: float,
+                 poll_s: float = 0.5, sleep: Callable[[float], None] = time.sleep,
+                 announce: Callable[[str], None] | None = None) -> None:
+        from .bonded import BondedCommander
+        from ..control import ControlServer
+        self.commander = BondedCommander(commander_client, route, sink, on_order, on_decision,
+                                         call_budget=call_budget, wall_deadline_s=wall_deadline_s, poll_s=poll_s)
+        self.m1 = SharedM1(PrincipalSession("M1", m1_client, "bonded"), poll_s=poll_s, sleep=sleep)
+        self.control = ControlServer(self.commander, control_token, port=control_port)
+        self.wall_deadline_s = wall_deadline_s
+        self.sleep = sleep
+        self.announce = announce or (lambda _text: None)
+        self.trace: dict[str, Any] = {"bonded": True}
+
+    def run(self) -> dict[str, Any]:
+        self.m1.run_in_background()
+        self.commander.start()
+        self.control.start()
+        self.announce(f"control surface on 127.0.0.1:{self.control.server_port}; waiting for orders")
+        began = time.monotonic()
+        try:
+            while time.monotonic() - began < self.wall_deadline_s:
+                snapshot = self.commander.snapshot()
+                status = ((snapshot.get("observation") or {}).get("objective") or {}).get("status")
+                if status in ("extracted", "lost", "timeout", "no_target"):
+                    self.trace["outcome"] = status
+                    break
+                if not snapshot.get("running"):
+                    break
+                self.sleep(0.5)
+        finally:
+            self.control.close()
+            self.trace["commander"] = self.commander.stop()
+            self.m1.stop.set()
+            self.trace["m1_actions"] = self.m1.actions
+        self.trace.setdefault("outcome", "not_reached")
+        return self.trace

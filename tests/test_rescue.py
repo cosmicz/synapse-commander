@@ -246,3 +246,75 @@ class RescueTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WaitingModel:
+    """Stand-in model route: always answers wait (no live inference)."""
+
+    name = "fake-route"
+    model = "fake-model"
+    timeout_s = 1
+
+    def __init__(self):
+        self.calls = 0
+
+    def call(self, prompt):
+        from synapse_commander.agents.commander import ModelReply
+        self.calls += 1
+        return ModelReply('{"action": "wait", "reason": "watching"}', ["fake-model"], 3, "{}")
+
+
+class BondedRescueTests(unittest.TestCase):
+    def test_orders_are_interventions_before_the_commanders_inference(self):
+        import re
+        import time
+        import urllib.request
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            engine = RescueEngine("bonded", move_to=True)
+            printed = io.StringIO()
+            route = WaitingModel()
+            cfg = SmokeConfig(engine_dir=out, data_dir=out, out_dir=out, run_id="bonded", rig_commit="b" * 40,
+                              scenario="rescue_baseline", mode="rescue", rescue_mode="bonded", model="fake-model",
+                              client_timeout_s=10, client_poll_s=0.05, agent_deadline_s=4, call_budget=5,
+                              control_port=0, play_stdout=printed)
+            result = {}
+
+            def run():
+                result["verdict"] = run_smoke(cfg, transport_factory=lambda _p, _r: engine,
+                                              engine_factory=lambda _l: engine, app=("a" * 40, 0),
+                                              engine_scan=lambda _p: [], model_route=route)
+
+            thread = threading.Thread(target=run)
+            thread.start()
+            port = None
+            for _ in range(100):
+                found = re.search(r"127\.0\.0\.1:(\d+)", printed.getvalue())
+                if found:
+                    port = int(found.group(1))
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(port, printed.getvalue())
+            token_path = out / "bonded" / "control_token"
+            self.assertEqual(token_path.stat().st_mode & 0o777, 0o600)
+            token = token_path.read_text().strip()
+            request = urllib.request.Request(f"http://127.0.0.1:{port}/orders", method="POST",
+                                             data=json.dumps({"text": "restore contact with M1"}).encode(),
+                                             headers={"Content-Type": "application/json",
+                                                      "Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(request, timeout=5) as response:
+                self.assertEqual(response.status, 202)
+            thread.join(timeout=30)
+            verdict = result["verdict"]
+            self.assertTrue(verdict["checks"]["orders_recorded_as_interventions"]["ok"], verdict["checks"])
+            self.assertTrue(verdict["checks"]["ledger_verified"]["ok"], verdict["checks"]["ledger_verified"])
+            records = [json.loads(line) for line in (out / "bonded" / "ledger.jsonl").read_text().splitlines()]
+            kinds = [r["kind"] for r in records]
+            self.assertIn("OPERATOR_INTERVENTION", kinds)
+            if "INFERENCE" in kinds:
+                self.assertLess(kinds.index("OPERATOR_INTERVENTION"), kinds.index("INFERENCE"))
+            ledger_text = (out / "bonded" / "ledger.jsonl").read_text()
+            self.assertNotIn("restore contact with M1", ledger_text, "raw order text stays out of the ledger")
+            self.assertNotIn(token, ledger_text)
+            self.assertIn("restore contact with M1", (out / "bonded" / "orders.jsonl").read_text())
+            self.assertGreaterEqual(route.calls, 1)

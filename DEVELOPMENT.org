@@ -277,6 +277,33 @@ The seed check and the usual ledger, exclusivity and teardown checks also
 apply. Limits: initial world only (no target behaviour or sensing), headless,
 scripted fixture; table values provisional.
 
+* Bonded commander control interface
+=agents/bonded.py= provides =BondedCommander= and =BondedClaudeRoute= for
+human-guided model play. The controller reads only the commander's gateway
+observation, gives the model the latest text order, and sends its validated
+typed action through the existing client. The caller supplies an inference
+ledger and an =on_order(text, generation)= callback that records human guidance
+before accepting it. Raw orders and model output belong only in private
+evidence; human guidance and model-selected actions retain separate sources.
+
+=control.ControlServer(controller, token, host='127.0.0.1', port=8090)= serves
+a small browser page, authenticated =GET /status=, and authenticated JSON
+=POST /orders= with a =text= field or =POST /pause= with an empty object.
+Laptop dictation can enter text directly; a local transcription client can use
+the same order endpoint with bearer authentication. The caller owns token
+creation, a private connection to the loopback listener, and server teardown.
+The browser holds its token in memory. It receives no raw gateway credentials.
+
+The controller limits model calls and elapsed time. Replacing or pausing an
+order discards any in-flight decision from the previous order. Pause prevents
+new decisions; game orders already submitted may finish. No action is sent
+without a recorded inference. The current verification is
+=python3 -B -W error -m unittest tests.test_bonded_control -v=: controller tests
+use a model test double, and HTTP tests use a real loopback listener. Launcher
+integration, a remote laptop connection, and live model-to-engine effects
+still require separate verification; these module tests do not establish a
+playable rescue run.
+
 * Initial upstream runtime evidence — October 17, 2026
 Recoil 2026.07.04 ARM64 Linux executes in a VM. Stock BAR at
 =f6f07eaf1fbc09eae536444ff3b2755d81e5440b= loaded Supreme Isthmus v2.1 and

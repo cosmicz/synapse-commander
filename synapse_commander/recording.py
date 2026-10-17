@@ -71,6 +71,8 @@ KIND_ORIGINS: dict[str, frozenset[str]] = {
     PRESENTATION: frozenset({"spectator", "human"}),
 }
 RECORDER_KINDS = frozenset({MANIFEST, RUN_START, RUN_END})
+MIND_EXTRACTED, MIND_LOST = "mind_extracted", "mind_lost"
+TERMINAL_EFFECTS = frozenset({MIND_EXTRACTED, MIND_LOST})
 
 # Kinds an EFFECT may cite: something that can make the engine change state.
 _EFFECT_CAUSES = frozenset(
@@ -298,6 +300,9 @@ class _LedgerState:
         self.last_wall = -1
         self.receipted: set[str] = set()  # submission event ids that have a receipt
         self.observation_principals: dict[str, str] = {}  # observation_id -> principal
+        # Rescue outcomes (rah26-kbk), keyed by roster/principal name.
+        self.extracted_views: set[tuple[str, str]] = set()  # (viewer, target)
+        self.terminal: dict[str, tuple[str, int]] = {}      # target -> (mind_extracted|mind_lost, frame)
 
     def accept(self, record: Mapping[str, Any]) -> None:
         if not isinstance(record, Mapping):
@@ -370,6 +375,7 @@ class _LedgerState:
                 raise LedgerError("invalid_origin", f"seq {seq} {kind} from {origin!r}")
             self._check_kind(kind, payload, causes, seq)
             self._check_principal(kind, payload, causes, seq, record["wall_ns"])
+            self._check_outcome(kind, payload, causes, seq, record["sim_frame"])
 
         stored = dict(record)
         if kind == INTENT_RECEIPT:
@@ -493,11 +499,52 @@ class _LedgerState:
             if owner != principal:
                 raise LedgerError("observation_owner_conflict", f"seq {seq} {payload['observation_id']}")
 
+    def _check_outcome(self, kind: str, payload: dict[str, Any], causes: list[str], seq: int, sim_frame: int) -> None:
+        """A mind is extracted or lost at most once, never both, and then acts no more."""
+        if kind == EFFECT and _one_of(payload.get("type"), TERMINAL_EFFECTS):
+            effect, detail = payload["type"], payload.get("detail")
+            target = detail.get("target") if isinstance(detail, dict) else None
+            if not isinstance(target, str):
+                raise LedgerError("invalid_payload", f"seq {seq} {effect} needs detail.target")
+            viewer = payload.get("principal")
+            if viewer is not None and not isinstance(viewer, str):
+                raise LedgerError("invalid_payload", f"seq {seq} {effect} viewer")
+            frame = _engine_frame(payload, sim_frame)
+            previous = self.terminal.get(target)
+            if previous and previous[0] != effect:
+                raise LedgerError("extraction_after_loss" if effect == MIND_EXTRACTED else "loss_after_extraction",
+                                  f"seq {seq} {target}")
+            if effect == MIND_EXTRACTED:
+                if (viewer, target) in self.extracted_views:
+                    raise LedgerError("duplicate_extraction", f"seq {seq} {target} seen by {viewer}")
+                self.extracted_views.add((viewer, target))
+            # The same terminal fact may reach several viewers; it keeps its first frame.
+            self.terminal.setdefault(target, (effect, frame))
+            return
+        principal = payload.get("principal")
+        if not _one_of(principal, self.terminal) or kind not in (OBSERVATION, INTENT_RECEIPT):
+            return
+        effect, frame = self.terminal[principal]
+        if kind == OBSERVATION and _engine_frame(payload, sim_frame) > frame:
+            # One final observation at the terminal frame, none after.
+            raise LedgerError("terminal_principal_observed", f"seq {seq} {principal} after {effect}")
+        if kind == INTENT_RECEIPT and payload.get("status") == "accepted":
+            raise LedgerError("terminal_principal_acted", f"seq {seq} {principal} after {effect}")
+
     @staticmethod
     def _no_rejected_receipt(cited: list[dict[str, Any]], seq: int) -> None:
         for record in cited:
             if record["kind"] == INTENT_RECEIPT and record["payload"]["status"] != "accepted":
                 raise LedgerError("incompatible_cause", f"seq {seq} cites a rejected receipt")
+
+
+def _engine_frame(payload: Mapping[str, Any], sim_frame: int) -> int:
+    """The engine frame a record describes; the ledger frame is its ingestion frame."""
+    for value in (payload.get("engine_frame"), payload.get("frame"), (payload.get("observation") or {}).get("frame")
+                  if isinstance(payload.get("observation"), Mapping) else None):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return sim_frame
 
 
 def _json_copy(payload: Any, seq: int) -> Any:

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Synapse Commander — bonded mind</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#101820;color:#f1f4f7}body{max-width:920px;margin:32px auto;padding:0 20px}h1{font-size:30px;margin-bottom:4px}p{color:#b8c9d1;line-height:1.5}button,input,textarea{font:inherit;border:1px solid #476173;border-radius:7px;padding:12px;background:#192a36;color:inherit}button{cursor:pointer;background:#174f52}textarea{display:block;box-sizing:border-box;width:100%;min-height:100px;margin:12px 0}#status{font-size:22px;color:#82ded6;min-height:34px}.cards{display:flex;gap:12px;flex-wrap:wrap}.card{flex:1;min-width:200px;padding:16px;background:#192a36;border-radius:8px}h2{font-size:15px;color:#a8c8d8;margin:0 0 10px}pre{white-space:pre-wrap;font:15px/1.6 system-ui}#error{color:#ffb3a8}small{color:#a8b7c3}.buttons{display:flex;gap:12px;align-items:center}
+</style>
+<h1>Synapse Commander</h1><p>Give your bonded mind an order. It acts through its own view of the world.</p>
+<form id="unlock"><input id="key" type="password" autocomplete="off" placeholder="Session passcode" aria-label="Session passcode"><button>Connect</button></form>
+<main id="panel" hidden><div id="status">Connecting…</div>
+<form id="order"><textarea id="text" maxlength="1000" aria-label="Your order" placeholder="Restore contact with the expedition and guide our mind home."></textarea><div class="buttons"><button>Send order</button><button type="button" id="pause">Pause mind</button></div></form>
+<p><small>Type, paste a Whisper transcript, or use laptop dictation in the order box. Pausing stops new decisions; existing game orders may finish.</small></p>
+<div class="cards"><section class="card"><h2>Mission</h2><pre id="mission">Waiting for the game</pre></section><section class="card"><h2>Available resources</h2><pre id="resources">—</pre></section></div>
+<section class="card" style="margin-top:12px"><h2>Known expedition status</h2><pre id="roster">—</pre></section>
+<p><small id="clock">—</small></p></main><p id="error" role="status"></p>
+<script>
+let key='', timer=null;const el=id=>document.getElementById(id);
+async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+key,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});const data=await r.json();if(!r.ok)throw Error(data.error||'Connection failed');return data;}
+async function refresh(){try{const s=await api('/status'),o=s.observation||{};el('status').textContent=s.status;el('mission').textContent=(o.objective?.status||'In progress')+'\n'+(o.objective?.type||'Over the Hill Rescue');let b=o.budgets;el('resources').textContent=b?'Bodies: '+b.bodies_remaining+'\n'+Object.entries(b.chips||{}).map(([n,v])=>n+': '+v).join('\n'):'Waiting for inventory';el('roster').textContent=(o.roster||[]).map(a=>a.name+' — '+(a.status||'unknown')).join('\n')||'No delivered reports yet';el('clock').textContent='Simulation: '+((o.frame||0)/30).toFixed(1)+' s · Mind calls: '+s.calls+'/'+s.call_budget+' · Human-guided session';el('error').textContent='';}catch(e){el('error').textContent=e.message;}}
+el('unlock').onsubmit=async e=>{e.preventDefault();key=el('key').value;try{await api('/status');el('key').value='';el('unlock').hidden=true;el('panel').hidden=false;await refresh();timer=setInterval(refresh,1000);}catch(e){el('error').textContent=e.message;}};
+el('order').onsubmit=async e=>{e.preventDefault();try{await api('/orders',{text:el('text').value});await refresh();}catch(e){el('error').textContent=e.message;}};
+el('pause').onclick=async()=>{try{await api('/pause',{});await refresh();}catch(e){el('error').textContent=e.message;}};
+</script></html>

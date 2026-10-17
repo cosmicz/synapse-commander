@@ -1009,8 +1009,8 @@ class Classification(LedgerCase):
 TWO = dict(principals=["commander", "M1"], principal_sources={"commander": "scripted", "M1": "scripted"})
 
 
-class PrincipalStreams(LedgerCase):
-    """rah26-mmn per-principal views: streams, citations, labels (rah26-b3i)."""
+class PrincipalLedgerCase(LedgerCase):
+    """Helpers for two-principal ledgers."""
 
     def obs(self, r, principal, obs_id, frame=0):
         return r.record(rec.OBSERVATION, sim_frame=frame, origin="gateway",
@@ -1050,6 +1050,10 @@ class PrincipalStreams(LedgerCase):
         with self.assertRaises(LedgerError) as ctx:
             fn()
         self.assertEqual(ctx.exception.code, code)
+
+
+class PrincipalStreams(PrincipalLedgerCase):
+    """rah26-mmn per-principal views: streams, citations, labels (rah26-b3i)."""
 
     def test_two_streams_verify_with_separate_labels(self):
         self.two_streams()
@@ -1344,6 +1348,85 @@ class PrincipalStreams(LedgerCase):
         self.assertEqual(result.principal_classifications["commander"], "scripted_replay")
         self.assertIn("principal commander declared agent but its evidence classifies as scripted_replay", result.evidence_limits)
         self.assertFalse(result.autonomous)
+
+
+class OutcomeRules(PrincipalLedgerCase):
+    """rah26-kbk K1, K2, K5: a mind is extracted or lost once, never both, then acts no more."""
+
+    def outcome(self, r, effect, target, viewer, frame):
+        cause = r.record(rec.SCENARIO_EVENT, sim_frame=frame, origin="scenario", payload={"name": f"{effect}-cause"})
+        return r.record(rec.EFFECT, sim_frame=frame, origin="engine",
+                        payload={"type": effect, "principal": viewer, "frame": frame,
+                                 "detail": {"target": target, "unit_id": 991}}, causes=[cause])
+
+    def m1_extracted(self, frame=10):
+        r, ids = self.two_streams(end=False)
+        for viewer in ("commander", "M1"):
+            self.outcome(r, rec.MIND_EXTRACTED, "M1", viewer, frame)
+        return r, ids
+
+    def test_extracted_and_lost_controls_verify(self):
+        for effect in (rec.MIND_EXTRACTED, rec.MIND_LOST):
+            with self.subTest(effect=effect):
+                self.path.unlink(missing_ok=True)
+                r, _ = self.two_streams(end=False)
+                for viewer in ("commander", "M1"):
+                    self.outcome(r, effect, "M1", viewer, 10)
+                self.obs(r, "M1", "obs-M1-10", frame=10)  # the final observation at the terminal frame
+                r.run_end(11, {})
+                self.assertTrue(verify_ledger(self.path).ok)
+
+    def test_one_extraction_per_viewer_and_target(self):
+        r, _ = self.m1_extracted()
+        self.refused("duplicate_extraction", lambda: self.outcome(r, rec.MIND_EXTRACTED, "M1", "M1", 11))
+        r.close()
+
+    def test_never_both_extracted_and_lost(self):
+        r, _ = self.m1_extracted()
+        self.refused("loss_after_extraction", lambda: self.outcome(r, rec.MIND_LOST, "M1", "commander", 11))
+        r.close()
+        self.path.unlink()
+        r, _ = self.two_streams(end=False)
+        self.outcome(r, rec.MIND_LOST, "M1", "M1", 10)
+        self.refused("extraction_after_loss", lambda: self.outcome(r, rec.MIND_EXTRACTED, "M1", "commander", 11))
+        r.close()
+
+    def test_a_terminal_principal_acts_no_more(self):
+        r, ids = self.m1_extracted(frame=10)
+        self.refused("terminal_principal_observed", lambda: self.obs(r, "M1", "obs-M1-11", frame=11))
+        sub = self.intent(r, "M1", "m-late", "obs-M1-0", [ids["om"]], frame=11)
+        self.refused("terminal_principal_acted", lambda: self.receipt(r, "M1", "m-late", sub, frame=11))
+        self.receipt(r, "M1", "m-late", sub, status="rejected", frame=11)  # a refusal is fine
+        self.obs(r, "commander", "obs-commander-11", frame=11)  # other principals continue
+        r.run_end(12, {})
+        self.assertTrue(verify_ledger(self.path).ok)
+
+    def test_terminal_effects_name_their_target(self):
+        r, _ = self.two_streams(end=False)
+        cause = r.record(rec.SCENARIO_EVENT, sim_frame=3, origin="scenario", payload={"name": "x"})
+        for detail in (None, {}, {"target": ["M1"]}):
+            with self.subTest(detail=detail):
+                self.refused("invalid_payload", lambda detail=detail: r.record(
+                    rec.EFFECT, sim_frame=3, origin="engine",
+                    payload={"type": rec.MIND_LOST, "principal": "M1", "detail": detail}, causes=[cause]))
+        r.close()
+
+    def test_rewritten_duplicate_extraction_fails_verification(self):
+        r, _ = self.m1_extracted()
+        r.run_end(11, {})
+
+        def duplicate(rs):
+            out = []
+            for record in rs:
+                out.append(record)
+                if record["kind"] == rec.EFFECT and record["payload"].get("type") == rec.MIND_EXTRACTED \
+                        and record["payload"]["principal"] == "M1":
+                    out.append(json.loads(json.dumps(record)) | {"event_id": "dup"})
+            return out
+        self.rewrite(duplicate)
+        result = verify_ledger(self.path)
+        self.assertFalse(result.ok)
+        self.assertIn("duplicate_extraction", result.errors[0])
 
 
 class SensitiveContent(LedgerCase):
