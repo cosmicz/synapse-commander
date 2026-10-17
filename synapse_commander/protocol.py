@@ -577,6 +577,19 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
         if isinstance(reports, list):
             normalized_reports = []
             for report in reports:
+                # The engine records delivery timing for the initial distress
+                # packet too.  It is bounded provenance, not part of the
+                # public historical-report shape; validate it and remove it
+                # before the shared roster and principal projections enforce
+                # their exact public fields.
+                if isinstance(report, Mapping) and report.get("kind") == "distress" and "delivered_frame" in report:
+                    delivered = report.get("delivered_frame")
+                    if (set(report) != {"kind", "asset", "position", "observed_frame", "delivered_frame",
+                                       "age_frames", "symptom"}
+                            or not isinstance(delivered, int) or isinstance(delivered, bool)
+                            or delivered < 0 or delivered > frame):
+                        raise ProtocolError("invalid_observation", "invalid distress delivery frame")
+                    report = {key: item for key, item in report.items() if key != "delivered_frame"}
                 if (isinstance(report, Mapping) and report.get("kind") == "distress"
                         and "age_frames" not in report and isinstance(report.get("observed_frame"), int)
                         and not isinstance(report.get("observed_frame"), bool)):

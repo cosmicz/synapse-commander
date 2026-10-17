@@ -117,7 +117,7 @@ class GatewayTests(unittest.TestCase):
         finally:
             connection.close(); server.shutdown(); thread.join(); server.server_close()
 
-    def test_session_rejects_principal_mismatch_and_cross_stream_observation(self) -> None:
+    def test_session_observation_allow_list_rejects_cross_stream_and_unserved_ids(self) -> None:
         transport = MemoryTransport(frame=100)
         transport.publish_principal_observation("blue", "commander", observation(
             "obs-commander-100", principal="commander", body={"id": 1, "pos": [0, 0, 0], "source": "own_body"}))
@@ -126,11 +126,65 @@ class GatewayTests(unittest.TestCase):
         gateway = LoopbackGateway(transport, principal="legacy", team="blue", sessions={"c": "commander", "m": "M1"})
         gateway.observation("commander")
         task = {"schema": "IntentEnvelope/v1", "intent_id": "cross", "principal": "M1", "based_on_observation_id": "obs-commander-100", "expires_at_frame": 200, "type": "TASK", "payload": {"unit": "7", "verb": "advance", "args": {}}}
-        with self.assertRaisesRegex(ProtocolError, "another principal"):
+        with self.assertRaisesRegex(ProtocolError, "not served"):
             gateway.submit(task, "M1")
+        # IDs are deterministic, so an id that has never been served must
+        # receive the identical gateway rejection.  Otherwise a client can
+        # tell whether another principal fetched a frame from a 400/409 split.
+        for observation_id in ("obs-commander-130", "obs-M1-130"):
+            task["based_on_observation_id"] = observation_id
+            with self.assertRaisesRegex(ProtocolError, "not served") as error:
+                gateway.submit(task, "M1")
+            self.assertEqual(error.exception.code, "unknown_observation")
         task["principal"] = "commander"
         with self.assertRaisesRegex(ProtocolError, "session principal"):
             gateway.submit(task, "M1")
+
+    def test_session_unserved_ids_have_the_same_gateway_http_rejection(self) -> None:
+        transport = MemoryTransport(frame=100)
+        transport.publish_principal_observation("blue", "commander", observation(
+            "obs-commander-100", principal="commander", body={"id": 1, "pos": [0, 0, 0], "source": "own_body"}))
+        transport.publish_principal_observation("blue", "M1", observation(
+            "obs-M1-100", principal="M1", body={"id": 2, "pos": [1, 0, 0], "source": "own_body"}))
+        server = LoopbackGateway(transport, principal="legacy", team="blue",
+                                 sessions={"commander-token": "commander", "m1-token": "M1"}).make_server()
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+
+        def request(method: str, path: str, *, token: str, body: object | None = None) -> tuple[int, dict[str, object]]:
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+            try:
+                encoded = None if body is None else json.dumps(body).encode()
+                connection.request(method, path, body=encoded,
+                                   headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+                response = connection.getresponse()
+                return response.status, json.loads(response.read())
+            finally:
+                connection.close()
+
+        try:
+            self.assertEqual(request("GET", "/v1/observation", token="commander-token")[0], 200)
+            for observation_id in ("obs-commander-100", "obs-commander-130", "obs-M1-130"):
+                task = {"schema": "IntentEnvelope/v1", "intent_id": f"probe-{observation_id}", "principal": "M1",
+                        "based_on_observation_id": observation_id, "expires_at_frame": 200, "type": "TASK",
+                        "payload": {"unit": "7", "verb": "advance", "args": {}}}
+                status, result = request("POST", "/v1/intents", token="m1-token", body=task)
+                self.assertEqual((status, result["error"]), (400, "unknown_observation"))
+        finally:
+            server.shutdown(); thread.join(); server.server_close()
+
+    def test_session_observation_allow_list_expires_after_engine_window(self) -> None:
+        transport = MemoryTransport(frame=100)
+        transport.publish_principal_observation("blue", "M1", observation(
+            "obs-M1-100", principal="M1", body={"id": 2, "pos": [1, 0, 0], "source": "own_body"}))
+        gateway = LoopbackGateway(transport, principal="legacy", team="blue", sessions={"m": "M1"})
+        gateway.observation("M1")
+        transport.frame = 1001
+        task = {"schema": "IntentEnvelope/v1", "intent_id": "expired-history", "principal": "M1",
+                "based_on_observation_id": "obs-M1-100", "expires_at_frame": 1100, "type": "TASK",
+                "payload": {"unit": "7", "verb": "advance", "args": {}}}
+        with self.assertRaisesRegex(ProtocolError, "not served") as error:
+            gateway.submit(task, "M1")
+        self.assertEqual(error.exception.code, "unknown_observation")
 
     def test_principal_session_requires_the_envelope_principal(self) -> None:
         transport = MemoryTransport(frame=100)

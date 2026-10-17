@@ -43,6 +43,21 @@ def provisioning_observation():
 
 
 class SmokeObservationTests(unittest.TestCase):
+    def test_principal_distress_accepts_engine_delivery_metadata_without_forwarding_it(self):
+        source = engine_observation()
+        body = {"id": 42, "pos": [100, 0, 100], "source": "own_body"}
+        source.update({
+            "principal": "commander", "body": body, "entities": [body],
+            "scenario": {"id": "view_smoke", "version": "1-provisional", "waypoints": {"W1": [1, 0, 1]}},
+            "reports": [{"kind": "distress", "asset": "M1", "position": [5, 0, 6], "observed_frame": -900,
+                         "delivered_frame": 0, "age_frames": 900, "symptom": "no_heartbeat"}],
+        })
+        observed = bounded_observation(source, scenario_table=load_scenario("view_smoke"), principal="commander")
+        self.assertEqual(observed["reports"], [{"kind": "distress", "asset": "M1", "position": [5, 0, 6],
+                                                   "observed_frame": -900, "age_frames": 900,
+                                                   "symptom": "no_heartbeat"}])
+        self.assertNotIn("delivered_frame", observed["reports"][0])
+
     def test_roster_hides_disconnected_identity_and_preserves_historical_distress(self):
         source = engine_observation()
         source.update({

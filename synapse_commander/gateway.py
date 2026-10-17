@@ -23,6 +23,9 @@ from .scenarios import ScenarioError, load_scenario
 from .transport import EngineTransport
 
 
+OBSERVATION_HISTORY_FRAMES = 900
+
+
 class LoopbackGateway:
     """Serve one fixed principal/team on loopback only.
 
@@ -54,9 +57,23 @@ class LoopbackGateway:
             except ScenarioError as error:
                 raise ValueError("scenario_unavailable") from error
         self._observation_events: dict[str, str] = {}
-        self._observation_principals: dict[str, str] = {}
+        # Session-mode submissions are authorized only from an observation
+        # which this gateway has actually handed to that same principal.  Do
+        # not infer authority from a predictable observation id: doing so
+        # would turn the engine's response into an oracle for another
+        # principal's fetch history.
+        self._observation_principals: dict[str, tuple[str, int]] = {}
         self._submission_meta: dict[str, tuple[int | None, str]] = {}
         self._ledger_lock = RLock()
+
+    def _prune_observation_history(self, current_frame: int) -> None:
+        """Keep session observation authority only for the engine freshness window."""
+        cutoff = current_frame - OBSERVATION_HISTORY_FRAMES
+        expired = [observation_id for observation_id, (_principal, frame)
+                   in self._observation_principals.items() if frame < cutoff]
+        for observation_id in expired:
+            self._observation_principals.pop(observation_id, None)
+            self._observation_events.pop(observation_id, None)
 
     def _record_observation(self, observation: dict[str, Any], principal: str) -> None:
         if self.ledger is None:
@@ -115,7 +132,9 @@ class LoopbackGateway:
                       if self._sessions else self.transport.observation_for(self.team))
             observation = bounded_observation(source, scenario_table=self._scenario,
                                               principal=principal if self._sessions else None)
-            self._observation_principals[observation["observation_id"]] = principal
+            if self._sessions:
+                self._prune_observation_history(self.transport.current_frame())
+                self._observation_principals[observation["observation_id"]] = (principal, observation["frame"])
             self._record_observation(observation, principal)
             return observation
 
@@ -125,9 +144,10 @@ class LoopbackGateway:
             if self._sessions and isinstance(value, dict) and value.get("principal") != principal:
                 raise ProtocolError("principal_mismatch", "session principal does not match envelope")
             if self._sessions and isinstance(value, dict):
-                owner = self._observation_principals.get(value.get("based_on_observation_id"))
-                if owner is not None and owner != principal:
-                    raise ProtocolError("unknown_observation", "observation belongs to another principal")
+                self._prune_observation_history(self.transport.current_frame())
+                served = self._observation_principals.get(value.get("based_on_observation_id"))
+                if served is None or served[0] != principal:
+                    raise ProtocolError("unknown_observation", "observation was not served to this principal")
             envelope = IntentEnvelope.from_untrusted(value, principal=principal, team=self.team,
                                                      chassis=None if self._scenario is None else frozenset(self._scenario["chassis"]),
                                                      controllers=None if self._scenario is None else frozenset(self._scenario["chips"]),
