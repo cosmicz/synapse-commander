@@ -347,12 +347,13 @@ class EngineProcess:
                 _signal_group(pgid, signal.SIGKILL)
                 self.proc.wait(timeout=kill_timeout_s)
                 record["signal"] = "SIGKILL"
-        # Reap any straggler left in the group after the leader exited.
+        # Kill any straggler left in the group after the leader exited, then give
+        # the kernel and init a bounded moment to finish and reap it.
         if _group_alive(pgid):
             _signal_group(pgid, signal.SIGKILL)
             record["group_sigkill"] = True
         record["exit"] = self.proc.returncode
-        record["group_alive_after"] = _group_alive(pgid)
+        record["group_alive_after"] = not _wait_group_gone(pgid, GROUP_GONE_TIMEOUT_S)
         record["teardown_s"] = round(time.monotonic() - begin, 3)
         self.teardown = record
         return record
@@ -365,13 +366,38 @@ def _signal_group(pgid: int, sig: int) -> None:
         pass
 
 
+GROUP_GONE_TIMEOUT_S = 1.0
+
+
 def _group_alive(pgid: int) -> bool:
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
+    """True while any process in the group still runs; zombies awaiting reaping do not count."""
+    proc = Path("/proc")
+    if not proc.is_dir():
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
         return True
+    for entry in proc.glob("[0-9]*"):
+        try:
+            stat = (entry / "stat").read_text()
+        except OSError:
+            continue
+        # "pid (comm) state ppid pgrp ...": comm may hold spaces or parentheses.
+        fields = stat[stat.rfind(")") + 2:].split()
+        if len(fields) >= 3 and fields[2] == str(pgid) and fields[0] not in ("Z", "X"):
+            return True
+    return False
+
+
+def _wait_group_gone(pgid: int, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while _group_alive(pgid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
     return True
 
 

@@ -164,6 +164,31 @@ class TeardownTests(unittest.TestCase):
             self.assertFalse(record["group_alive_after"])
             self.assertLess(record["teardown_s"], 5)
 
+    def test_a_group_of_only_zombies_is_not_alive(self) -> None:
+        # The leader exits but is not reaped yet: signals still reach the group,
+        # yet nothing in it runs, so teardown must not report it alive.
+        proc = subprocess.Popen(["true"], start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                state = Path(f"/proc/{proc.pid}/stat").read_text()
+                if state[state.rfind(")") + 2] == "Z":
+                    break
+                time.sleep(0.01)
+            os.killpg(proc.pid, 0)  # still signalable while a zombie
+            self.assertFalse(launch._group_alive(proc.pid))
+        finally:
+            proc.wait()
+        self.assertFalse(launch._group_alive(proc.pid))
+
+    def test_a_running_group_is_alive(self) -> None:
+        proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            self.assertTrue(launch._group_alive(proc.pid))
+        finally:
+            proc.kill()
+            proc.wait()
+
     def test_does_not_signal_unrelated_process(self) -> None:
         bystander = subprocess.Popen(["sleep", "30"], start_new_session=True)
         try:
