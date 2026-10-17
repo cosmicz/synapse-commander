@@ -92,6 +92,7 @@ class LiveMind:
         self._thread = None
         self._began, self._last_frame = time.monotonic(), -100000
         self._used_ids, self._history, self._latest = set(), [], {}
+        self._messages = []
         self._nonce = uuid.uuid4().hex[:12]
         self._status = 'Waiting for an embodied local view'
         self.trace = {'principal': principal, 'calls': 0, 'decisions': [], 'live': True}
@@ -139,6 +140,13 @@ class LiveMind:
             return
         with self._lock:
             self._latest = observation
+            # Delivered reports are transient views. Retain this mind's own
+            # received messages so a delegation survives the next observation.
+            message_key = lambda r: (r.get('from'), r.get('text'), r.get('observed_frame'), r.get('delivered_frame'))
+            for report in observation.get('reports', []):
+                if report.get('kind') == 'message' and message_key(report) not in {message_key(r) for r in self._messages}:
+                    self._messages.append({**copy.deepcopy(report), 'source_observation_id': observation['observation_id']})
+                    self._messages = self._messages[-16:]
             if (observation.get('objective') or {}).get('status') in ('extracted', 'lost', 'timeout', 'no_target'):
                 self._status = 'Mission terminal'
                 self._stop.set()
@@ -158,6 +166,8 @@ class LiveMind:
             generation = self._human_generation
             prompt = json.dumps({'principal': self.principal, 'current_observation': observation,
                                  'own_recent_actions': self._history[-8:], 'next_intent_id': intent_id,
+                                 'remembered_messages': [{**r, 'age_frames': observation['frame'] - r['observed_frame']}
+                                                         for r in self._messages],
                                  'human_order': self._human_order,
                                  'reply_contract': 'One JSON decision. For an intent use next_intent_id, current observation_id and expiry current frame + 600.'},
                                 sort_keys=True)
