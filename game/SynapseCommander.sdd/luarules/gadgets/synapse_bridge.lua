@@ -14,7 +14,7 @@ local PREFIX, MAX_LINE = "SYN0 ", 4096
 if gadgetHandler:IsSyncedCode() then
   -- Keep enough ids to distinguish a stale observation from an unknown one.
   -- The public observation itself remains bounded; this is reducer-only state.
-  local TEAM0, OBS_INTERVAL, MAX_OBSERVATIONS = 0, 15, 128
+  local TEAM0, OBS_INTERVAL, MAX_OBSERVATIONS, MAX_REPORTS = 0, 15, 128, 32
   local observations, observation_order, seen, pending, rate = {}, {}, {}, {}, {}
   local waypoint, scenario_emitted = nil, false
   -- Factory provisioning (rah26-8zp), active only when the synapse_scenario
@@ -32,6 +32,7 @@ if gadgetHandler:IsSyncedCode() then
   local principal_mode, principals, principal_order, unit_principal = false, {}, {}, {}
   local links, delivered_reports, queued_reports, entity_names = {}, {}, {}, {}
   local local_status, factory_name = {}, "F0"
+  local terrain_method = Spring.TraceRayGroundBetweenPositions and "native" or "sampled"
   local effect, body_for_principal
   local scenario_failed = false
 
@@ -167,6 +168,7 @@ if gadgetHandler:IsSyncedCode() then
       local ok, hit = pcall(ray, x1, y1 + 16, z1, x2, y2 + 16, z2)
       -- Recoil returns false/nil for a clear segment and hitDistance for terrain.
       if ok then return hit == nil or hit == false end
+      terrain_method = "sampled"
     end
     local distance = math.sqrt(squared_distance(x1, z1, x2, z2))
     local steps = math.max(1, math.ceil(distance / 16))
@@ -566,7 +568,8 @@ if gadgetHandler:IsSyncedCode() then
       distress = d and { asset = d.asset, symptom = d.symptom, cause_hidden = d.cause_hidden,
                          last_known = reports[1] and reports[1].position, observed_frame = reports[1] and reports[1].observed_frame } or Json.null,
       link_check = link_check,
-      principals = principal_bodies,
+      terrain_occlusion = terrain_method,
+      principal_bodies = principal_bodies,
     }
   end
 
@@ -691,11 +694,18 @@ if gadgetHandler:IsSyncedCode() then
     queued_reports[#queued_reports + 1] = record
   end
 
+  local function remember_report(principal, body)
+    local list = delivered_reports[principal] or {}
+    delivered_reports[principal] = list
+    list[#list + 1] = body
+    while #list > MAX_REPORTS do table.remove(list, 1) end
+  end
+
   local function schedule_status_and_detections(frame)
     if not principal_mode then return end
     for _, source in ipairs(Spring.GetTeamUnits(TEAM0) or {}) do
       local target_principal = principal_for_unit(source)
-      if target_principal and links[source] then
+      if embodied[source] and target_principal and links[source] then
         local observed = { kind = "status", from = entity_names[source] or target_principal,
                            observed_frame = frame, body = entity_for(source, "sensor") }
         queue_report({ due = frame + scenario.comms.latency_frames, from = source, to = target_principal, body = observed })
@@ -721,7 +731,7 @@ if gadgetHandler:IsSyncedCode() then
         if sender and recipient and links[sender] and links[recipient] then
           local body = { kind = "message", from = report.from, text = report.text, observed_frame = report.observed_frame,
                          delivered_frame = frame, age_frames = frame - report.observed_frame }
-          delivered_reports[report.to] = delivered_reports[report.to] or {}; table.insert(delivered_reports[report.to], body)
+          remember_report(report.to, body)
           effect("message_delivered", frame, recipient, report.intent_id, { to = report.to }, report.to)
           effect("message_delivered", frame, sender, report.intent_id, { to = report.to }, report.from)
         else
@@ -730,7 +740,7 @@ if gadgetHandler:IsSyncedCode() then
       elseif links[report.from] then
         local body = report.body
         body.delivered_frame, body.age_frames = frame, frame - body.observed_frame
-        delivered_reports[report.to] = delivered_reports[report.to] or {}; table.insert(delivered_reports[report.to], body)
+        remember_report(report.to, body)
       else
         effect("report_dropped", frame, report.from, nil, { reason = "no_link", from = report.body.from }, report.to)
       end
@@ -884,10 +894,12 @@ if gadgetHandler:IsSyncedCode() then
             end
           end
           table.sort(entities, function(a, b) return a.id < b.id end)
+          local listed_reports = {}
+          for i, report in ipairs(delivered_reports[principal] or {}) do listed_reports[i] = report end
           local body = { schema = "ObservationFrame/v1", principal = principal,
                          observation_id = "obs-" .. principal .. "-" .. frame, team = TEAM0, frame = frame,
                          body = entity_for(bodyID, "own_body"), entities = entities,
-                         reports = delivered_reports[principal] or {}, truncated = false, omitted = 0,
+                         reports = listed_reports, truncated = false, omitted = 0,
                          scenario = { id = scenario.id, version = scenario.version, waypoints = { W1 = waypoint } },
                          permitted_intents = { { type = "TASK", verbs = { "advance" } }, { type = "MESSAGE" } } }
           if principal == "commander" then
@@ -906,6 +918,7 @@ if gadgetHandler:IsSyncedCode() then
             end
             if #reports > 0 then body.reports = body.reports or {}; for _, report in ipairs(reports) do table.insert(body.reports, report) end end
           end
+          while #Json.encode(body) > 32768 and #body.reports > 0 do table.remove(body.reports, 1); body.truncated = true; body.omitted = body.omitted + 1 end
           while #Json.encode(body) > 32768 and #body.entities > 1 do table.remove(body.entities); body.truncated = true; body.omitted = body.omitted + 1 end
           remember_observation(principal, body.observation_id, frame)
           out("observation", body)

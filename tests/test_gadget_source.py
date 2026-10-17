@@ -19,7 +19,7 @@ class GadgetSourceContractTests(unittest.TestCase):
         return self.source.index("if not use_token(principal_mode and principal or teamID, frame)", self.source.index('if intent.type ~= "TASK"'))
 
     def test_stale_ids_survive_past_the_stale_threshold(self) -> None:
-        self.assertIn("MAX_OBSERVATIONS = 0, 15, 128", self.source)
+        self.assertIn("MAX_OBSERVATIONS, MAX_REPORTS = 0, 15, 128, 32", self.source)
         self.assertIn("frame - observation_frame > 900", self.source)
 
     def test_backlog_is_drained_without_another_append(self) -> None:
@@ -271,6 +271,7 @@ class PrincipalViewSourceTests(unittest.TestCase):
         self.assertIn("if ok then return hit == nil or hit == false end", self.source)
         self.assertIn("math.ceil(distance / 16)", self.source)
         self.assertIn("fraction / 0.5", self.source)
+        self.assertIn("terrain_occlusion = terrain_method", self.source)
         self.assertNotIn("Spring.GetUnitLosState", self.source)
         self.assertNotIn("Spring.SetUnitSensorRadius", self.source)
 
@@ -279,7 +280,9 @@ class PrincipalViewSourceTests(unittest.TestCase):
         self.assertIn("body = entity_for(bodyID, \"own_body\")", self.source)
         self.assertIn("body.principal = principal", self.source)
         self.assertIn("if principal_mode and not principal then return end", self.source)
-        self.assertIn("principals = principal_bodies", self.source)
+        self.assertIn("principal_bodies = principal_bodies", self.source)
+        self.assertIn("MAX_OBSERVATIONS, MAX_REPORTS = 0, 15, 128, 32", self.source)
+        self.assertIn("while #list > MAX_REPORTS", self.source)
 
     def test_authority_and_observation_rejections_precede_orders(self) -> None:
         task = self.source[self.source.index('if intent.type ~= "TASK"'):self.source.index("Spring.GiveOrderToUnit")]
