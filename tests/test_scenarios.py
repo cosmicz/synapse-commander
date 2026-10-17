@@ -1,7 +1,7 @@
 """The gadget and gateway read the same bounded public scenario declaration."""
 import unittest
 
-from synapse_commander.scenarios import DEFAULT_SCENARIO, SCENARIO_SCHEMA, load_scenario, supported_chassis, supported_controllers
+from synapse_commander.scenarios import DEFAULT_SCENARIO, SCENARIO_SCHEMA, _validate, load_scenario, supported_chassis, supported_controllers
 
 
 class ScenarioTableTests(unittest.TestCase):
@@ -15,6 +15,12 @@ class ScenarioTableTests(unittest.TestCase):
         self.assertEqual(table["bodies"], 4)
         self.assertEqual(set(table["chips"]), supported_controllers())
         self.assertEqual(set(table["chassis"]), supported_chassis())
+
+    def test_optional_scenario_fields_are_ignored_by_the_public_table_reader(self):
+        table = dict(load_scenario())
+        table["predeployed"] = {"private": True}
+        table["distress"] = {"hidden": True}
+        self.assertEqual(_validate(table, DEFAULT_SCENARIO)["id"], DEFAULT_SCENARIO)
 
 
 if __name__ == "__main__":

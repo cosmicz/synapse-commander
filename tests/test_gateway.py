@@ -7,12 +7,14 @@ import socket
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from synapse_commander.gateway import LoopbackGateway
 from synapse_commander.protocol import IntentReceipt
 from synapse_commander.recording import Recorder, verify_ledger
 from synapse_commander.recording import LedgerError
 from synapse_commander.transport import MemoryTransport
+from synapse_commander.scenarios import ScenarioError
 from tests.test_recording import manifest
 from tests.test_smoke_observation import provisioning_observation
 
@@ -101,6 +103,11 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.server.server_address[0], "127.0.0.1")
         with self.assertRaises(ValueError):
             LoopbackGateway(self.transport, principal="agent-alpha", team="blue").make_server(host="0.0.0.0")
+
+    def test_selected_unavailable_scenario_fails_at_gateway_startup(self) -> None:
+        with patch("synapse_commander.gateway.load_scenario", side_effect=ScenarioError("broken")):
+            with self.assertRaisesRegex(ValueError, "scenario_unavailable"):
+                LoopbackGateway(self.transport, principal="agent-alpha", team="blue", scenario="rescue_smoke")
 
     def test_cross_origin_and_non_json_ingress_are_rejected_before_transport(self) -> None:
         status, body = self.request("POST", "/v1/intents", produce(), {"Origin": "https://evil.example"})
