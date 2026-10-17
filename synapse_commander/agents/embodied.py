@@ -12,13 +12,15 @@ from ..protocol import IntentEnvelope, ProtocolError
 
 
 class LiveClaudeRoute(ClaudeCliRoute):
-    def __init__(self, model, *, system_prompt, **kwargs):
+    def __init__(self, model, *, system_prompt, effort='low', **kwargs):
         super().__init__(model, **kwargs)
         self.system_prompt = system_prompt
+        self.effort = effort
 
     def argv(self, prompt):
         argv = super().argv(prompt)
         argv[argv.index('--system-prompt') + 1] = self.system_prompt
+        argv.extend(['--effort', self.effort])
         return argv
 
 
@@ -64,7 +66,7 @@ def parse_mind_decision(text, observation, principal, principals, used_ids, inte
         if parsed.based_on_observation_id != observation['observation_id']:
             raise ValueError('cite the current observation_id')
         if not observation['frame'] < parsed.expires_at_frame <= observation['frame'] + 900:
-            raise ValueError('expiry must be current frame + 600, at most +900')
+            raise ValueError('expiry must be current frame + 900, at most +900')
         permitted = {p['type']: p for p in observation.get('permitted_intents', [])}
         if parsed.type not in permitted:
             raise ValueError('intent type not permitted in this view')
@@ -93,6 +95,7 @@ class LiveMind:
         self._began, self._last_frame = time.monotonic(), -100000
         self._used_ids, self._history, self._latest = set(), [], {}
         self._messages = []
+        self._last_decision_status = None
         self._nonce = uuid.uuid4().hex[:12]
         self._status = 'Waiting for an embodied local view'
         self.trace = {'principal': principal, 'calls': 0, 'decisions': [], 'live': True}
@@ -166,10 +169,11 @@ class LiveMind:
             generation = self._human_generation
             prompt = json.dumps({'principal': self.principal, 'current_observation': observation,
                                  'own_recent_actions': self._history[-8:], 'next_intent_id': intent_id,
+                                 'last_decision_status': self._last_decision_status,
                                  'remembered_messages': [{**r, 'age_frames': observation['frame'] - r['observed_frame']}
                                                          for r in self._messages],
                                  'human_order': self._human_order,
-                                 'reply_contract': 'One JSON decision. For an intent use next_intent_id, current observation_id and expiry current frame + 600.'},
+                                 'reply_contract': 'One JSON decision. For an intent use next_intent_id, current observation_id and expiry current frame + 900.'},
                                 sort_keys=True)
             self._status = 'Thinking from local observations'
         reply = self.route.call(prompt)
@@ -212,7 +216,7 @@ class LiveMind:
                 self._status = 'Action accepted; watching effects' if http == 202 and receipt.get('accepted') else 'Action refused; reassessing'
             else:
                 self._status = decision.reason or decision.rejected or 'Watching local world'
-                self._history.append({'action': decision.action, 'reason': self._status})
+                self._last_decision_status = {'action': decision.action, 'reason': self._status}
 
     def run(self):
         while not self._stop.is_set() and time.monotonic() - self._began < self.wall_deadline_s:
