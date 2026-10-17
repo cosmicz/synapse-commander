@@ -24,8 +24,13 @@ MAX_PROMPT_CHARS = 65_536
 MAX_SYSTEM_PROMPT_CHARS = 16_384
 DEFAULT_MAX_TOKENS = 512
 # Nemotron on OpenRouter needs reasoning on and room for its reasoning tokens
-# before the decision (a probe used about 400); with reasoning off it emits garbage.
-OPENROUTER_MAX_TOKENS = 1200
+# before the decision; with reasoning off it emits garbage. On the commander's
+# rescue prompt it used all of 1200 on most calls without answering.
+OPENROUTER_MAX_TOKENS = 4096
+# A reasoning budget keeps room for the answer: replayed commander prompts that
+# failed at 1200 answered 3 of 3 with this budget under the 4096 cap.
+OPENROUTER_REASONING = {"enabled": True, "max_tokens": 1500}
+RESERVED_BODY_KEYS = frozenset({"model", "messages", "stream", "max_tokens"})
 USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "cost")
 
 
@@ -74,6 +79,8 @@ class OpenAICompatibleRoute:
             raise ValueError("max_tokens must be an integer in 1..8192")
         self.max_tokens = max_tokens
         self.extra_body = dict(extra_body or {})
+        if RESERVED_BODY_KEYS & set(self.extra_body):
+            raise ValueError("extra_body may not set model, messages, stream or max_tokens")
         self.name, self.model, self.endpoint = name, model, endpoint.rstrip("/")
         self.key_env, self.system_prompt, self.timeout_s = key_env, system_prompt, float(timeout_s)
         self._environment = os.environ if environment is None else environment
@@ -124,6 +131,12 @@ class OpenAICompatibleRoute:
             return ModelReply("", [], _ms_since(begin), raw, error="response has invalid shape")
         reported_model = value.get("model")
         choices = value.get("choices")
+        if (isinstance(reported_model, str) and reported_model and len(reported_model) <= MAX_MODEL_CHARS
+                and isinstance(choices, list) and choices and isinstance(choices[0], dict)
+                and choices[0].get("finish_reason") == "length"):
+            # Reasoning or text hit max_tokens: whatever came back is not a complete decision.
+            return ModelReply("", [reported_model], _ms_since(begin), raw, error="max_tokens exhausted",
+                              usage=_usage(value.get("usage")))
         if (not isinstance(reported_model, str) or not reported_model or len(reported_model) > MAX_MODEL_CHARS
                 or not isinstance(choices, list) or not choices or not isinstance(choices[0], dict)
                 or not isinstance(choices[0].get("message"), dict)
@@ -144,7 +157,7 @@ class OpenRouterRoute(OpenAICompatibleRoute):
                  opener: Callable[..., Any] = _NO_REDIRECT_OPENER) -> None:
         super().__init__(name="openrouter", model=model, endpoint="https://openrouter.ai/api/v1",
                          key_env="OPENROUTER_API_KEY", system_prompt=system_prompt, timeout_s=timeout_s,
-                         max_tokens=max_tokens, extra_body={"reasoning": {"enabled": True}},
+                         max_tokens=max_tokens, extra_body={"reasoning": dict(OPENROUTER_REASONING)},
                          environment=environment, opener=opener)
 
 

@@ -200,7 +200,10 @@ implied by the fake-route tests.
 
 =run-rescue --mode agents --route openrouter= gives every mind an OpenRouter
 route (default model =nvidia/nemotron-3-nano-30b-a3b=, reasoning on,
-=max_tokens= 1200; Nemotron emits unusable text with reasoning off). The run
+=max_tokens= 4096 with a 1500-token reasoning budget; Nemotron emits unusable
+text with reasoning off, and unbudgeted reasoning used all of 1200 or even 4096
+tokens on the commander prompt; a reply cut at the cap is the route error
+=max_tokens exhausted=). The run
 stops before the engine starts if =OPENROUTER_API_KEY= is unset. Each
 inference record carries its route and the provider's reported token counts
 and cost; the verdict's =live_inference_recorded= check sums the cost. The

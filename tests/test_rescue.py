@@ -354,7 +354,7 @@ class RouteSelectionTests(unittest.TestCase):
                            "mind prompt", lambda: self.fail("no fallback to the claude route"))
         self.assertIsInstance(route, OpenRouterRoute)
         self.assertEqual((route.name, route.model, route.system_prompt, route.max_tokens),
-                         ("openrouter", "nvidia/nemotron-3-nano-30b-a3b", "mind prompt", 1200))
+                         ("openrouter", "nvidia/nemotron-3-nano-30b-a3b", "mind prompt", 4096))
         self.assertEqual(live_route(self.config(out), "p", lambda: "claude-route"), "claude-route")
 
     def test_openrouter_without_a_key_stops_before_the_engine_starts(self):

@@ -42,8 +42,8 @@ class OpenAICompatibleRouteTests(unittest.TestCase):
                          ("https://openrouter.ai/api/v1/chat/completions", 7.0))
         self.assertEqual(seen["authorization"], "Bearer test-only-secret")
         self.assertEqual(seen["body"], {
-            "model": "openai/gpt-oss-120b", "stream": False, "max_tokens": 1200,
-            "reasoning": {"enabled": True},
+            "model": "openai/gpt-oss-120b", "stream": False, "max_tokens": 4096,
+            "reasoning": {"enabled": True, "max_tokens": 1500},
             "messages": [{"role": "system", "content": "bonded prompt"},
                          {"role": "user", "content": "current bounded observation"}],
         })
@@ -62,6 +62,24 @@ class OpenAICompatibleRouteTests(unittest.TestCase):
         self.assertIsNone(reply.error)
         self.assertEqual(reply.usage, {"prompt_tokens": 900, "completion_tokens": 450, "total_tokens": 1350,
                                        "cost": 0.0001, "reasoning_tokens": 402})
+
+    def test_reasoning_that_exhausts_max_tokens_is_an_explicit_error(self) -> None:
+        def opener(_wire, *, timeout):
+            return Response({"model": "nvidia/nemotron-3-nano-30b-a3b",
+                             "choices": [{"finish_reason": "length",
+                                          "message": {"content": None, "reasoning": "We need to..."}}],
+                             "usage": {"completion_tokens": 4096, "cost": 0.001}})
+
+        reply = OpenRouterRoute("nvidia/nemotron-3-nano-30b-a3b", system_prompt="p",
+                                environment={"OPENROUTER_API_KEY": "k"}, opener=opener).call("o")
+        self.assertEqual((reply.error, reply.text), ("max_tokens exhausted", ""))
+        self.assertEqual(reply.usage, {"completion_tokens": 4096, "cost": 0.001})
+
+    def test_extra_body_cannot_replace_the_request_core(self) -> None:
+        from synapse_commander.agents.model_routes import OpenAICompatibleRoute
+        with self.assertRaises(ValueError):
+            OpenAICompatibleRoute(name="x", model="m", endpoint="https://x", key_env="K", system_prompt="p",
+                                  extra_body={"model": "other"}, environment={})
 
     def test_max_tokens_is_bounded(self) -> None:
         for bad in (0, 9000, True, 1.5):

@@ -195,6 +195,8 @@ class LiveMind:
                        'route': self.route.name}
             if getattr(reply, 'usage', None):
                 payload['usage'] = reply.usage
+            if reply.error:
+                payload['route_error'] = reply.error
             if envelope:
                 payload.update(intent_id=envelope['intent_id'], decision=label)
             if generation:
