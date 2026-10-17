@@ -97,6 +97,35 @@ class SmokeObservationTests(unittest.TestCase):
         self.assertNotIn("terrain_entrapment", public)
         self.assertNotIn("991", public)
 
+    def test_http_gateway_uses_selected_table_for_rescue_baseline_projection(self):
+        source = engine_observation()
+        source.update({
+            "scenario": {"id": "rescue_baseline", "version": "1-provisional", "waypoints": {"W1": [500, 0, 100]}},
+            "roster": [{"name": "M1", "def": "armck", "controller": "reasoner_small_v1", "status": "no_contact"}],
+            "reports": [{"kind": "distress", "asset": "M1", "position": [2400, 0, 1300], "observed_frame": -900, "age_frames": 900, "symptom": "no_heartbeat"}],
+            "world_init": {"cause_hidden": "terrain_entrapment"},
+        })
+        transport = MemoryTransport(frame=15)
+        transport.publish_observation("0", source)
+        server = LoopbackGateway(transport, principal="smoke", team="0", scenario="rescue_baseline").make_server()
+        thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01))
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+        try:
+            connection.request("GET", "/v1/observation")
+            response = connection.getresponse()
+            observed = json.loads(response.read())
+            self.assertEqual(response.status, 200)
+            self.assertEqual(observed["roster"][0]["status"], "no_contact")
+            self.assertNotIn("unit_id", observed["roster"][0])
+            self.assertEqual(observed["reports"][0]["observed_frame"], -900)
+            self.assertNotIn("world_init", observed)
+        finally:
+            connection.close()
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
     def test_http_client_observes_unit_and_declared_fixed_goal(self):
         transport = MemoryTransport(frame=15)
         transport.publish_observation("0", engine_observation())
