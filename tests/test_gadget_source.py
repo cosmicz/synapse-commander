@@ -55,6 +55,14 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn("<= 16 * 16", self.source)
         self.assertIn("Physical arrival is still terminal", self.source)
 
+    def test_already_arrived_rejects_before_rate_and_empty_queue_finishes(self) -> None:
+        self.assertIn('emit_receipt(intent, "rejected", "already_at_waypoint")', self.source)
+        self.assertIn('detail = { reason = "queue_empty" }', self.source)
+        self.assertLess(
+            self.source.index('emit_receipt(intent, "rejected", "already_at_waypoint")'),
+            self.source.index("if not use_token(teamID, frame)"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

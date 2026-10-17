@@ -189,11 +189,14 @@ if gadgetHandler:IsSyncedCode() then
     if intent.expires_at_frame > frame + 900 then
       emit_receipt(intent, "rejected", "expiry_out_of_range"); return true
     end
+    local x, _, z = Spring.GetUnitPosition(unitID)
+    if x and ((x - waypoint[1]) * (x - waypoint[1]) + (z - waypoint[3]) * (z - waypoint[3]) <= 32 * 32) then
+      emit_receipt(intent, "rejected", "already_at_waypoint"); return true
+    end
     if pending[unitID] then emit_receipt(intent, "rejected", "unit_busy"); return true end
     if not use_token(teamID, frame) then emit_receipt(intent, "rejected", "rate_limited"); return true end
-    local x, _, z = Spring.GetUnitPosition(unitID)
-    Spring.GiveOrderToUnit(unitID, CMD.MOVE, waypoint, 0)
     pending[unitID] = { intent_id = id, last_x = x, last_z = z }
+    Spring.GiveOrderToUnit(unitID, CMD.MOVE, waypoint, 0)
     emit_receipt(intent, "accepted", nil)
     out("effect", { schema = "EffectEvent/v1", effect = "order_started", frame = frame, unit_id = unitID, team = teamID, intent_id = id, detail = { target = waypoint } })
     return true
@@ -202,10 +205,13 @@ if gadgetHandler:IsSyncedCode() then
   function gadget:GameFrame(frame)
     for unitID, command in pairs(pending) do
       local x, _, z = Spring.GetUnitPosition(unitID)
-      if x and ((x - waypoint[1]) * (x - waypoint[1]) + (z - waypoint[3]) * (z - waypoint[3]) <= 16 * 16) then
+      if Spring.GetUnitCommandCount(unitID) == 0 then
+        out("effect", { schema = "EffectEvent/v1", effect = "order_done", frame = frame, unit_id = unitID, team = TEAM0, intent_id = command.intent_id, detail = { reason = "queue_empty" } })
+        pending[unitID] = nil
+      elseif x and ((x - waypoint[1]) * (x - waypoint[1]) + (z - waypoint[3]) * (z - waypoint[3]) <= 16 * 16) then
         -- Reissuing the fixed move while already at W1 may not produce an
         -- engine UnitCmdDone callback. Physical arrival is still terminal.
-        out("effect", { schema = "EffectEvent/v1", effect = "order_done", frame = frame, unit_id = unitID, team = TEAM0, intent_id = command.intent_id })
+        out("effect", { schema = "EffectEvent/v1", effect = "order_done", frame = frame, unit_id = unitID, team = TEAM0, intent_id = command.intent_id, detail = { reason = "arrived" } })
         pending[unitID] = nil
       elseif x and ((x - command.last_x) * (x - command.last_x) + (z - command.last_z) * (z - command.last_z) >= 32 * 32) then
         command.last_x, command.last_z = x, z
