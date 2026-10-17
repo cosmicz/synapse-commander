@@ -318,3 +318,18 @@ class BondedRescueTests(unittest.TestCase):
             self.assertNotIn(token, ledger_text)
             self.assertIn("restore contact with M1", (out / "bonded" / "orders.jsonl").read_text())
             self.assertGreaterEqual(route.calls, 1)
+
+
+class LuaRulesErrorTests(unittest.TestCase):
+    def test_gadget_errors_are_found_and_ui_errors_ignored(self):
+        from synapse_commander.run import luarules_errors
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "engine-stdout.log"
+            log.write_text(
+                "[t=1][f=0000010] Error in Initialize(): [string \"luaui/Widgets/gui_pip.lua\"]:9: nil\n"
+                "[t=2][f=0004747] Error: [LuaRules::RunCallInTraceback] error=2 (LUA_ERRRUN) callin=GameFrame\n"
+                "[t=3][f=0004755] string=\"[Internal Lua error: Call failure] [string \"LuaRules/Gadgets/x.lua\"]:9: y\"\n")
+            found = luarules_errors(log)
+            self.assertEqual(len(found), 2)
+            self.assertTrue(all("LuaRules" in line for line in found))
+            self.assertEqual(luarules_errors(Path(tmp) / "missing.log"), [])

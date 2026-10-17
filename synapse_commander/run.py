@@ -14,6 +14,7 @@ import datetime as _dt
 import hashlib
 import json
 from pathlib import Path
+import re
 import secrets
 import sys
 import threading
@@ -1306,6 +1307,17 @@ def make_bonded(config: SmokeConfig, layout: launch.RunLayout, ordered: OrderedL
                                                out.flush()))
 
 
+_LUARULES_ERROR = re.compile(r'LuaRules::RunCallInTraceback|Internal Lua error.*LuaRules/|Error.*\[string "LuaRules/')
+
+
+def luarules_errors(log_path: Path) -> list[str]:
+    """Synced gadget (LuaRules) error lines in the engine log, with their frame stamps."""
+    if not log_path.exists():
+        return []
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return [line[:240] for line in lines if _LUARULES_ERROR.search(line)]
+
+
 def write_phase_plan(run_dir: Path, trace: dict[str, Any], verdict: dict[str, Any]) -> None:
     """Phase labels with simulation time for the rendered capture's edit."""
     phases = trace.get("phases")
@@ -1384,6 +1396,9 @@ def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedg
                                               "engine_hello": echoed}
     if mode == "rescue":
         write_phase_plan(layout.run_dir, trace, verdict)
+        errors = luarules_errors(layout.stdout_path)
+        # A gadget error is drawn on screen in rendered runs; such a run never passes.
+        checks["no_luarules_errors"] = {"ok": not errors, "count": len(errors), "first": errors[:3]}
     verdict["checks"] = checks
     verdict["failed_checks"] = sorted(name for name, c in checks.items() if not c["ok"])
     verdict["verdict"] = "PASS" if not verdict["failed_checks"] and not verdict.get("error") else "FAIL"
