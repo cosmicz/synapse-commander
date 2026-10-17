@@ -82,7 +82,8 @@ class ClaudeCliRoute:
 
     def argv(self, prompt: str) -> list[str]:
         return [self.executable, "-p", prompt, "--output-format", "json", "--model", self.model,
-                "--system-prompt", SYSTEM_PROMPT, "--tools", "", "--strict-mcp-config", "--no-session-persistence"]
+                "--system-prompt", SYSTEM_PROMPT, "--tools", "", "--safe-mode",
+                "--strict-mcp-config", "--no-session-persistence"]
 
     def call(self, prompt: str) -> ModelReply:
         begin = time.monotonic()
