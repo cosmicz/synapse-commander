@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import math
 import re
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -232,6 +233,38 @@ def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
     }
     if not isinstance(result["resources"], dict):
         raise ProtocolError("invalid_observation", "resources must be an object")
+    # The smoke client needs its declared fixed goal, not the engine's private
+    # scenario table. Copy only this public, typed field before the size check.
+    scenario = value.get("scenario", {})
+    if not isinstance(scenario, Mapping):
+        raise ProtocolError("invalid_observation", "scenario must be an object")
+    waypoints = scenario.get("waypoints", {})
+    if not isinstance(waypoints, Mapping):
+        raise ProtocolError("invalid_observation", "waypoints must be an object")
+    if "W1" in waypoints:
+        goal = waypoints["W1"]
+        valid = isinstance(goal, list) and len(goal) == 3
+        if valid:
+            try:
+                valid = all(type(n) in (int, float) and math.isfinite(n) for n in goal)
+            except OverflowError:
+                valid = False
+        if not valid:
+            raise ProtocolError("invalid_observation", "W1 must contain three finite coordinates")
+        result["scenario"] = {"waypoints": {"W1": list(goal)}}
+    permitted = value.get("permitted_intents", [])
+    if not isinstance(permitted, list) or len(permitted) > 16:
+        raise ProtocolError("invalid_observation", "invalid permitted intents")
+    result["permitted_intents"] = []
+    for intent in permitted:
+        if not isinstance(intent, Mapping):
+            raise ProtocolError("invalid_observation", "invalid permitted intent")
+        verbs = intent.get("verbs", [])
+        if not isinstance(verbs, list):
+            raise ProtocolError("invalid_observation", "invalid permitted verbs")
+        if intent.get("type") == "TASK" and "advance" in verbs:
+            result["permitted_intents"] = [{"type": "TASK", "verbs": ["advance"]}]
+            break
     if len(compact_json(result)) > MAX_OBSERVATION_BYTES:
         raise ProtocolError("observation_too_large", "transport observation exceeds public cap")
     return result
