@@ -36,7 +36,7 @@ from .agents.rescue import RescuePlay, RescueRehearsal, rescue_points
 from .agents.commander import SYSTEM_PROMPT, AgentCommander, ClaudeCliRoute, displacement_after_receipt
 from .gateway import LoopbackGateway
 from .scenarios import ScenarioError, load_scenario
-from .recording import EFFECT, INTENT_RECEIPT, Recorder, verify_ledger
+from .recording import PRINCIPAL_SOURCES, EFFECT, INTENT_RECEIPT, Recorder, verify_ledger
 
 
 SCENARIO = {"id": "loop0-advance-smoke", "version": "0", "seed": 1}
@@ -342,7 +342,7 @@ def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, iden
         "required_decisions": required_decisions or [],
     }
     if principal_sources is not None:
-        if set(principal_sources) != set(declared_principals) or any(source not in {"scripted", "agent"} for source in principal_sources.values()):
+        if set(principal_sources) != set(declared_principals) or any(source not in PRINCIPAL_SOURCES for source in principal_sources.values()):
             raise ValueError("principal_sources must name every declared principal")
         manifest["principal_sources"] = dict(principal_sources)
     return manifest
@@ -478,13 +478,13 @@ def run_smoke(config: SmokeConfig, *,
                               "route": getattr(model_route, "name", "claude-cli")},
             required_decisions=[{"label": "advance_to_W1", "type": "TASK"}])
     elif view or rescue:
-        # A person at the prompt is not a declarable principal source (scripted or
-        # agent); play runs mark the commander's intents human in the ledger instead.
+        # In play a person commands the commander; its intents carry origin human.
         manifest = build_manifest(
             run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit, identity=identity,
             config_hashes=config_hashes, presentation=presentation, scenario=scenario_identity(table),
             principals=view_principals,
-            principal_sources=None if play else {name: "scripted" for name in view_principals},
+            principal_sources={name: ("human" if play and name == "commander" else "scripted")
+                               for name in view_principals},
         )
     else:
         manifest = build_manifest(run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit,
