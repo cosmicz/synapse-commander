@@ -23,6 +23,12 @@ if gadgetHandler:IsSyncedCode() then
   local SCENARIO_LIMIT, MAX_JOBS = 16384, 8
   local scenario, budgets, commander, factory = nil, nil, nil, nil
   local jobs, job_seq, job_spawning, embodied, commander_lost = {}, 0, nil, {}, false
+  -- Initial world (rah26-5hf).  assets holds the engine-internal truth about
+  -- each predeployed asset; hidden marks team units the team has no contact
+  -- with, which are never reported, and reports holds what the team received.
+  local assets, asset_order, hidden, reports = {}, {}, {}, {}
+  local spawning_hidden = false
+  local HIDDEN_SENSORS = { "los", "airLos", "radar", "sonar", "seismic" }
   local scenario_failed = false
 
   local function identifier(value)
@@ -71,6 +77,37 @@ if gadgetHandler:IsSyncedCode() then
     if kinds < 1 or kinds > 8 then return nil, "invalid_chassis" end
     local w1 = type(t.waypoints) == "table" and t.waypoints.W1
     if type(w1) ~= "table" or type(w1[1]) ~= "number" or type(w1[3]) ~= "number" then return nil, "invalid_waypoint" end
+    -- Optional initial-world fields.  The table is the fully chosen world for
+    -- its (id, version, seed): the gadget draws no randomness of its own.
+    if t.seed ~= nil and not count(t.seed) then return nil, "invalid_seed" end
+    local names, bodies_needed, chips_needed = {}, 1, { [t.commander.chip] = 1 }
+    if t.predeployed ~= nil then
+      if type(t.predeployed) ~= "table" or #t.predeployed > 8 then return nil, "invalid_predeployed" end
+      for _, a in ipairs(t.predeployed) do
+        if type(a) == "table" and a.controller == Json.null then a.controller = nil end
+        if type(a) ~= "table" or not identifier(a.name) or names[a.name] or not identifier(a.def) or not UnitDefNames[a.def]
+          or (a.controller ~= nil and (not identifier(a.controller) or t.chips[a.controller] == nil))
+          or not offset_pair(a.position) or (a.state ~= "active" and a.state ~= "destroyed") or type(a.contact) ~= "boolean"
+          or (a.health ~= nil and (type(a.health) ~= "number" or a.health <= 0 or a.health > 1)) then
+          return nil, "invalid_predeployed"
+        end
+        names[a.name] = true
+        bodies_needed = bodies_needed + 1
+        if a.controller then chips_needed[a.controller] = (chips_needed[a.controller] or 0) + 1 end
+      end
+    end
+    -- Every deployed body and chip comes out of the declared inventory.
+    if bodies_needed > t.bodies then return nil, "inventory_insufficient" end
+    for chip, n in pairs(chips_needed) do
+      if n > t.chips[chip] then return nil, "inventory_insufficient" end
+    end
+    local d = t.distress
+    if d ~= nil then
+      if type(d) ~= "table" or not names[d.asset] or type(d.last_known) ~= "table" or not offset_pair(d.last_known.position)
+        or not count(d.last_known.age_frames) or not identifier(d.symptom) or not identifier(d.cause_hidden) then
+        return nil, "invalid_distress"
+      end
+    end
     return t
   end
 
@@ -121,6 +158,7 @@ if gadgetHandler:IsSyncedCode() then
   end
 
   local function visible_source(unitID, teamID, allyTeam)
+    if hidden[unitID] then return nil end
     if teamID == TEAM0 then return "own_unit" end
     local state = Spring.GetUnitLosState(unitID, allyTeam, false)
     if state and state.los then return "los" end
@@ -266,6 +304,71 @@ if gadgetHandler:IsSyncedCode() then
     effect("factory_job_done", frame, factory.unit_id, job.intent_id, { job_id = job.job_id, unit_id = unitID })
   end
 
+  -- A predeployed asset debits one body and its chip whatever its state; a
+  -- destroyed one is lost before the run and is not spawned.  An asset out of
+  -- contact is a real team unit that is never reported to the team.
+  local function spawn_asset(a, x, z)
+    budgets.bodies_remaining = budgets.bodies_remaining - 1
+    if a.controller then budgets.chips[a.controller] = budgets.chips[a.controller] - 1 end
+    local ax, az = x + a.position[1], z + a.position[2]
+    local record = { name = a.name, def = a.def, controller = a.controller, state = a.state, contact = a.contact,
+                     position = { ax, Spring.GetGroundHeight(ax, az), az } }
+    assets[a.name] = record
+    asset_order[#asset_order + 1] = a.name
+    -- A loss the team witnessed before the run is legitimately known.
+    record.known_lost = a.state ~= "active" and a.contact
+    if a.state ~= "active" then return end
+    spawning_hidden = not a.contact
+    local unitID = Spring.CreateUnit(a.def, ax, record.position[2], az, 0, TEAM0)
+    spawning_hidden = false
+    if not unitID then
+      record.state = "spawn_failed"
+      out("bridge_error", { reason = "predeployed_spawn_failed", asset = a.name })
+      return
+    end
+    record.unit_id = unitID
+    if not a.contact then
+      -- Its own sensors must not light up the team's view either, or nearby
+      -- foreign units would reveal where it really is.
+      for _, sensor in ipairs(HIDDEN_SENSORS) do Spring.SetUnitSensorRadius(unitID, sensor, 0) end
+    end
+    if a.controller then embodied[unitID] = a.controller end
+    if a.health then
+      local _, max_health = Spring.GetUnitHealth(unitID)
+      if max_health then Spring.SetUnitHealth(unitID, max_health * a.health) end
+    end
+  end
+
+  -- Evaluator-only truth, recorded before play: never part of an observation.
+  local function world_init_record(frame)
+    local truth, deployed, lost = {}, { bodies = commander and 1 or 0, chips = {} }, { bodies = 0, chips = {} }
+    if commander then deployed.chips[commander.chip] = 1 end
+    for i, name in ipairs(asset_order) do
+      local a = assets[name]
+      truth[i] = { name = name, def = a.def, controller = a.controller or Json.null, state = a.state, contact = a.contact,
+                   unit_id = a.unit_id or Json.null, position = a.position }
+      local bucket = a.state == "active" and deployed or lost
+      bucket.bodies = bucket.bodies + 1
+      if a.controller then bucket.chips[a.controller] = (bucket.chips[a.controller] or 0) + 1 end
+    end
+    local inventory = { bodies = { total = scenario.bodies, deployed = deployed.bodies, lost = lost.bodies,
+                                   available = budgets.bodies_remaining }, chips = {} }
+    local consistent = scenario.bodies == deployed.bodies + lost.bodies + budgets.bodies_remaining
+    for chip, total in pairs(scenario.chips) do
+      local d, l = deployed.chips[chip] or 0, lost.chips[chip] or 0
+      inventory.chips[chip] = { total = total, deployed = d, lost = l, available = budgets.chips[chip] }
+      consistent = consistent and total == d + l + budgets.chips[chip]
+    end
+    local d = scenario.distress
+    return {
+      name = "world_init", id = scenario.id, version = scenario.version, seed = scenario.seed or Json.null, frame = frame,
+      commander = commander and { unit_id = commander.unit_id, chip = commander.chip } or Json.null,
+      assets = truth, inventory = inventory, inventory_consistent = consistent,
+      distress = d and { asset = d.asset, symptom = d.symptom, cause_hidden = d.cause_hidden,
+                         last_known = reports[1] and reports[1].position, observed_frame = reports[1] and reports[1].observed_frame } or Json.null,
+    }
+  end
+
   local function start_factory_scenario(name, x, z)
     local loaded, problem = load_scenario(name)
     if not loaded then
@@ -292,6 +395,16 @@ if gadgetHandler:IsSyncedCode() then
     factory.unit_id = Spring.CreateUnit(f.def, fx, Spring.GetGroundHeight(fx, fz), fz, 0, TEAM0)
     if not factory.unit_id then out("bridge_error", { reason = "factory_spawn_failed" }) end
     for _, unitID in ipairs(Spring.GetTeamUnits(TEAM0) or {}) do bind_commander(unitID) end
+    for _, a in ipairs(scenario.predeployed or {}) do spawn_asset(a, x, z) end
+    local frame, d = Spring.GetGameFrame(), scenario.distress
+    if d then
+      -- The team starts with this already received, aged report and nothing else
+      -- about the asset; the cause stays in the evaluator-only record.
+      local px, pz = x + d.last_known.position[1], z + d.last_known.position[2]
+      reports[1] = { kind = "distress", asset = d.asset, position = { px, Spring.GetGroundHeight(px, pz), pz },
+                     observed_frame = frame - d.last_known.age_frames, symptom = d.symptom }
+    end
+    out("scenario", world_init_record(frame))
     return true
   end
 
@@ -302,7 +415,7 @@ if gadgetHandler:IsSyncedCode() then
     local hello_scenario
     if opts.synapse_scenario and opts.synapse_scenario ~= "" then
       if not start_factory_scenario(opts.synapse_scenario, x, z) then return end
-      hello_scenario = { id = scenario.id, version = scenario.version, waypoints = { W1 = waypoint } }
+      hello_scenario = { id = scenario.id, version = scenario.version, seed = scenario.seed, waypoints = { W1 = waypoint } }
     else
       waypoint = { x + 400, Spring.GetGroundHeight(x + 400, z), z }
       -- Scenario is the citable cause and must be emitted before this gadget
@@ -385,7 +498,9 @@ if gadgetHandler:IsSyncedCode() then
       emit_receipt(intent, "rejected", "verb_not_supported"); return true
     end
     local unitID = tonumber(payload.unit or payload.unit_id)
-    if not unitID or unitID % 1 ~= 0 or not Spring.ValidUnitID(unitID) then
+    -- A unit out of contact answers exactly like a missing one, so probing ids
+    -- cannot confirm that it exists.
+    if not unitID or unitID % 1 ~= 0 or not Spring.ValidUnitID(unitID) or hidden[unitID] then
       emit_receipt(intent, "rejected", "unknown_unit"); return true
     end
     if Spring.GetUnitTeam(unitID) ~= teamID then emit_receipt(intent, "rejected", "not_owned"); return true end
@@ -480,6 +595,27 @@ if gadgetHandler:IsSyncedCode() then
                       started_frame = job.started_frame, done_frame = job.done_frame }
       end
       body.factories = { { name = factory.name, unit_id = factory.unit_id or Json.null, jobs = listed } }
+      if #asset_order > 0 then
+        -- What the team legitimately knows about its own deployed assets: their
+        -- identity, and contact or an observed loss, never their hidden state.
+        local roster = {}
+        for i, name in ipairs(asset_order) do
+          local a = assets[name]
+          local live = a.unit_id and not hidden[a.unit_id] and Spring.ValidUnitID(a.unit_id)
+          local status = live and "in_contact" or (a.known_lost and "lost" or "no_contact")
+          roster[i] = { name = name, def = a.def, controller = a.controller or Json.null, status = status,
+                        unit_id = live and a.unit_id or nil }
+        end
+        body.roster = roster
+      end
+      if #reports > 0 then
+        local listed_reports = {}
+        for i, r in ipairs(reports) do
+          listed_reports[i] = { kind = r.kind, asset = r.asset, position = r.position, symptom = r.symptom,
+                                observed_frame = r.observed_frame, age_frames = frame - r.observed_frame }
+        end
+        body.reports = listed_reports
+      end
     end
     while #Json.encode(body) > 32768 and #entities > 0 do table.remove(entities); body.truncated = true; body.omitted = body.omitted + 1 end
     remember_observation(TEAM0, id, frame)
@@ -489,6 +625,8 @@ if gadgetHandler:IsSyncedCode() then
   function gadget:UnitCreated(unitID, _, teamID)
     -- A factory job reports its own unit_created carrying the controller id.
     if job_spawning then return end
+    -- An asset spawned out of contact is never reported, not even its creation.
+    if spawning_hidden then hidden[unitID] = true; return end
     if scenario_emitted and can_emit_effect(unitID, teamID) then out("effect", { schema = "EffectEvent/v1", effect = "unit_created", frame = Spring.GetGameFrame(), unit_id = unitID, team = teamID }) end
     bind_commander(unitID)
   end
@@ -506,6 +644,12 @@ if gadgetHandler:IsSyncedCode() then
     if can_emit_effect(unitID, teamID) then out("effect", { schema = "EffectEvent/v1", effect = "unit_destroyed", frame = Spring.GetGameFrame(), unit_id = unitID, team = teamID, intent_id = command and command.intent_id }) end
     pending[unitID] = nil
     embodied[unitID] = nil
+    for _, name in ipairs(asset_order) do
+      local a = assets[name]
+      -- The truth changes either way; the team learns of it only from contact.
+      if a.unit_id == unitID then a.state, a.known_lost = "destroyed", not hidden[unitID] end
+    end
+    hidden[unitID] = nil
     if commander and commander.unit_id == unitID then commander, commander_lost = nil, true end
     if factory and factory.unit_id == unitID then factory.unit_id = nil end
   end
