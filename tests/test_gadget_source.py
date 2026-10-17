@@ -282,10 +282,11 @@ class BaselineFixtureTests(unittest.TestCase):
         self.assertLessEqual(need_bodies, t["bodies"])
         for chip, n in need_chips.items():
             self.assertLessEqual(n, t["chips"][chip])
-        # Expected start: 2 bodies and one fixed chip left for production.
+        # Expected start (v6): 2 bodies, one fixed chip and one spare reasoning
+        # chip left for production, so the commander can manufacture a mind.
         self.assertEqual(t["bodies"] - need_bodies, 2)
         self.assertEqual({c: t["chips"][c] - need_chips.get(c, 0) for c in t["chips"]},
-                         {"reasoner_large_v1": 0, "reasoner_small_v1": 0, "escort_fixed_v1": 1})
+                         {"reasoner_large_v1": 0, "reasoner_small_v1": 1, "escort_fixed_v1": 1})
 
     def test_assets_and_distress_are_constrained_data(self) -> None:
         t = self.table

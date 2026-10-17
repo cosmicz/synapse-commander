@@ -34,7 +34,9 @@ class ScenarioTableTests(unittest.TestCase):
 
     def test_rescue_baseline_declares_the_kbk_min_extraction_and_timeout(self):
         table = load_scenario("rescue_baseline")
-        self.assertEqual(table["version"], "5-provisional")
+        self.assertEqual(table["version"], "6-provisional")
+        # One spare reasoning chip so the commander can manufacture a subordinate mind.
+        self.assertEqual(table["chips"], {"reasoner_large_v1": 1, "reasoner_small_v1": 2, "escort_fixed_v1": 3})
         self.assertEqual(table["extraction_zones"], {"extraction_v1": {"position": [-752, 896], "radius": 160, "dwell_frames": 150}})
         self.assertEqual(table["mission"], {"timeout_frames": 12000})
         self.assertEqual(table["objective"], {"type": "rescue_return", "target": "M1", "extraction": "extraction_v1"})
