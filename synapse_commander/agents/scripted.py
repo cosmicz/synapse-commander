@@ -137,13 +137,13 @@ class ScriptedSmoke:
 
     def run(self) -> dict[str, Any]:
         # 1. First observation with one owned unit and the scenario waypoint.
-        first = self.wait_observation(
-            lambda o: bool(_own_units(o)) and "W1" in (o.get("scenario") or {}).get("waypoints", {}),
-            "an owned unit and waypoint W1")
+        first = self.wait_observation(lambda o: bool(_own_units(o)), "an owned unit")
         unit = _own_units(first)[0]
         p0 = unit["pos"]
-        w1 = first["scenario"]["waypoints"]["W1"]
+        # The fixed advance goal; its absence fails the verdict but not the run.
+        w1 = ((first.get("scenario") or {}).get("waypoints") or {}).get("W1")
         self.trace.update(first_observation=first, unit_id=unit["id"], p0=p0, w1=w1)
+        self.trace["first_observation_keys"] = sorted(first)
         self._step("observed_unit", frame=first["frame"], observation_id=first["observation_id"])
 
         # 2. The one valid intent: advance the owned unit to its fixed waypoint.

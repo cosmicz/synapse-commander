@@ -38,6 +38,7 @@ ADAPTER_VERSION = "synapse-mailbox/0+gateway/v1"
 PRINCIPAL = "scripted-reference"
 TEAM = "0"
 FPS = 30
+ORDER_DONE_LIMIT_FRAMES = 600
 CLASSIFICATION_LABEL = "scripted fixture: headless, scripted reference client, not autonomous, not visual"
 
 
@@ -122,7 +123,9 @@ class OrderedLedger:
                causes: tuple[str, ...] | list[str]) -> str:
         frame = sim_frame
         if frame < self.last_frame:
+            # Ledger time is the frame of ingestion; keep the source frame visible.
             self.clamped.append({"kind": kind, "requested": sim_frame, "written": self.last_frame})
+            payload = {**payload, "source_frame": sim_frame}
             frame = self.last_frame
         event_id = self.recorder.record(kind, sim_frame=frame, origin=origin, payload=payload, causes=list(causes))
         self.last_frame = frame
@@ -155,7 +158,8 @@ class OrderedLedger:
         kind = event.get("kind")
         body = event.get("body") if isinstance(event.get("body"), dict) else {}
         frame = int(event.get("frame", 0))
-        meta = {"engine_seq": event.get("seq"), "engine_kind": kind, "engine_ms": event.get("engine_ms")}
+        meta = {"engine_seq": event.get("seq"), "engine_kind": kind, "engine_ms": event.get("engine_ms"),
+                "engine_frame": frame}
         if kind == "hello":
             self.hello = body
             self._clock = self._write("CLOCK_MODE", sim_frame=frame, origin="engine",
@@ -201,7 +205,7 @@ class SmokeConfig:
     rig_commit: str | None = None
     run_id: str = field(default_factory=new_run_id)
     allow_dirty: bool = False
-    hello_timeout_s: float = 180.0
+    hello_timeout_s: float = 120.0
     client_timeout_s: float = 120.0
     lock_wait_s: float = 1200.0
 
@@ -258,7 +262,7 @@ def run_smoke(config: SmokeConfig, *,
     script = launch.start_script(run_id=run_id)
     settings = launch.engine_settings()
     layout.write_config(script, settings)
-    mailbox_dir = layout.mailbox_dir(run_id)
+    mailbox_dir = layout.mailbox_dir
     mailbox_dir.mkdir(parents=True, exist_ok=True)
 
     config_hashes = {"start_script": sha256_text(script),
@@ -479,8 +483,13 @@ def ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -> dict[
     checks["ledger_causal_order"] = {"ok": ordered_ok and cites,
                                      "seqs": dict(zip(["submitted", "receipt", "order_started", "moved_observation"], seqs)),
                                      "effect_cites_receipt": cites}
-    checks["order_done_effect"] = {"ok": bool(done), "count": len(done),
-                                   "frame": done[0]["payload"].get("frame") if done else None}
+    receipt_frame = (trace.get("advance_receipt") or {}).get("frame")
+    done_frame = done[0]["payload"].get("engine_frame") if done else None
+    checks["order_done_effect"] = {
+        "ok": bool(done) and receipt_frame is not None and done_frame is not None
+        and 0 <= int(done_frame) - int(receipt_frame) <= ORDER_DONE_LIMIT_FRAMES,
+        "count": len(done), "engine_frame": done_frame, "receipt_frame": receipt_frame,
+        "limit_frames": ORDER_DONE_LIMIT_FRAMES}
     probe_ids = [p.get("intent_id") for p in trace.get("probes", []) if p.get("intent_id")]
     leaked = {pid: [r["seq"] for r in by_kind_intent.get(("EFFECT", str(pid)), [])] for pid in probe_ids}
     accepted = {pid: [r["seq"] for r in by_kind_intent.get(("INTENT_RECEIPT", str(pid)), [])

@@ -211,8 +211,10 @@ class RunLayout:
     def settings_path(self) -> Path:
         return self.write_dir / "springsettings.cfg"
 
-    def mailbox_dir(self, run_id: str) -> Path:
-        return self.write_dir / "synapse" / check_run_id(run_id)
+    @property
+    def mailbox_dir(self) -> Path:
+        """synapse-mailbox/0 directory; the engine resolves synapse/ in its write dir."""
+        return self.write_dir / "synapse"
 
     @property
     def stdout_path(self) -> Path:
