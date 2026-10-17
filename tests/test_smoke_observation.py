@@ -128,3 +128,9 @@ class SmokeObservationTests(unittest.TestCase):
         source = provisioning_observation()
         source["factories"][0]["jobs"][0]["done_frame"] = None
         self.assertIsNone(bounded_observation(source)["factories"][0]["jobs"][0]["done_frame"])
+
+    def test_foreign_entity_controller_is_not_exposed(self):
+        source = provisioning_observation()
+        source["entities"].append({"id": 99, "pos": [1, 0, 1], "source": "los", "controller": "reasoner_large_v1"})
+        foreign = next(item for item in bounded_observation(source)["entities"] if item["id"] == 99)
+        self.assertNotIn("controller", foreign)
