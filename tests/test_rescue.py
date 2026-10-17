@@ -379,6 +379,27 @@ class RouteSelectionTests(unittest.TestCase):
         self.assertEqual(build_parser().parse_args(base).route, "claude")
 
 
+class AgentsAutonomyTests(unittest.TestCase):
+    def test_an_agent_only_ledger_does_not_fail_an_agents_run(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from synapse_commander import run
+        verification = SimpleNamespace(ok=True, status="complete", errors=[], classification="agent_only",
+                                       principal_classifications={"commander": "agent_only"}, autonomous=True,
+                                       evidence_limits=[], counts={}, records=[])
+        for agents, name in ((True, "autonomy_as_classified"), (False, "not_autonomous")):
+            with tempfile.TemporaryDirectory() as tmp:
+                ledger = Path(tmp) / "ledger.jsonl"
+                ledger.write_text("")
+                trace = {"agents": True, "minds": {}, "outcome": "extracted"} if agents else {"phases": []}
+                verdict = {"checks": {}}
+                with mock.patch.object(run, "verify_ledger", return_value=verification):
+                    run._finish(verdict, trace, None, ledger, launch.RunLayout(Path(tmp)), mode="rescue")
+                checks = verdict["checks"]
+                self.assertIn(name, checks)
+                self.assertEqual(checks[name]["ok"], agents)
+
+
 class AgentsOrdersTests(unittest.TestCase):
     def test_orders_reach_only_the_commander_mind_and_are_interventions(self):
         import re

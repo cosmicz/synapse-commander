@@ -1473,9 +1473,15 @@ def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedg
                                         "classification": verification.classification}
         elif mode == "rescue":
             checks.update(rescue_ledger_checks(records, trace))
-            checks["not_autonomous"] = {"ok": verification.autonomous is False,
-                                        "classification": verification.classification,
-                                        "principal_classifications": getattr(verification, "principal_classifications", None)}
+            if trace.get("agents"):
+                # Live minds: autonomy is what the verified ledger classifies, reported and never required either way.
+                checks["autonomy_as_classified"] = {
+                    "ok": True, "autonomous": verification.autonomous, "classification": verification.classification,
+                    "principal_classifications": getattr(verification, "principal_classifications", None)}
+            else:
+                checks["not_autonomous"] = {"ok": verification.autonomous is False,
+                                            "classification": verification.classification,
+                                            "principal_classifications": getattr(verification, "principal_classifications", None)}
         elif view:
             checks.update(view_ledger_checks(records, trace))
             checks["not_autonomous"] = {"ok": verification.autonomous is False
