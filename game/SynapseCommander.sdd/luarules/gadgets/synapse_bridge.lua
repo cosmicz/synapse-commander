@@ -513,7 +513,7 @@ if gadgetHandler:IsSyncedCode() then
     budgets.bodies_remaining = budgets.bodies_remaining - 1
     if a.controller then budgets.chips[a.controller] = budgets.chips[a.controller] - 1 end
     local ax, az = x + a.position[1], z + a.position[2]
-    local record = { name = a.name, def = a.def, controller = a.controller, state = a.state, contact = a.contact,
+    local record = { name = a.name, def = a.def, controller = a.controller, state = a.state, contact = a.contact, health = a.health,
                      position = { ax, Spring.GetGroundHeight(ax, az), az } }
     assets[a.name] = record
     asset_order[#asset_order + 1] = a.name
@@ -541,12 +541,13 @@ if gadgetHandler:IsSyncedCode() then
 
   -- Evaluator-only truth, recorded before play: never part of an observation.
   local function world_init_record(frame)
-    local truth, deployed, lost = {}, { bodies = commander and 1 or 0, chips = {} }, { bodies = 0, chips = {} }
+    local truth, deployed, lost, impaired = {}, { bodies = commander and 1 or 0, chips = {} }, { bodies = 0, chips = {} }, false
     if commander then deployed.chips[commander.chip] = 1 end
     for i, name in ipairs(asset_order) do
       local a = assets[name]
       truth[i] = { name = name, def = a.def, controller = a.controller or Json.null, state = a.state, contact = a.contact,
-                   unit_id = a.unit_id or Json.null, position = a.position }
+                   health = a.health or Json.null, unit_id = a.unit_id or Json.null, position = a.position }
+      impaired = impaired or a.health ~= nil
       local bucket = a.state == "active" and deployed or lost
       bucket.bodies = bucket.bodies + 1
       if a.controller then bucket.chips[a.controller] = (bucket.chips[a.controller] or 0) + 1 end
@@ -582,7 +583,7 @@ if gadgetHandler:IsSyncedCode() then
       distress = d and { asset = d.asset, symptom = d.symptom, cause_hidden = d.cause_hidden,
                          last_known = reports[1] and reports[1].position, observed_frame = reports[1] and reports[1].observed_frame } or Json.null,
       link_check = link_check,
-      terrain_occlusion = terrain_method,
+      terrain_occlusion = terrain_method, impairment = impaired and "persistent" or Json.null,
       principal_bodies = principal_bodies,
     }
   end

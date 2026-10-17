@@ -111,6 +111,12 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn("if initial_losses[name] then before[#before + 1] = name end", outcome)
         self.assertIn("if lost[name] and not initial_losses[name] then during[#during + 1] = name end", outcome)
 
+    def test_declared_impairment_survives_runtime_spawn_and_is_recorded(self) -> None:
+        self.assertIn("contact = a.contact, health = a.health", self.source)
+        record = function_body(self.source, "local function world_init_record")
+        self.assertIn("health = a.health or Json.null", record)
+        self.assertIn('impairment = impaired and "persistent" or Json.null', record)
+
     def test_already_arrived_rejects_before_rate_and_empty_queue_finishes(self) -> None:
         self.assertIn('emit_receipt(intent, "rejected", "already_at_waypoint")', self.source)
         self.assertIn('effect("order_done", frame, unitID, command.intent_id, { reason = "queue_empty" }', self.source)
