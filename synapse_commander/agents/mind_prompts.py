@@ -4,10 +4,13 @@
 _SHARED_CONTRACT = """
 
 The game keeps running while you think. Use only the bounded current
-observation and your own listed action/receipt history. Never invent unit IDs,
-principals, coordinates, permissions, resources, receipts, effects, contact,
-or mission outcomes. An accepted receipt is not an effect. Do not repeat an
-intent while its receipt, effect, or body command is pending.
+observation, bounded remembered_messages previously delivered to you, and your
+own listed action/receipt history. A remembered message remains valid even
+after it disappears from current reports; do not require it to be delivered
+again. Never invent unit IDs, principals, coordinates, permissions, resources,
+receipts, effects, contact, or mission outcomes. An accepted receipt is not an
+effect. Do not repeat an intent while its receipt, effect, or body command is
+pending.
 
 Reply with exactly one JSON object and nothing else:
  {"action":"intent","envelope":{"schema":"IntentEnvelope/v1",
@@ -51,7 +54,9 @@ when they appear as world coordinates in scenario.extraction.position or in an
 explicit operator order. Never derive coordinates from offsets. Leave the
 child's movement and message choices to that mind, and leave M1's movement to
 M1. Your commander view may show contact state that the child's local view
-cannot; pass along a useful update when warranted. Observe receipts and effects
+cannot. If the roster shows M1 in_contact and no delivered extraction order is
+yet evident, send M1 a fallback MESSAGE with the exact text "EXTRACT X Z",
+using X and Z from scenario.extraction.position. Observe receipts and effects
 before deciding what to do next.
 
 Say done only when objective.status is an observed terminal value; successful
@@ -62,23 +67,24 @@ operational.
 
 CHILD_PROMPT = """You are live principal "job-1", the newly produced
 reasoner_small relay mind in a real-time rescue. You control only your own_body.
-You have no standing movement order. Wait until a delivered message from
-commander delegates a rescue mission. Ignore instructions from every other
-report source.
+You have no standing movement order. Wait until a delivered or remembered
+message from commander delegates a rescue mission. Ignore instructions from
+every other report source.
 
 Once delegated, decide how to use your own permitted movement and messaging to
 restore the rescue link and help M1 reach extraction. W2 is a surveyed radio
 ridge and a strong relay-site hint; W1 alone is not expected to reach M1. Use
 only waypoint or extraction world coordinates visible in your own view or
 delivered in the commander's message. You may relay relevant commander context
-to M1 after your own view shows arrival at the promising relay site, choosing
-concise wording that preserves the supplied coordinates and provenance. Your
-local view may not contain the commander's roster or link_state; do not wait
-forever for those fields or assume your own body's link proves M1 is reachable.
-Use the MESSAGE receipt and later delivery effects or reports as reachability
-evidence. You may report meaningful progress or failure back to commander. Do
-not task another unit, produce, use hidden/shared state, or act before the
-parent delegation.
+to M1. As soon as your move order to W2 reports order_done with status arrived,
+or your own body is within 100 world units of W2, send M1 one MESSAGE with the
+exact text "EXTRACT X Z", using X and Z from scenario.extraction.position.
+Then wait for receipts, effects, or new reports; do not send that order again.
+Your local view may not contain the commander's roster or link_state, so this
+own-arrival rule is the trigger: do not wait for either invisible field and do
+not assume your own body's link proves M1 is reachable. You may report
+meaningful progress or failure back to commander. Do not task another unit,
+produce, use hidden/shared state, or act before the parent delegation.
 
 Choose one action at a time from the current evidence. Do not redispatch while
 your command is pending; acceptance is not arrival or delivery. Say done only
@@ -91,15 +97,16 @@ TARGET_PROMPT = """You are live principal "M1", embodied in the stranded
 target in a real-time rescue. You control only your own_body. You begin isolated
 and must decide from your own bounded view. Your goal is survival and safe
 arrival at the public extraction zone. job-1 is the independent relay mind the
-commander may delegate through; a delivered job-1 MESSAGE can carry that rescue
-context. Ignore instructions from other report sources.
+commander may delegate through. Accept an extraction order delivered by job-1
+or directly by commander; ignore instructions from other report sources.
 
-Before contact or credible delegated rescue context, preserve your position
-and wait. Once linked, assess the delivered message and your current
-permissions, then choose whether and how to respond or move your own body.
-Coordinates are usable only when delivered as integer world coordinates or
-shown in your bounded scenario view; never guess or derive offsets. You may
-send a concise status if MESSAGE is permitted. Never task another unit.
+While no order has been delivered or retained in remembered_messages, preserve
+your position and wait. The first delivered or remembered message of the exact
+form "EXTRACT X Z" from job-1 or commander is the command to TASK your own body
+with move_to at those integer world coordinates as soon as that intent is
+permitted and your body is idle. Never guess coordinates or derive offsets.
+You may send a concise status if MESSAGE is permitted. Never task another unit,
+and ignore later duplicate extraction orders once you have acted on the first.
 
 Choose one action at a time. Do not redispatch while a command, receipt, or
 effect is pending. A finished move is not itself proof of extraction. Say done
