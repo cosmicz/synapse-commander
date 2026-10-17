@@ -31,8 +31,11 @@ def world(offset):
 
 
 class RescueEngine:
-    def __init__(self, run_id: str) -> None:
+    def __init__(self, run_id: str, *, move_to: bool = False) -> None:
         self.run_id = run_id
+        self.move_to = move_to
+        self.m1_moving_since: int | None = None
+        self.extracted = False
         self.lock = threading.RLock()
         self.frame = 0
         self.events: list[dict] = []
@@ -79,14 +82,25 @@ class RescueEngine:
                 "schema": "ObservationFrame/v1", "principal": principal,
                 "observation_id": f"obs-{principal}-{self.frame}", "team": 0, "frame": self.frame,
                 "body": {"id": body_id, "pos": world([0, 240]) if principal == "commander" else world([-1536, 2176]),
-                         "source": "own_body"},
+                         "source": "own_body", "commands": 0,
+                         "link": principal == "commander" or self.relay_linked_m1},
                 "entities": [], "reports": list(self.reports[principal]), "resources": {},
                 "scenario": {"id": TABLE["id"], "version": TABLE["version"],
                              "waypoints": {"W1": world(TABLE["waypoints"]["W1"])}},
-                "permitted_intents": [{"type": "TASK", "verbs": ["advance"]}, {"type": "MESSAGE"}],
+                "permitted_intents": [{"type": "TASK", "verbs": ["advance", "move_to"] if self.move_to else ["advance"]},
+                                      {"type": "MESSAGE"}],
                 "truncated": False, "omitted": 0}
+            if self.m1_moving_since is not None and self.frame - self.m1_moving_since > 120 and not self.extracted:
+                self.extracted = True
+                self._emit("effect", {"effect": "mind_extracted", "unit_id": 20823, "principal": "M1",
+                                      "detail": {"target": "M1", "unit_id": 20823}})
+                self._emit("effect", {"effect": "mind_extracted", "unit_id": 20823, "principal": "commander",
+                                      "detail": {"target": "M1", "unit_id": 20823}})
+                self._emit("scenario", {"name": "mission_outcome", "result": "extracted", "target": "M1"})
             if principal == "commander":
                 linked = self.relay_linked_m1
+                observation["objective"] = {"type": "rescue_return", "target": "M1",
+                                            "status": "extracted" if self.extracted else "pending"}
                 observation.update(
                     budgets={"bodies_remaining": self.budgets["bodies_remaining"],
                              "chips": dict(self.budgets["chips"])},
@@ -134,8 +148,14 @@ class RescueEngine:
                         {"kind": "message", "from": envelope.principal, "text": payload["text"],
                          "observed_frame": self.frame, "delivered_frame": self.frame + 30, "age_frames": 30})
                 return receipt
-            if payload.get("verb") not in ("advance",):
+            if payload.get("verb") not in (("advance", "move_to") if self.move_to else ("advance",)):
                 return self._receipt(envelope, "verb_not_supported")
+            if envelope.principal == "M1":
+                receipt = self._receipt(envelope)
+                self.m1_moving_since = self.frame
+                self._emit("effect", {"effect": "order_started", "intent_id": envelope.intent_id,
+                                      "principal": "M1", "unit_id": 20823})
+                return receipt
             if envelope.principal == "commander" and str(payload.get("unit")) != str(self.relay):
                 return self._receipt(envelope, "not_authorized")
             receipt = self._receipt(envelope)
@@ -156,8 +176,8 @@ class RescueTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.out = Path(self.tmp.name)
 
-    def run_rescue(self, run_id, **config):
-        engine = RescueEngine(run_id)
+    def run_rescue(self, run_id, move_to=False, **config):
+        engine = RescueEngine(run_id, move_to=move_to)
         cfg = SmokeConfig(engine_dir=self.out, data_dir=self.out, out_dir=self.out, run_id=run_id,
                           rig_commit="b" * 40, scenario="rescue_baseline", mode="rescue", client_timeout_s=10,
                           client_poll_s=0.01, **config)
@@ -176,6 +196,18 @@ class RescueTests(unittest.TestCase):
             self.assertIn(f"| {phase} |", plan)
         self.assertEqual(engine.budgets["chips"]["escort_fixed_v1"], 0)
         self.assertIn("extract at", engine.reports["M1"][0]["text"])
+
+    def test_rehearsal_extracts_m1_through_the_shared_policy(self):
+        verdict, engine = self.run_rescue("rescue-full", move_to=True)
+        self.assertEqual(verdict["verdict"], "PASS", (verdict.get("error"), verdict.get("failed_checks")))
+        self.assertEqual(verdict["rescue_outcome"], "extracted")
+        trace = json.loads((self.out / "rescue-full" / "trace.json").read_text())
+        labels = [a["label"] for a in trace["m1_actions"]]
+        self.assertIn("to-extraction", labels)  # chosen by m1_policy from the delivered message
+        plan = (self.out / "rescue-full" / "phase_plan.md").read_text()
+        for phase in ("link_restored", "message_delivered", "m1_moving", "outcome"):
+            self.assertIn(f"| {phase} |", plan)
+        self.assertNotIn("damaged", plan)
 
     def test_play_records_the_persons_intents_as_human_and_shows_refusals(self):
         commands = io.StringIO("help\nobs\nproduce relay_support_v1\nproduce relay_support_v1\n"

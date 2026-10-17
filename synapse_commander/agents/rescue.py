@@ -19,6 +19,7 @@ import threading
 import time
 from typing import Any, Callable, TextIO
 
+from . import m1_policy
 from .scripted import ClientError, GatewayClient, planar_distance
 
 
@@ -123,32 +124,46 @@ class PrincipalSession:
         return self.client.submit(envelope)
 
 
-class M1Policy:
-    """Scripted local policy for the stranded mind: report status once it can be heard."""
+class SharedM1:
+    """Drives M1 with the shared target policy (m1_policy.next_action), same in every mode.
+
+    Each step reads M1's own bounded view, asks the policy for at most one action
+    and submits it through the gateway with M1's token. The policy decides when to
+    report status and when a delivered commander instruction becomes a move_to.
+    """
 
     def __init__(self, session: PrincipalSession, *, poll_s: float = 0.25,
                  sleep: Callable[[float], None] = time.sleep) -> None:
         self.session = session
         self.poll_s = poll_s
         self.sleep = sleep
-        self.sent: list[dict[str, Any]] = []
+        self.state = m1_policy.State()
+        self.actions: list[dict[str, Any]] = []
         self.stop = threading.Event()
+        self._lock = threading.Lock()
 
-    def step(self) -> None:
-        observation = self.session.observe()
-        if observation is None or self.sent:
-            return
-        envelope = self.session.envelope("status", "MESSAGE",
-                                         {"to": "commander", "text": "M1: alive, mobility degraded, holding position"})
-        status, receipt = self.session.submit(envelope)
-        self.sent.append({"envelope": envelope, "http": status, "receipt": receipt, "frame": observation["frame"]})
+    def step(self) -> dict[str, Any] | None:
+        with self._lock:
+            observation = self.session.observe()
+            if observation is None:
+                return None
+            self.state, proposal = m1_policy.next_action(observation, self.state)
+            if proposal is None:
+                return observation
+            envelope = self.session.envelope(proposal["label"], proposal["type"], proposal["payload"], observation)
+            status, receipt = self.session.submit(envelope)
+            if proposal["type"] == "TASK":
+                self.state = m1_policy.record_receipt(self.state, status, receipt, envelope["intent_id"])
+            self.actions.append({"label": proposal["label"], "envelope": envelope, "http": status,
+                                 "receipt": receipt, "frame": observation["frame"]})
+            return observation
 
     def run_in_background(self) -> threading.Thread:
         def loop() -> None:
             while not self.stop.wait(self.poll_s):
                 try:
                     self.step()
-                except Exception:  # the policy is best effort; the ledger shows what happened
+                except Exception:  # best effort; the ledger shows what happened
                     pass
         thread = threading.Thread(target=loop, name="m1-policy", daemon=True)
         thread.start()
@@ -165,6 +180,7 @@ class RescueRehearsal:
         self.outcome_timeout_s = outcome_timeout_s
         self.commander = PrincipalSession("commander", commander, "rescue")
         self.m1 = PrincipalSession("M1", m1, "rescue")
+        self.m1_policy = SharedM1(self.m1, poll_s=poll_s, sleep=sleep)
         self.poll_s = poll_s
         self.wall_timeout_s = wall_timeout_s
         self.link_timeout_frames = link_timeout_frames
@@ -251,34 +267,39 @@ class RescueRehearsal:
         if not restored:
             raise ClientError("M1's link was not restored within the frame limit")
 
-        # The commander tells M1 where to go; M1 answers and goes there itself.
+        # The commander tells M1 where to go; M1's own policy acts on the delivered message.
         order = self.submit(self.commander, "extraction-point", "MESSAGE",
                             {"to": "M1", "text": f"extract at {int(extraction[0])} {int(extraction[1])}"}, linked)
-        heard = self.wait(self.m1, lambda o: any(r.get("kind") == "message" and r.get("from") == "commander"
-                                                  for r in o.get("reports") or []),
-                          "the commander's message to reach M1", timeout_s=60)
-        self.phase("message_delivered", heard, "message overlay: commander to M1, extraction point",
-                   http=order["http"])
-        target = parse_extraction(heard) or extraction
-        m1_verbs = task_verbs(heard)
-        if "move_to" not in m1_verbs:
-            self.trace["outcome"] = "pending"
-            self.phase("extraction_pending", heard,
-                       "hold on M1; caption: move_to and extraction outcomes not yet in the engine",
-                       missing_verbs=[v for v in ("move_to",) if v not in m1_verbs])
+        self.trace["extraction_message"] = order
+        deadline = time.monotonic() + self.outcome_timeout_s
+        heard = moving = False
+        done = None
+        while time.monotonic() < deadline:
+            view = self.m1_policy.step()
+            if view is not None and not heard and any(
+                    r.get("kind") == "message" and r.get("from") == "commander" for r in view.get("reports") or []):
+                heard = True
+                self.phase("message_delivered", view, "message overlay: commander to M1, extraction point",
+                           http=order["http"])
+            if heard and view is not None and "move_to" not in task_verbs(view):
+                break  # M1 cannot move itself in this engine: the outcome stays pending
+            if not moving and any(a["label"] == "to-extraction" and a["http"] == 202 for a in self.m1_policy.actions):
+                moving = True
+                self.phase("m1_moving", view or linked, "follow M1 toward the extraction zone")
+            commander_view = self.commander.observe()
+            status = ((commander_view or {}).get("objective") or {}).get("status")
+            if status not in (None, "pending"):
+                done = commander_view
+                break
+            self.sleep(self.poll_s)
+        self.trace["m1_actions"] = self.m1_policy.actions
+        if done is None:
+            self.trace["outcome"] = "pending" if not moving else "timeout_waiting"
+            self.phase("extraction_pending" if not moving else "outcome_not_reached", self.commander.latest,
+                       "hold on M1; caption: M1 cannot move itself in this engine version" if not moving
+                       else "hold; caption: outcome not reached", heard=heard, moving=moving)
             return self.trace
-        body = heard.get("body") or {}
-        self.submit(self.m1, "ack", "MESSAGE", {"to": "commander", "text": "M1: heading to extraction"}, heard)
-        go = self.submit(self.m1, "to-extraction", "TASK",
-                         {"unit": str(body.get("id")), "verb": "move_to",
-                          "args": {"x": int(target[0]), "z": int(target[1])}}, heard)
-        if go["http"] != 202 or not go["receipt"].get("accepted"):
-            raise ClientError(f"M1 move_to refused: {go['http']} {go['receipt']}")
-        self.phase("m1_moving", heard, "follow M1 at damaged speed toward the extraction zone")
-        done = self.wait(self.commander,
-                         lambda o: (o.get("objective") or {}).get("status") not in (None, "pending"),
-                         "the mission outcome", timeout_s=self.outcome_timeout_s)
-        self.trace["outcome"] = (done.get("objective") or {}).get("status")
+        self.trace["outcome"] = done["objective"]["status"]
         self.phase("outcome", done, "wide: outcome card", outcome=self.trace["outcome"])
         return self.trace
 
@@ -318,7 +339,7 @@ class RescuePlay:
     def __init__(self, commander: GatewayClient, m1: GatewayClient, *, stdin: TextIO, stdout: TextIO,
                  poll_s: float = 0.25, sleep: Callable[[float], None] = time.sleep) -> None:
         self.commander = PrincipalSession("commander", commander, "play")
-        self.m1_policy = M1Policy(PrincipalSession("M1", m1, "play"), poll_s=poll_s, sleep=sleep)
+        self.m1_policy = SharedM1(PrincipalSession("M1", m1, "play"), poll_s=poll_s, sleep=sleep)
         self.stdin = stdin
         self.stdout = stdout
         self.sleep = sleep
@@ -397,5 +418,5 @@ class RescuePlay:
                 self.say(f"  -> {intent_type} {verdict} (HTTP {status})")
         finally:
             self.m1_policy.stop.set()
-        self.trace["m1_messages"] = self.m1_policy.sent
+        self.trace["m1_actions"] = self.m1_policy.actions
         return self.trace
