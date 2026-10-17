@@ -1,0 +1,12 @@
+.worktrees/
+.env
+.env.*
+!.env.example
+.DS_Store
+.claude/
+.codex/
+
+# Coordination belongs to the enclosing event rig, not this repository.
+.embead/
+.dorg/
+.meld/
