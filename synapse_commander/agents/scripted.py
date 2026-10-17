@@ -160,8 +160,14 @@ class ScriptedSmoke:
         self.trace["first_observation_keys"] = sorted(first)
         self._step("observed_unit", frame=first["frame"], observation_id=first["observation_id"])
 
-        # 2. The one valid intent: advance the owned unit to its fixed waypoint.
-        advance = self.envelope("advance", first, "TASK",
+        # 2. Foreign-unit probes first, while the fixture's foreign unit is still in
+        #    line of sight of the idle smoke unit (the advance takes it out of view).
+        current = self._foreign_probes(first, unit)
+
+        # 3. The one valid intent: advance the owned unit to its fixed waypoint.
+        p0 = _entity(current, unit["id"])["pos"] if _entity(current, unit["id"]) else p0
+        self.trace["p0"] = p0
+        advance = self.envelope("advance", current, "TASK",
                                 {"unit": str(unit["id"]), "verb": "advance", "args": {}})
         status, receipt = self.client.submit(advance)
         self.trace.update(advance_envelope=advance, advance_http=status, advance_receipt=receipt)
@@ -170,7 +176,7 @@ class ScriptedSmoke:
             raise ClientError(f"advance not accepted: HTTP {status} {receipt}")
         receipt_frame = int(receipt["frame"])
 
-        # 3. Later observations: first displacement, then wait until the unit stops.
+        # 4. Later observations: first displacement, then wait until the unit stops.
         moved = self.wait_observation(
             lambda o: (_entity(o, unit["id"]) is not None
                        and planar_distance(_entity(o, unit["id"])["pos"], p0) > MIN_DISPLACEMENT)
@@ -185,10 +191,10 @@ class ScriptedSmoke:
         self.trace.update(settled_observation=settled)
         self._step("unit_settled", frame=settled["frame"])
 
-        # 4. Negative probes, all after the unit is idle so any effect would show.
+        # 5. The remaining negative probes, after the unit is idle again.
         self._probes(first, settled, unit)
 
-        # 5. A later observation: nothing moved because of a probe.
+        # 6. A later observation: nothing moved because of a probe.
         after = self.wait_observation(lambda o: int(o["frame"]) >= int(self.trace["probe_end_frame"]) + 90,
                                       "90 frames after the probes")
         self.trace.update(final_observation=after)
@@ -210,10 +216,40 @@ class ScriptedSmoke:
             self.sleep(self.poll_s)
         raise ClientError("unit did not settle")
 
+    def _foreign_probes(self, first: dict[str, Any], unit: dict[str, Any]) -> dict[str, Any]:
+        """Probe a visible foreign unit; return the observation the advance builds on."""
+        second = self.wait_observation(lambda o: int(o["frame"]) >= int(first["frame"]) + 30,
+                                       "a second observation 30 frames on")
+        # The foreign unit present in both frames that moved least, so a wandering
+        # critter cannot pass for a probe's effect.
+        candidates = [e for e in _foreign_units(second) if _entity(first, e["id"]) is not None]
+        self.trace["foreign_units"] = candidates
+        if not candidates:
+            self.trace["probes"].append({"name": "foreign_unit", "skipped": "no foreign unit visible"})
+            return second
+        chosen = min(candidates, key=lambda e: (planar_distance(e["pos"], _entity(first, e["id"])["pos"]),
+                                                str(e["id"])))
+        target = str(chosen["id"])
+        self.trace["probe_target_ids"] = [chosen["id"]]
+        probes = [
+            Probe("foreign_unit", "not_owned", (400, 409),
+                  self.envelope("foreign", second, "TASK", {"unit": target, "verb": "advance", "args": {}})),
+            # The caller-supplied identity is ignored: the gateway injects its own.
+            Probe("identity_override", "not_owned", (400, 409),
+                  self.envelope("identity", second, "TASK", {"unit": target, "verb": "advance", "args": {}},
+                                principal="intruder", team="1")),
+        ]
+        for probe in probes:
+            probe.http_status, probe.response = self.client.submit(probe.envelope)
+            self.trace["probes"].append(probe.wire())
+        sent = max(int(p.response.get("frame") or second["frame"]) for p in probes)
+        after = self.wait_observation(lambda o: int(o["frame"]) >= sent + 60, "60 frames after the foreign probes")
+        self.trace.update(foreign_probe_before=second, foreign_probe_after=after)
+        self._step("foreign_probes_submitted", frame=sent, target=chosen["id"])
+        return after
+
     def _probes(self, first: dict[str, Any], current: dict[str, Any], unit: dict[str, Any]) -> None:
         own = str(unit["id"])
-        foreign = _foreign_units(current)
-        self.trace["foreign_units"] = foreign
         probes = [
             Probe("unsupported_verb", "verb_not_supported", (400, 409),
                   self.envelope("verb", current, "TASK", {"unit": own, "verb": "move", "args": {}})),
@@ -230,25 +266,6 @@ class ScriptedSmoke:
                   self.envelope("expired", current, "TASK", {"unit": own, "verb": "advance", "args": {}},
                                 expires_in=-30)),
         ]
-        if foreign:
-            # Probe the foreign unit that moved least since the first observation,
-            # so a wandering critter cannot pass for a probe's effect.
-            def drift(entity: dict[str, Any]) -> float:
-                earlier = _entity(first, entity["id"])
-                return planar_distance(entity["pos"], earlier["pos"]) if earlier else math.inf
-            chosen = min(foreign, key=lambda e: (drift(e), str(e["id"])))
-            target = str(chosen["id"])
-            self.trace["probe_target_ids"] = [chosen["id"]]
-            probes.append(Probe("foreign_unit", "not_owned", (400, 409),
-                                self.envelope("foreign", current, "TASK",
-                                              {"unit": target, "verb": "advance", "args": {}})))
-            # The caller-supplied identity is ignored: the gateway injects its own.
-            probes.append(Probe("identity_override", "not_owned", (400, 409),
-                                self.envelope("identity", current, "TASK",
-                                              {"unit": target, "verb": "advance", "args": {}},
-                                              principal="intruder", team="1")))
-        else:
-            self.trace["probes"].append({"name": "foreign_unit", "skipped": "no foreign unit visible"})
         for probe in probes:
             probe.http_status, probe.response = self.client.submit(probe.envelope)
             self.trace["probes"].append(probe.wire())

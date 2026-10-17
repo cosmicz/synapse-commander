@@ -445,22 +445,24 @@ def evaluate(trace: dict[str, Any], ordered: OrderedLedger | None, verdict: dict
     final = trace.get("final_observation")
     unit_id = trace.get("unit_id")
     if settled is not None and final is not None:
-        before = _pos(settled, unit_id)
-        after = _pos(final, unit_id)
-        # Only the probed units count: Gaia critters wander on their own.
-        targets = set(trace.get("probe_target_ids", []))
-        target_moves, other_moves = {}, {}
-        for foreign in trace.get("foreign_units", []):
-            a, b = _pos(settled, foreign["id"]), _pos(final, foreign["id"])
-            moved_by = None if a is None or b is None else planar_distance(a, b)
-            (target_moves if foreign["id"] in targets else other_moves)[str(foreign["id"])] = moved_by
-        still = before is not None and after is not None and planar_distance(before, after) <= STILL_DISTANCE
-        check("no_movement_after_probes", still and all(d is not None and d <= STILL_DISTANCE
-                                                         for d in target_moves.values()),
-              own_moved=None if not (before and after) else planar_distance(before, after),
-              probe_target_moved=target_moves, unprobed_foreign_moved=other_moves)
+        before, after = _pos(settled, unit_id), _pos(final, unit_id)
+        own_moved = None if before is None or after is None else planar_distance(before, after)
+        check("no_movement_after_probes", own_moved is not None and own_moved <= STILL_DISTANCE,
+              own_moved=own_moved, frames=[settled["frame"], final["frame"]])
     else:
         check("no_movement_after_probes", False, detail="no settled/final observation")
+    # Foreign probes ran before the advance; only the probed unit and the idle
+    # smoke unit count, since Gaia critters wander on their own.
+    pre, post = trace.get("foreign_probe_before"), trace.get("foreign_probe_after")
+    if pre is not None and post is not None:
+        moves = {}
+        for entity_id in [unit_id, *trace.get("probe_target_ids", [])]:
+            a, b = _pos(pre, entity_id), _pos(post, entity_id)
+            moves[str(entity_id)] = None if a is None or b is None else planar_distance(a, b)
+        check("no_movement_after_foreign_probes", all(d is not None and d <= STILL_DISTANCE for d in moves.values()),
+              moved=moves, frames=[pre["frame"], post["frame"]])
+    else:
+        check("no_movement_after_foreign_probes", False, detail="foreign probes did not run")
     others = sorted(set(verdict.get("other_engines_at_start", [])) | set(verdict.get("other_engines_during_run", [])))
     check("exclusive_runtime", not others, other_engine_pids=others,
           detail="no other spring-headless process ran on this host during the run")

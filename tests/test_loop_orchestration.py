@@ -43,7 +43,8 @@ class FakeEngine:
         self.receipts: dict[str, dict] = {}
         self.seen: set[str] = set()
         self.unit = {"id": 101, "pos": [1000.0, 10.0, 1000.0], "target": None, "intent": None}
-        self.gaia_unit = {"id": 900, "pos": [1100.0, 10.0, 1050.0]}
+        # Like the real fixture: in sight (380) of the idle smoke unit, out of sight at W1.
+        self.gaia_unit = {"id": 900, "pos": [1000.0, 10.0, 1300.0]}
         self.w1 = [1400.0, 10.0, 1000.0]
         self.teardown: dict[str, object] = {}
         self.stopped = False
@@ -107,7 +108,9 @@ class FakeEngine:
                     # A wandering critter: visible, foreign, moves on its own; sorts first.
                     entities.append({"id": 890, "pos": [1200.0 + 60.0 * math.sin(self.frame / 30.0), 10.0, 1300.0],
                                      "source": "los", "observed_frame": self.frame, "age_frames": 0})
-                if self.gaia:
+                in_sight = math.hypot(unit["pos"][0] - self.gaia_unit["pos"][0],
+                                      unit["pos"][2] - self.gaia_unit["pos"][2]) <= 380.0
+                if self.gaia and in_sight:
                     entities.append({"id": self.gaia_unit["id"], "pos": list(self.gaia_unit["pos"]), "source": "los",
                                      "observed_frame": self.frame, "age_frames": 0})
                 self.latest = {"schema": "ObservationFrame/v1", "observation_id": observation_id, "team": 0,
@@ -207,7 +210,8 @@ class LoopOrchestrationTests(unittest.TestCase):
                      "ledger_verified", "probes_no_effect_records", "no_movement_after_probes",
                      "probe_foreign_unit", "probe_stale_observation", "probe_expired", "probe_produce_unsupported",
                      "probe_raw_engine_payload", "probe_unsupported_verb", "probe_unknown_observation",
-                     "identity_injected_by_gateway", "teardown_bounded", "not_autonomous"):
+                     "identity_injected_by_gateway", "teardown_bounded", "not_autonomous",
+                     "no_movement_after_foreign_probes", "exclusive_runtime"):
             self.assertTrue(checks[name]["ok"], (name, checks[name]))
         self.assertEqual(checks["ledger_verified"]["classification"], "scripted_replay")
         trace = json.loads((self.out / "fake-ok" / "trace.json").read_text())

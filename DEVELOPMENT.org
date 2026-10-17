@@ -89,9 +89,12 @@ and records the result. The lock is the rig's atomic =mkdir= lock with a
 Order of a run: manifest (rig/app commits, engine/map hashes, game commit,
 start-script, settings, archive and module hashes, scenario, clock mode,
 presentation) and =RUN_START= are written before the engine starts. The client
-waits for an observation with its unit, submits one =TASK advance=, watches
-later observations for displacement, then submits negative probes and checks
-that nothing moves. Engine outbox effects and scenario events are ingested into
+waits for an observation with its unit (the owned unit nearest =W1= minus 400
+along x, not the team's start commander) and probes the visible foreign unit
+that drifted least while the smoke unit is idle and that unit is still in
+sight. It then submits one =TASK advance=, watches later observations for
+displacement, submits the remaining negative probes once the unit has stopped,
+and checks that neither the smoke unit nor the probed unit moves afterwards. Engine outbox effects and scenario events are ingested into
 the same ledger, each effect citing the receipt or event that caused it. The
 ledger's =sim_frame= is the frame of ingestion; a record ingested after a later
 frame keeps its own frame as =source_frame= or =engine_frame=.
@@ -103,7 +106,8 @@ frames of the receipt, at a frame later than the receipt; =order_done= within
 600 frames; submission, receipt, effect and moved observation in causal ledger
 order; each probe rejected with its stable code (gateway or engine layer) and
 no effect or acceptance in the ledger; no movement after the probes; ledger
-verified and classified as not autonomous; bounded teardown. The probes are an
+verified and classified as not autonomous; no other engine process on the
+host during the run; bounded teardown. The probes are an
 unsupported verb, =PRODUCE=, a raw-engine payload, an unknown observation, an
 expired intent, a foreign (Gaia) unit, a caller-supplied identity, and a stale
 observation over 900 frames old. The HTTP path cannot express a wrong team:
