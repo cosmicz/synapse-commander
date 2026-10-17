@@ -206,11 +206,18 @@ def _bounded_factory_observation(value: Any, scenario: Mapping[str, Any]) -> tup
         name = _public_identifier(factory.get("name"), "factory name")
         if name != scenario["factory"]["name"]:
             raise ProtocolError("invalid_observation", "unknown factory")
-        unit_id = _public_count(factory.get("unit_id"), "factory unit_id")
+        # A destroyed or never-created factory has no live engine identity.
+        # Preserve that explicit public condition instead of turning every
+        # later observation into a gateway failure.
+        raw_unit_id = factory.get("unit_id")
+        unit_id = None if raw_unit_id is None else _public_count(raw_unit_id, "factory unit_id")
         jobs = factory.get("jobs")
         if not isinstance(jobs, list) or any(not isinstance(job, Mapping) for job in jobs):
             raise ProtocolError("invalid_observation", "factory jobs must be a list")
-        ordered_jobs = sorted(jobs, key=lambda job: compact_json(job))
+        def job_key(job: Mapping[str, Any]) -> tuple[int, bytes]:
+            started = job.get("started_frame")
+            return (started if isinstance(started, int) and not isinstance(started, bool) else -1, compact_json(job))
+        ordered_jobs = sorted(jobs, key=job_key)
         public_jobs: list[dict[str, Any]] = []
         for job in ordered_jobs[:MAX_FACTORY_JOBS]:
             if set(job) != {"job_id", "intent_id", "chassis", "controller", "started_frame", "done_frame"}:
@@ -281,18 +288,80 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
     """Preserve the Loop 0 entity view while filtering the new identity field."""
     public: list[Any] = []
     controllers = frozenset() if scenario_table is None else frozenset(scenario_table["chips"])
+    fields = frozenset({"id", "pos", "source", "team", "observed_frame", "age_frames", "controller"})
     for entity in value:
         if not isinstance(entity, Mapping):
             public.append(entity)
             continue
-        projected = dict(entity)
+        projected = {key: item for key, item in entity.items() if key in fields}
         if "controller" in projected:
-            if projected.get("source") != "own_unit":
+            if scenario_table is None or projected.get("source") != "own_unit":
                 projected.pop("controller")
             elif not isinstance(projected["controller"], str) or projected["controller"] not in controllers:
                 raise ProtocolError("invalid_observation", "unknown entity controller")
         public.append(projected)
     return public
+
+
+def _bounded_expedition(value: Mapping[str, Any], result: dict[str, Any], scenario_table: Mapping[str, Any] | None) -> None:
+    """Project only the public roster and explicitly delivered distress reports."""
+    if "roster" not in value and "reports" not in value:
+        return
+    if scenario_table is None:
+        raise ProtocolError("invalid_observation", "expedition data requires a selected scenario")
+    predeployed = scenario_table.get("predeployed", [])
+    distress = scenario_table.get("distress", {})
+    if not isinstance(predeployed, list) or not isinstance(distress, Mapping):
+        raise ProtocolError("invalid_observation", "selected scenario has no expedition declaration")
+    if len(predeployed) > 8:
+        raise ProtocolError("invalid_observation", "expedition declaration exceeds roster limit")
+    known = {item.get("name"): item for item in predeployed if isinstance(item, Mapping) and isinstance(item.get("name"), str)}
+    if (len(known) != len(predeployed)
+            or any(not _IDENTIFIER.fullmatch(name) for name in known)
+            or not isinstance(distress.get("symptom"), str)
+            or not _IDENTIFIER.fullmatch(distress["symptom"])):
+        raise ProtocolError("invalid_observation", "invalid expedition declaration")
+    roster = value.get("roster", [])
+    if not isinstance(roster, list) or len(roster) > 8:
+        raise ProtocolError("invalid_observation", "invalid roster")
+    public_roster: list[dict[str, Any]] = []
+    for item in roster:
+        if not isinstance(item, Mapping):
+            raise ProtocolError("invalid_observation", "invalid roster entry")
+        status = item.get("status")
+        expected = {"name", "def", "controller", "status", "unit_id"} if status == "in_contact" else {"name", "def", "controller", "status"}
+        if set(item) != expected or status not in {"in_contact", "no_contact"}:
+            raise ProtocolError("invalid_observation", "invalid roster entry")
+        name = _public_identifier(item.get("name"), "roster name")
+        declared = known.get(name)
+        if (declared is None
+                or not isinstance(declared.get("def"), str)
+                or not _IDENTIFIER.fullmatch(declared["def"])
+                or (declared.get("controller") is not None
+                    and (not isinstance(declared["controller"], str)
+                         or not _IDENTIFIER.fullmatch(declared["controller"])))
+                or item.get("def") != declared.get("def")
+                or item.get("controller") != declared.get("controller")):
+            raise ProtocolError("invalid_observation", "unknown roster entry")
+        public = {"name": name, "def": item["def"], "controller": item["controller"], "status": status}
+        if status == "in_contact":
+            public["unit_id"] = _public_count(item.get("unit_id"), "roster unit_id")
+        public_roster.append(public)
+    reports = value.get("reports", [])
+    if not isinstance(reports, list) or len(reports) > 16:
+        raise ProtocolError("invalid_observation", "invalid reports")
+    public_reports: list[dict[str, Any]] = []
+    for report in reports:
+        if not isinstance(report, Mapping) or set(report) != {"kind", "asset", "position", "observed_frame", "age_frames", "symptom"}:
+            raise ProtocolError("invalid_observation", "invalid report")
+        asset = _public_identifier(report.get("asset"), "report asset")
+        position = report.get("position")
+        observed = report.get("observed_frame")
+        if report.get("kind") != "distress" or asset not in known or report.get("symptom") != distress.get("symptom") or not isinstance(position, list) or len(position) != 3 or any(type(number) not in (int, float) or not math.isfinite(number) for number in position) or not isinstance(observed, int) or isinstance(observed, bool):
+            raise ProtocolError("invalid_observation", "invalid report")
+        public_reports.append({"kind": "distress", "asset": asset, "position": list(position), "observed_frame": observed, "age_frames": _public_count(report.get("age_frames"), "age_frames"), "symptom": report["symptom"]})
+    result["roster"] = sorted(public_roster, key=lambda item: item["name"])
+    result["reports"] = sorted(public_reports, key=compact_json)
 
 
 def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -355,10 +424,12 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
             raise ProtocolError("invalid_observation", "W1 must contain three finite coordinates")
         result["scenario"] = {"waypoints": {"W1": list(goal)}}
     _bounded_provisioning(value, result, scenario_table)
+    _bounded_expedition(value, result, scenario_table)
     permitted = value.get("permitted_intents", [])
     if not isinstance(permitted, list) or len(permitted) > 16:
         raise ProtocolError("invalid_observation", "invalid permitted intents")
     result["permitted_intents"] = []
+    seen_permissions: set[str] = set()
     for intent in permitted:
         if not isinstance(intent, Mapping):
             raise ProtocolError("invalid_observation", "invalid permitted intent")
@@ -366,7 +437,9 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
         if not isinstance(verbs, list):
             raise ProtocolError("invalid_observation", "invalid permitted verbs")
         if intent.get("type") == "TASK" and "advance" in verbs:
-            result["permitted_intents"].append({"type": "TASK", "verbs": ["advance"]})
+            if "TASK" not in seen_permissions:
+                result["permitted_intents"].append({"type": "TASK", "verbs": ["advance"]})
+                seen_permissions.add("TASK")
             continue
         if intent.get("type") == "PRODUCE":
             factories = intent.get("factories", [])
@@ -379,16 +452,21 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
             table = scenario_table
             if not all(isinstance(item, str) for item in [*factories, *chassis, *controllers]):
                 raise ProtocolError("invalid_observation", "invalid PRODUCE permission")
+            if (any(item != table["factory"]["name"] for item in factories)
+                    or any(item not in table["chassis"] for item in chassis)
+                    or any(item not in table["chips"] for item in controllers)):
+                raise ProtocolError("invalid_observation", "unknown PRODUCE permission identifier")
             public_factories = sorted({item for item in factories if item == table["factory"]["name"]})
             public_chassis = sorted({item for item in chassis if item in table["chassis"]})
             public_controllers = sorted({item for item in controllers if item in table["chips"]})
-            if public_factories and public_chassis and public_controllers:
+            if public_factories and public_chassis and public_controllers and "PRODUCE" not in seen_permissions:
                 result["permitted_intents"].append({
                     "type": "PRODUCE",
                     "factories": public_factories,
                     "chassis": public_chassis,
                     "controllers": public_controllers,
                 })
+                seen_permissions.add("PRODUCE")
     if len(compact_json(result)) > MAX_OBSERVATION_BYTES:
         raise ProtocolError("observation_too_large", "transport observation exceeds public cap")
     return result

@@ -43,6 +43,60 @@ def provisioning_observation():
 
 
 class SmokeObservationTests(unittest.TestCase):
+    def test_roster_hides_disconnected_identity_and_preserves_historical_distress(self):
+        source = engine_observation()
+        source.update({
+            "scenario": {"id": "rescue_baseline", "version": "1", "waypoints": {"W1": [1, 0, 1]}},
+            "roster": [{"name": "M1", "def": "armflea", "controller": "reasoner_small_v1", "status": "no_contact"}],
+            "reports": [{"kind": "distress", "asset": "M1", "position": [5, 0, 6], "observed_frame": -30, "age_frames": 30, "symptom": "silent"}],
+            "world_init": {"cause_hidden": "ambush", "unit_id": 999},
+        })
+        table = {"id": "rescue_baseline", "version": "1", "chips": {"reasoner_small_v1": 1}, "predeployed": [{"name": "M1", "def": "armflea", "controller": "reasoner_small_v1"}], "distress": {"symptom": "silent"}}
+        observed = bounded_observation(source, scenario_table=table)
+        self.assertEqual(observed["roster"], [{"name": "M1", "def": "armflea", "controller": "reasoner_small_v1", "status": "no_contact"}])
+        self.assertEqual(observed["reports"][0]["observed_frame"], -30)
+        self.assertNotIn("world_init", observed)
+        self.assertNotIn("ambush", json.dumps(observed))
+
+    def test_expedition_requires_scenario_and_never_attaches_identity_to_no_contact(self):
+        source = engine_observation()
+        source.update({
+            "scenario": {"id": "rescue_baseline", "version": "1"},
+            "roster": [{"name": "M1", "def": "armflea", "controller": None, "status": "no_contact"}],
+            "reports": [{"kind": "distress", "asset": "M1", "position": [5, 0, 6], "observed_frame": -1, "age_frames": 1, "symptom": "silent"}],
+        })
+        table = {"id": "rescue_baseline", "version": "1", "chips": {}, "predeployed": [{"name": "M1", "def": "armflea", "controller": None}], "distress": {"symptom": "silent"}}
+        with self.assertRaisesRegex(ProtocolError, "selected scenario"):
+            bounded_observation(source)
+        source["roster"][0]["unit_id"] = 99
+        with self.assertRaisesRegex(ProtocolError, "invalid roster entry"):
+            bounded_observation(source, scenario_table=table)
+        source["roster"][0].pop("unit_id")
+        source["reports"][0]["age_frames"] = -1
+        with self.assertRaisesRegex(ProtocolError, "bounded non-negative"):
+            bounded_observation(source, scenario_table=table)
+
+    def test_checked_in_rescue_baseline_projects_only_declared_public_expedition_data(self):
+        source = engine_observation()
+        source.update({
+            "scenario": {"id": "rescue_baseline", "version": "1-provisional", "waypoints": {"W1": [500, 0, 100]}},
+            "roster": [
+                {"name": "S0", "def": "armflea", "controller": "escort_fixed_v1", "status": "in_contact", "unit_id": 71},
+                {"name": "M1", "def": "armck", "controller": "reasoner_small_v1", "status": "no_contact"},
+                {"name": "H0", "def": "armck", "controller": "escort_fixed_v1", "status": "no_contact"},
+            ],
+            "reports": [{"kind": "distress", "asset": "M1", "position": [2400, 0, 1300], "observed_frame": -900, "age_frames": 900, "symptom": "no_heartbeat"}],
+            "world_init": {"seed": 1017, "cause_hidden": "terrain_entrapment", "unit_ids": {"M1": 991}},
+        })
+        observed = bounded_observation(source, scenario_table=load_scenario("rescue_baseline"))
+        self.assertEqual(observed["roster"][0], {"name": "H0", "def": "armck", "controller": "escort_fixed_v1", "status": "no_contact"})
+        self.assertEqual(observed["roster"][-1], {"name": "S0", "def": "armflea", "controller": "escort_fixed_v1", "status": "in_contact", "unit_id": 71})
+        self.assertEqual(observed["reports"][0]["observed_frame"], -900)
+        public = json.dumps(observed)
+        self.assertNotIn("world_init", public)
+        self.assertNotIn("terrain_entrapment", public)
+        self.assertNotIn("991", public)
+
     def test_http_client_observes_unit_and_declared_fixed_goal(self):
         transport = MemoryTransport(frame=15)
         transport.publish_observation("0", engine_observation())
@@ -129,8 +183,38 @@ class SmokeObservationTests(unittest.TestCase):
         source["factories"][0]["jobs"][0]["done_frame"] = None
         self.assertIsNone(bounded_observation(source, scenario_table=load_scenario())["factories"][0]["jobs"][0]["done_frame"])
 
+    def test_missing_factory_identity_is_a_public_absent_condition(self):
+        source = provisioning_observation()
+        source["factories"][0]["unit_id"] = None
+        observed = bounded_observation(source, scenario_table=load_scenario())
+        self.assertIsNone(observed["factories"][0]["unit_id"])
+
+    def test_jobs_are_ordered_by_start_frame(self):
+        source = provisioning_observation()
+        first = dict(source["factories"][0]["jobs"][0], job_id="later", started_frame=9)
+        second = dict(source["factories"][0]["jobs"][0], job_id="earlier", started_frame=3)
+        source["factories"][0]["jobs"] = [first, second]
+        observed = bounded_observation(source, scenario_table=load_scenario())
+        self.assertEqual([job["job_id"] for job in observed["factories"][0]["jobs"]], ["earlier", "later"])
+
     def test_foreign_entity_controller_is_not_exposed(self):
         source = provisioning_observation()
         source["entities"].append({"id": 99, "pos": [1, 0, 1], "source": "los", "controller": "reasoner_large_v1"})
         foreign = next(item for item in bounded_observation(source, scenario_table=load_scenario())["entities"] if item["id"] == 99)
         self.assertNotIn("controller", foreign)
+
+    def test_entity_projection_drops_unselected_controller_and_unknown_fields(self):
+        source = engine_observation()
+        source["entities"][0].update({"controller": "secret", "private_target": [99, 0, 99]})
+        observed = bounded_observation(source)
+        self.assertNotIn("controller", observed["entities"][0])
+        self.assertNotIn("private_target", observed["entities"][0])
+
+    def test_produce_permissions_reject_unknown_ids_and_dedupe_task_advance(self):
+        source = provisioning_observation()
+        source["permitted_intents"].insert(0, {"type": "TASK", "verbs": ["advance"]})
+        observed = bounded_observation(source, scenario_table=load_scenario())
+        self.assertEqual(sum(item["type"] == "TASK" for item in observed["permitted_intents"]), 1)
+        source["permitted_intents"][2]["chassis"] = ["private_chassis"]
+        with self.assertRaisesRegex(ProtocolError, "unknown PRODUCE permission"):
+            bounded_observation(source, scenario_table=load_scenario())
