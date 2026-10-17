@@ -30,6 +30,7 @@ from .agents.scripted import (
 )
 from .agents.provision import ProvisionSmoke
 from .agents.world import WorldObserver
+from .agents.view import ViewSmoke
 from .agents.commander import SYSTEM_PROMPT, AgentCommander, ClaudeCliRoute, displacement_after_receipt
 from .gateway import LoopbackGateway
 from .scenarios import ScenarioError, load_scenario
@@ -60,7 +61,7 @@ def run_label(agent: bool, presentation: str) -> str:
 class SmokeTransport(Protocol):
     def hello(self) -> dict[str, Any] | None: ...
     def current_frame(self) -> int: ...
-    def observation_for(self, team: str) -> Any: ...
+    def observation_for(self, team: str, principal: str | None = None) -> Any: ...
     def submit_intent(self, envelope: Any) -> Any: ...
     def events_since(self, seq: int, limit: int = 256) -> list[dict[str, Any]]: ...
     def close(self) -> None: ...
@@ -289,7 +290,7 @@ class SmokeConfig:
     client_timeout_s: float = 120.0
     client_poll_s: float = 0.25
     lock_wait_s: float = 1200.0
-    mode: str = "scripted"            # "scripted" reference client or "agent" commander
+    mode: str = "scripted"            # scripted, agent, provision, world, or embodied two-client view
     engine_binary: str = launch.HEADLESS_BINARY  # or "spring", the rendered client
     scenario: str | None = None       # a ScenarioTable/v1 name in the archive; None is Loop 0
     model: str = "claude-sonnet-5"    # agent mode: model pinned for the CLI route
@@ -367,12 +368,13 @@ def run_smoke(config: SmokeConfig, *,
     "agent" with the agent commander, whose decisions come from a live model.
     """
     run_id = launch.check_run_id(config.run_id)
-    if config.mode not in ("scripted", "agent", "provision", "world"):
+    if config.mode not in ("scripted", "agent", "provision", "world", "view"):
         raise launch.LaunchError(f"unknown mode {config.mode!r}")
     agent = config.mode == "agent"
     provision = config.mode == "provision"
     world = config.mode == "world"
-    if (provision or world) and config.scenario is None:
+    view = config.mode == "view"
+    if (provision or world or view) and config.scenario is None:
         raise launch.LaunchError(f"{config.mode} mode needs a scenario table (--scenario)")
     if not config.rig_commit:
         raise launch.LaunchError("rig commit is required for the manifest")
@@ -394,6 +396,12 @@ def run_smoke(config: SmokeConfig, *,
             table = load_scenario(config.scenario)  # fail closed before anything starts
         except ScenarioError as exc:
             raise launch.LaunchError(f"scenario {config.scenario!r}: {exc}") from exc
+    view_principals: list[str] | None = None
+    if view:
+        raw_principals = None if table is None else table.get("principals")
+        if not isinstance(raw_principals, dict) or set(raw_principals) != {"commander", "M1"}:
+            raise launch.LaunchError("view mode needs a table declaring commander and M1 principals")
+        view_principals = ["commander", "M1"]
     seed = scenario_seed(table)
     script = launch.start_script(run_id=run_id, host_port=launch.free_udp_port(), scenario=config.scenario,
                                  seed=seed)
@@ -415,7 +423,8 @@ def run_smoke(config: SmokeConfig, *,
         config_hashes[f"scenario_table/{config.scenario}"] = sha256_text(json.dumps(table, sort_keys=True))
     package = Path(__file__).resolve().parent
     for module in ("mailbox.py", "gateway.py", "protocol.py", "recording.py", "run.py", "launch.py",
-                   "agents/scripted.py", "agents/commander.py", "agents/provision.py", "agents/world.py"):
+                   "agents/scripted.py", "agents/commander.py", "agents/provision.py", "agents/world.py",
+                   "agents/view.py"):
         path = package / module
         if path.exists():
             config_hashes[f"synapse_commander/{module}"] = launch.sha256_file(path)
@@ -432,6 +441,12 @@ def run_smoke(config: SmokeConfig, *,
                               "wall_deadline_s": config.agent_deadline_s,
                               "route": getattr(model_route, "name", "claude-cli")},
             required_decisions=[{"label": "advance_to_W1", "type": "TASK"}])
+    elif view:
+        manifest = build_manifest(
+            run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit, identity=identity,
+            config_hashes=config_hashes, presentation=presentation, scenario=scenario_identity(table),
+            principals=view_principals, principal_sources={name: "scripted" for name in view_principals},
+        )
     else:
         manifest = build_manifest(run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit,
                                   identity=identity, config_hashes=config_hashes, presentation=presentation,
@@ -470,6 +485,7 @@ def run_smoke(config: SmokeConfig, *,
                                    held_by="enclosing with-vmlock.sh" if lock.inherited else "launcher")
         recorder = Recorder.create(ledger_path, manifest)
         recorder.run_start(0)
+        principal_tokens = mint_principal_tokens(layout.run_dir, view_principals) if view_principals else None
         transport = (transport_factory or _mailbox_factory)(mailbox_dir, run_id)
         ordered = OrderedLedger(recorder, transport)
         engine = (engine_factory or (lambda lay: launch.EngineProcess(artifacts, lay)))(layout)
@@ -485,8 +501,10 @@ def run_smoke(config: SmokeConfig, *,
         verdict["hello_wall_s"] = round(time.monotonic() - t0, 3)
         ordered.pump()
 
-        gateway = LoopbackGateway(transport, principal=AGENT_PRINCIPAL if agent else PRINCIPAL, team=TEAM,
-                                  origin="agent" if agent else "scripted", ledger=ordered, scenario=config.scenario)
+        gateway = LoopbackGateway(transport, principal=AGENT_PRINCIPAL if agent else ("commander" if view else PRINCIPAL),
+                                  team=TEAM, origin="agent" if agent else "scripted", ledger=ordered,
+                                  scenario=config.scenario,
+                                  sessions=None if principal_tokens is None else gateway_sessions(principal_tokens))
         server = gateway.make_server(0)
         threading.Thread(target=server.serve_forever, name="gateway", daemon=True).start()
 
@@ -513,7 +531,8 @@ def run_smoke(config: SmokeConfig, *,
                     return
         threading.Thread(target=pump_loop, name="ledger-pump", daemon=True).start()
 
-        client = GatewayClient(f"http://127.0.0.1:{server.server_port}")
+        client = GatewayClient(f"http://127.0.0.1:{server.server_port}",
+                               token=None if principal_tokens is None else principal_tokens["commander"])
         if agent:
             decisions_path = layout.run_dir / "decisions.jsonl"
 
@@ -528,6 +547,10 @@ def run_smoke(config: SmokeConfig, *,
                                          poll_s=config.client_poll_s)
         elif world:
             driver = WorldObserver(client, wall_timeout_s=config.client_timeout_s, poll_s=config.client_poll_s)
+        elif view:
+            driver = ViewSmoke(client, GatewayClient(f"http://127.0.0.1:{server.server_port}",
+                                                      token=principal_tokens["M1"]),
+                               wall_timeout_s=config.client_timeout_s, poll_s=config.client_poll_s)
         elif provision:
             driver = ProvisionSmoke(client, wall_timeout_s=config.client_timeout_s, poll_s=config.client_poll_s)
         else:
@@ -538,7 +561,7 @@ def run_smoke(config: SmokeConfig, *,
             error = f"client: {type(exc).__name__}: {exc}"
             trace = driver.trace
         final_advance = (trace.get("accepted_advance", {}).get("envelope") if agent
-                         else trace.get("advance_envelope") if provision and trace.get("advance_http") == 202 else None)
+                         else trace.get("advance_envelope") if (provision or view) and trace.get("advance_http") == 202 else None)
         if final_advance:
             # The client stops once the unit is moving or at W1; give the
             # engine's order_done a bounded moment to arrive in the ledger.
@@ -932,6 +955,64 @@ def evaluate_world(trace: dict[str, Any], ordered: OrderedLedger | None,
     return checks
 
 
+def evaluate_view(trace: dict[str, Any], ordered: OrderedLedger | None,
+                  verdict: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """HTTP seam checks for the two embodied scripted principal clients."""
+    checks: dict[str, dict[str, Any]] = {}
+
+    def check(name: str, ok: bool, **detail: Any) -> None:
+        checks[name] = {"ok": bool(ok), **detail}
+
+    commander, m1 = trace.get("commander_observation") or {}, trace.get("m1_observation") or {}
+    check("hello_seen", ordered is not None and ordered.hello is not None,
+          hello=None if ordered is None else ordered.hello)
+    check("separate_principal_streams",
+          commander.get("principal") == "commander" and m1.get("principal") == "M1"
+          and commander.get("observation_id") != m1.get("observation_id"),
+          commander=commander.get("observation_id"), m1=m1.get("observation_id"))
+    advance = trace.get("advance_receipt") or {}
+    message = trace.get("message_receipt") or {}
+    check("m1_local_advance_accepted", trace.get("advance_http") == 202 and advance.get("accepted") is True,
+          receipt=advance)
+    check("m1_message_accepted", trace.get("message_http") == 202 and message.get("accepted") is True,
+          receipt=message)
+    foreign = trace.get("foreign_response") or {}
+    check("cross_principal_observation_refused",
+          trace.get("foreign_http") == 400 and foreign.get("error") == "unknown_observation",
+          http=trace.get("foreign_http"), response=foreign)
+    _host_checks(verdict, check)
+    return checks
+
+
+def view_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The ledger must retain separate observation, authority and effect streams."""
+    checks: dict[str, dict[str, Any]] = {}
+    observations = [record for record in records if record["kind"] == "OBSERVATION"]
+    streams = {record["payload"].get("principal") for record in observations}
+    checks["ledger_principal_observations"] = {"ok": {"commander", "M1"} <= streams,
+                                                  "principals": sorted(p for p in streams if isinstance(p, str))}
+    by_intent = {record["payload"].get("intent_id"): record for record in records
+                 if record["kind"] == "INTENT_RECEIPT"}
+    expected = {"advance": trace.get("advance_envelope"), "message": trace.get("message_envelope")}
+    for label, envelope in expected.items():
+        intent_id = None if not isinstance(envelope, dict) else envelope.get("intent_id")
+        receipt = by_intent.get(intent_id)
+        checks[f"ledger_{label}_receipt"] = {
+            "ok": receipt is not None and receipt["payload"].get("principal") == "M1"
+            and receipt["payload"].get("status") == "accepted",
+            "intent_id": intent_id, "receipt": None if receipt is None else receipt["payload"],
+        }
+    advance_id = (trace.get("advance_envelope") or {}).get("intent_id")
+    message_id = (trace.get("message_envelope") or {}).get("intent_id")
+    m1_effects = [record["payload"] for record in records if record["kind"] == EFFECT
+                  and record["payload"].get("principal") == "M1"]
+    effect_pairs = {(effect.get("type"), effect.get("intent_id")) for effect in m1_effects}
+    checks["m1_effect_stream"] = {"ok": ("order_started", advance_id) in effect_pairs
+                                    and ("message_sent", message_id) in effect_pairs,
+                                   "effects": sorted((str(kind), str(intent)) for kind, intent in effect_pairs)}
+    return checks
+
+
 # Keys a player observation must never carry: evaluator-only fields.
 _HIDDEN_KEYS = frozenset({"seed", "cause_hidden", "state", "contact", "assets", "inventory", "health_truth"})
 
@@ -1048,12 +1129,13 @@ def _probe_id(trace: dict[str, Any], name: str) -> str | None:
 
 
 def _evaluator(mode: str) -> Callable[..., dict[str, dict[str, Any]]]:
-    return {"agent": evaluate_agent, "provision": evaluate_provision, "world": evaluate_world}.get(mode, evaluate)
+    return {"agent": evaluate_agent, "provision": evaluate_provision, "world": evaluate_world,
+            "view": evaluate_view}.get(mode, evaluate)
 
 
 def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedger | None,
             ledger_path: Path, layout: launch.RunLayout, *, mode: str = "scripted") -> None:
-    agent, provision, world = mode == "agent", mode == "provision", mode == "world"
+    agent, provision, world, view = mode == "agent", mode == "provision", mode == "world", mode == "view"
     checks = _evaluator(mode)(trace, ordered, verdict)
     verification = verify_ledger(ledger_path) if ledger_path.exists() else None
     if verification is not None:
@@ -1068,6 +1150,11 @@ def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedg
             checks.update(agent_ledger_checks(records, trace, verification))
         elif provision or world:
             checks.update((provision_ledger_checks if provision else world_ledger_checks)(records, trace))
+            checks["not_autonomous"] = {"ok": verification.autonomous is False
+                                        and verification.classification in ("scripted_replay", "scripted_fixture"),
+                                        "classification": verification.classification}
+        elif view:
+            checks.update(view_ledger_checks(records, trace))
             checks["not_autonomous"] = {"ok": verification.autonomous is False
                                         and verification.classification in ("scripted_replay", "scripted_fixture"),
                                         "classification": verification.classification}

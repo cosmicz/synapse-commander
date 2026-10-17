@@ -72,6 +72,14 @@ def build_parser() -> argparse.ArgumentParser:
                     "evaluator-only world_init record, and that no player observation carries hidden truth. "
                     "Exit 0 only on PASS. A scripted fixture.")
     add_run_arguments(world)
+    view = commands.add_parser(
+        "run-view",
+        help="two-principal scripted view seam: M1 acts locally and sends a bounded message",
+        description="Runs the view_smoke fixture with two private Bearer sessions, commander and M1. "
+                    "Each client reads only its own principal observation stream; M1 advances its own "
+                    "body and sends a bounded message through the gateway.  The ledger verifier checks "
+                    "the separate streams.  Scripted fixture, not autonomous gameplay.")
+    add_run_arguments(view)
     agent.add_argument("--model", default="claude-sonnet-5", help="model pinned for the CLI route and the manifest")
     agent.add_argument("--call-budget", type=int, default=20, help="maximum model calls")
     agent.add_argument("--call-timeout", type=float, default=60.0, help="seconds per model call")
@@ -84,7 +92,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "run-smoke" and args.scenario is not None:
         parser.error("run-smoke does not support --scenario; use run-provision or run-world for a scenario")
-    if args.command in ("run-smoke", "run-agent", "run-provision", "run-world"):
+    if args.command in ("run-smoke", "run-agent", "run-provision", "run-world", "run-view"):
         extra = {}
         if args.command == "run-world":
             extra = dict(mode="world")
@@ -92,6 +100,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "run-provision":
             extra = dict(mode="provision")
             args.scenario = args.scenario or "rescue_smoke"
+        if args.command == "run-view":
+            extra = dict(mode="view")
+            args.scenario = args.scenario or "view_smoke"
         if args.command == "run-agent":
             extra = dict(mode="agent", model=args.model, call_budget=args.call_budget,
                          call_timeout_s=args.call_timeout, agent_deadline_s=args.deadline)

@@ -122,7 +122,7 @@ class LoopbackGateway:
     def submit(self, value: Any, principal: str | None = None) -> Any:
         with self._ledger_lock:
             principal = self.principal if principal is None else principal
-            if self._sessions and isinstance(value, dict) and value.get("principal") not in (None, principal):
+            if self._sessions and isinstance(value, dict) and value.get("principal") != principal:
                 raise ProtocolError("principal_mismatch", "session principal does not match envelope")
             if self._sessions and isinstance(value, dict):
                 owner = self._observation_principals.get(value.get("based_on_observation_id"))

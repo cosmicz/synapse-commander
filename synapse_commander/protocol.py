@@ -26,6 +26,7 @@ MAX_RECENT_EVENTS = 16
 MAX_FACTORIES = 4
 MAX_FACTORY_JOBS = 8
 MAX_BUDGET = 2**31 - 1
+MAX_REPORTS = 32
 
 INTENT_TYPES = frozenset({"PRODUCE", "TASK", "INSTALL", "MESSAGE"})
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -91,6 +92,12 @@ class IntentEnvelope:
             raise ProtocolError("unknown_field", "unsupported envelope field")
         if value.get("schema") != INTENT_SCHEMA_VERSION:
             raise ProtocolError("unsupported_version", "unsupported intent schema")
+        if principals is not None and value.get("principal") != principal:
+            # In a multi-principal scenario the client must name the identity
+            # which its Bearer session is bound to.  The gateway still injects
+            # that identity into the wire envelope; this check makes missing
+            # and forged client identities equally non-ambiguous.
+            raise ProtocolError("principal_mismatch", "session principal does not match envelope")
         intent_type = value.get("type")
         if not isinstance(intent_type, str):
             raise ProtocolError("invalid_intent_type", "intent type must be a string")
@@ -319,15 +326,87 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
         if "commands" in projected:
             projected["commands"] = _public_count(projected["commands"], "entity commands")
         if "controller" in projected:
-            if scenario_table is None or projected.get("source") != "own_unit":
+            if scenario_table is None or projected.get("source") not in {"own_unit", "own_body"}:
                 projected.pop("controller")
             elif not isinstance(projected["controller"], str) or projected["controller"] not in controllers:
                 raise ProtocolError("invalid_observation", "unknown entity controller")
-        if projected.get("source") != "own_unit":
+        if projected.get("source") not in {"own_unit", "own_body"}:
             for field in ("health", "max_health", "commands"):
                 projected.pop(field, None)
         public.append(projected)
     return public
+
+
+def _bounded_principal_reports(value: Mapping[str, Any], result: dict[str, Any],
+                               scenario_table: Mapping[str, Any] | None) -> None:
+    """Expose only delivered, typed reports in an embodied principal stream."""
+    reports = value.get("reports", [])
+    if not isinstance(reports, list):
+        raise ProtocolError("invalid_observation", "reports must be a list")
+    public: list[dict[str, Any]] = []
+    for report in reports[-MAX_REPORTS:]:
+        if not isinstance(report, Mapping):
+            raise ProtocolError("invalid_observation", "report must be an object")
+        kind = report.get("kind")
+        observed = report.get("observed_frame")
+        delivered = report.get("delivered_frame")
+        age = report.get("age_frames")
+        if (not isinstance(kind, str) or kind not in {"status", "detection", "message", "distress"}
+                or not isinstance(observed, int) or isinstance(observed, bool)
+                or not isinstance(age, int) or isinstance(age, bool) or age < 0):
+            raise ProtocolError("invalid_observation", "invalid delivered report")
+        if kind != "distress" and (not isinstance(delivered, int) or isinstance(delivered, bool) or delivered < 0):
+            raise ProtocolError("invalid_observation", "invalid report delivery frame")
+        if kind in {"status", "detection", "message"}:
+            expected = ({"kind", "from", "observed_frame", "delivered_frame", "age_frames", "body"}
+                        if kind == "status" else
+                        {"kind", "from", "observed_frame", "delivered_frame", "age_frames", "entity"}
+                        if kind == "detection" else
+                        {"kind", "from", "text", "observed_frame", "delivered_frame", "age_frames"})
+            if set(report) != expected:
+                raise ProtocolError("invalid_observation", "report has unsupported fields")
+            item: dict[str, Any] = {"kind": kind, "from": _public_identifier(report.get("from"), "report source"),
+                                    "observed_frame": observed, "delivered_frame": delivered, "age_frames": age}
+            if kind == "message":
+                text = report.get("text")
+                if not isinstance(text, str) or len(text) > 256:
+                    raise ProtocolError("invalid_observation", "invalid message report")
+                item["text"] = text
+            else:
+                entity = report.get("body" if kind == "status" else "entity")
+                projected = _bounded_entities([entity], scenario_table)
+                if len(projected) != 1 or not isinstance(projected[0], dict):
+                    raise ProtocolError("invalid_observation", "invalid report entity")
+                item["body" if kind == "status" else "entity"] = projected[0]
+            public.append(item)
+            continue
+        # The commander's initial distress report is deliberately a distinct,
+        # public report type.  It never contains the hidden cause or truth.
+        if scenario_table is None or set(report) != {"kind", "asset", "position", "observed_frame", "age_frames", "symptom"}:
+            raise ProtocolError("invalid_observation", "invalid distress report")
+        distress = scenario_table.get("distress", {})
+        position = report.get("position")
+        if (report.get("asset") != distress.get("asset") or report.get("symptom") != distress.get("symptom")
+                or not isinstance(position, list) or len(position) != 3
+                or any(type(n) not in (int, float) or not math.isfinite(n) for n in position)):
+            raise ProtocolError("invalid_observation", "invalid distress report")
+        public.append({"kind": "distress", "asset": report["asset"], "position": list(position),
+                       "observed_frame": observed, "age_frames": age, "symptom": report["symptom"]})
+    result["reports"] = public
+    result["omitted"]["reports"] = max(0, len(reports) - len(public))
+    result["truncated"] = result["truncated"] or len(reports) > len(public)
+
+
+def _bounded_principal_body(value: Mapping[str, Any], result: dict[str, Any],
+                            scenario_table: Mapping[str, Any] | None) -> None:
+    body = value.get("body")
+    if not isinstance(body, Mapping):
+        raise ProtocolError("invalid_observation", "principal observation needs an own body")
+    projected = _bounded_entities([body], scenario_table)
+    if len(projected) != 1 or not isinstance(projected[0], dict) or projected[0].get("source") != "own_body":
+        raise ProtocolError("invalid_observation", "invalid principal own body")
+    result["body"] = projected[0]
+    _bounded_principal_reports(value, result, scenario_table)
 
 
 def _bounded_expedition(value: Mapping[str, Any], result: dict[str, Any], scenario_table: Mapping[str, Any] | None) -> None:
@@ -459,7 +538,10 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
             raise ProtocolError("invalid_observation", "W1 must contain three finite coordinates")
         result["scenario"] = {"waypoints": {"W1": list(goal)}}
     _bounded_provisioning(value, result, scenario_table)
-    _bounded_expedition(value, result, scenario_table)
+    if principal is None:
+        _bounded_expedition(value, result, scenario_table)
+    else:
+        _bounded_principal_body(value, result, scenario_table)
     permitted = value.get("permitted_intents", [])
     if not isinstance(permitted, list) or len(permitted) > 16:
         raise ProtocolError("invalid_observation", "invalid permitted intents")
@@ -502,6 +584,13 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
                     "controllers": public_controllers,
                 })
                 seen_permissions.add("PRODUCE")
+            continue
+        if intent.get("type") == "MESSAGE" and principal is not None:
+            if set(intent) != {"type"}:
+                raise ProtocolError("invalid_observation", "invalid MESSAGE permission")
+            if "MESSAGE" not in seen_permissions:
+                result["permitted_intents"].append({"type": "MESSAGE"})
+                seen_permissions.add("MESSAGE")
     if len(compact_json(result)) > MAX_OBSERVATION_BYTES:
         raise ProtocolError("observation_too_large", "transport observation exceeds public cap")
     return result

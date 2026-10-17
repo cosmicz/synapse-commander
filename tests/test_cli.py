@@ -45,6 +45,7 @@ class RunCommandTests(unittest.TestCase):
         cases = [
             ("run-provision", [], "provision", "rescue_smoke"),
             ("run-provision", ["--scenario", "rescue_baseline"], "provision", "rescue_baseline"),
+            ("run-view", [], "view", "view_smoke"),
             ("run-agent", ["--scenario", "rescue_smoke"], "agent", "rescue_smoke"),
         ]
         for command, options, mode, scenario in cases:

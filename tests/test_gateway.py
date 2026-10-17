@@ -102,7 +102,8 @@ class GatewayTests(unittest.TestCase):
 
     def test_principal_session_requires_bearer_token_and_binds_envelope(self) -> None:
         transport = MemoryTransport(frame=100)
-        transport.publish_principal_observation("blue", "commander", observation("obs-commander-100", principal="commander"))
+        transport.publish_principal_observation("blue", "commander", observation(
+            "obs-commander-100", principal="commander", body={"id": 1, "pos": [0, 0, 0], "source": "own_body"}))
         server = LoopbackGateway(transport, principal="legacy", team="blue",
                                  sessions={"private-token": "commander"}).make_server()
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
@@ -118,16 +119,45 @@ class GatewayTests(unittest.TestCase):
 
     def test_session_rejects_principal_mismatch_and_cross_stream_observation(self) -> None:
         transport = MemoryTransport(frame=100)
-        transport.publish_principal_observation("blue", "commander", observation("obs-commander-100", principal="commander"))
-        transport.publish_principal_observation("blue", "M1", observation("obs-M1-100", principal="M1"))
+        transport.publish_principal_observation("blue", "commander", observation(
+            "obs-commander-100", principal="commander", body={"id": 1, "pos": [0, 0, 0], "source": "own_body"}))
+        transport.publish_principal_observation("blue", "M1", observation(
+            "obs-M1-100", principal="M1", body={"id": 2, "pos": [1, 0, 0], "source": "own_body"}))
         gateway = LoopbackGateway(transport, principal="legacy", team="blue", sessions={"c": "commander", "m": "M1"})
         gateway.observation("commander")
-        task = {"schema": "IntentEnvelope/v1", "intent_id": "cross", "based_on_observation_id": "obs-commander-100", "expires_at_frame": 200, "type": "TASK", "payload": {"unit": "7", "verb": "advance", "args": {}}}
+        task = {"schema": "IntentEnvelope/v1", "intent_id": "cross", "principal": "M1", "based_on_observation_id": "obs-commander-100", "expires_at_frame": 200, "type": "TASK", "payload": {"unit": "7", "verb": "advance", "args": {}}}
         with self.assertRaisesRegex(ProtocolError, "another principal"):
             gateway.submit(task, "M1")
         task["principal"] = "commander"
         with self.assertRaisesRegex(ProtocolError, "session principal"):
             gateway.submit(task, "M1")
+
+    def test_principal_session_requires_the_envelope_principal(self) -> None:
+        transport = MemoryTransport(frame=100)
+        transport.publish_principal_observation("blue", "commander", observation(
+            "obs-commander-100", principal="commander", body={"id": 1, "pos": [0, 0, 0], "source": "own_body"}))
+        gateway = LoopbackGateway(transport, principal="legacy", team="blue", sessions={"c": "commander"})
+        missing = {"schema": "IntentEnvelope/v1", "intent_id": "missing-principal",
+                   "based_on_observation_id": "obs-commander-100", "expires_at_frame": 200,
+                   "type": "TASK", "payload": {"unit": "7", "verb": "advance", "args": {}}}
+        with self.assertRaisesRegex(ProtocolError, "session principal"):
+            gateway.submit(missing, "commander")
+
+    def test_principal_observation_keeps_only_typed_body_reports_and_message_permission(self) -> None:
+        transport = MemoryTransport(frame=100)
+        transport.publish_principal_observation("blue", "M1", observation(
+            "obs-M1-100", principal="M1", body={"id": 2, "pos": [1, 0, 0], "source": "own_body",
+                                                   "private": "not forwarded"},
+            reports=[{"kind": "message", "from": "commander", "text": "hold position",
+                      "observed_frame": 70, "delivered_frame": 100, "age_frames": 30}],
+            permitted_intents=[{"type": "TASK", "verbs": ["advance"]}, {"type": "MESSAGE"}]))
+        gateway = LoopbackGateway(transport, principal="legacy", team="blue", scenario="rescue_smoke",
+                                  sessions={"m": "M1", "c": "commander"})
+        result = gateway.observation("M1")
+        self.assertEqual(result["body"], {"id": 2, "pos": [1, 0, 0], "source": "own_body"})
+        self.assertEqual(result["reports"], [{"kind": "message", "from": "commander", "text": "hold position",
+                                                "observed_frame": 70, "delivered_frame": 100, "age_frames": 30}])
+        self.assertIn({"type": "MESSAGE"}, result["permitted_intents"])
 
     def test_principal_tokens_are_private_run_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
