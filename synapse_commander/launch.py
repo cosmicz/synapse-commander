@@ -435,6 +435,19 @@ def wait_for_log(path: Path, needles: Sequence[str], *, timeout_s: float,
     raise LaunchError(f"timed out after {timeout_s}s waiting for {needles[0]!r}")
 
 
+def lock_seat(environ: Mapping[str, str] | None = None) -> str:
+    """Who holds the lock: the seat (EMBEAD_AGENT), else the login name, as the rig's run.sh does."""
+    environ = os.environ if environ is None else environ
+    seat = environ.get("EMBEAD_AGENT") or ""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", seat):
+        try:
+            import pwd
+            seat = pwd.getpwuid(os.getuid()).pw_name
+        except (ImportError, KeyError):
+            seat = "unknown"
+    return seat
+
+
 class RuntimeLock:
     """The project's runtime lock, compatible with the rig's vmlock.sh.
 

@@ -26,7 +26,8 @@ FPS_FAKE = 300
 
 
 class FakeProvisionEngine:
-    def __init__(self, run_id: str, *, spend: bool = True, refuse_unfunded: bool = True) -> None:
+    def __init__(self, run_id: str, *, spend: bool = True, refuse_unfunded: bool = True,
+                 predeployed_controller: str | None = None) -> None:
         self.run_id = run_id
         self.spend = spend
         self.refuse_unfunded = refuse_unfunded
@@ -42,6 +43,9 @@ class FakeProvisionEngine:
         self.factory_unit = 70
         self.jobs: list[dict] = []
         self.units: dict[int, dict] = {50: {"pos": [3000.0, 10.0, 3000.0], "controller": self.commander["chip"]}}
+        if predeployed_controller:
+            # A unit already in the world that carries the controller the client will produce.
+            self.units[40] = {"pos": [1100.0, 10.0, 900.0], "controller": predeployed_controller}
         self.w1 = [1400.0, 10.0, 1000.0]
         self.seen: set[str] = set()
         self.moving: dict[int, str] = {}
@@ -210,6 +214,14 @@ class ProvisionRunTests(unittest.TestCase):
         trace = json.loads((run_dir / "trace.json").read_text())
         self.assertNotEqual(trace["produced_unit"]["id"], trace["commander_id"])
         self.assertTrue(verify_ledger(run_dir / "ledger.jsonl").ok)
+
+    def test_existing_unit_with_the_same_controller_is_not_mistaken_for_the_product(self) -> None:
+        verdict = self.run_provision("prov-predeployed", predeployed_controller="escort_fixed_v1")
+        self.assertEqual(verdict["verdict"], "PASS", verdict["failed_checks"])
+        trace = json.loads((self.out / "prov-predeployed" / "trace.json").read_text())
+        self.assertEqual(trace["produce_choice"]["controller"], "escort_fixed_v1")
+        self.assertNotEqual(trace["produced_unit"]["id"], 40)
+        self.assertEqual(trace["advance_envelope"]["payload"]["unit"], str(trace["produced_unit"]["id"]))
 
     def test_engine_that_does_not_spend_fails_the_budget_check(self) -> None:
         verdict = self.run_provision("prov-nospend", spend=False)

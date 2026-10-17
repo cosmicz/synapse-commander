@@ -290,9 +290,10 @@ class LoopOrchestrationTests(unittest.TestCase):
         self.assertTrue(verdict["checks"]["advance_accepted"]["ok"])
 
     def test_launcher_held_lock_is_recorded_and_released(self) -> None:
-        with mock.patch.dict(os.environ, {}, clear=False):
+        with mock.patch.dict(os.environ, {"EMBEAD_AGENT": "nav-api"}, clear=False):
             os.environ.pop("VMLOCK_OWNER", None)
             verdict, _engine = self.run_fake("fake-own-lock")
+        self.assertTrue(verdict["lock"]["owner"].startswith("nav-api fake-own-lock "), verdict["lock"]["owner"])
         self.assertEqual(verdict["lock"]["held_by"], "launcher")
         self.assertIn(f"pid={os.getpid()}", verdict["lock"]["owner"])
         self.assertTrue(verdict["lock"]["released"])

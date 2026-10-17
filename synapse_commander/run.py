@@ -442,7 +442,8 @@ def run_smoke(config: SmokeConfig, *,
 
     lock = None
     if config.lock_dir is not None:
-        lock = launch.RuntimeLock(config.lock_dir, f"plt-loop {run_id} {utc_now()}", wait_s=config.lock_wait_s)
+        lock = launch.RuntimeLock(config.lock_dir, f"{launch.lock_seat()} {run_id} {utc_now()}",
+                                  wait_s=config.lock_wait_s)
     verdict: dict[str, Any] = {"run_id": run_id, "mode": config.mode,
                                **({"call_budget": config.call_budget, "model": config.model} if agent else {}),
                                "classification": run_label(agent, presentation),

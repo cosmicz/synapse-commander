@@ -237,6 +237,12 @@ class OtherEnginesTests(unittest.TestCase):
 
 
 class LockTests(unittest.TestCase):
+    def test_lock_seat_is_the_embead_agent_else_the_login_name(self) -> None:
+        self.assertEqual(launch.lock_seat({"EMBEAD_AGENT": "nav-api"}), "nav-api")
+        login = launch.lock_seat({})
+        self.assertTrue(login and " " not in login)
+        self.assertEqual(launch.lock_seat({"EMBEAD_AGENT": "bad seat; rm"}), login)
+
     def test_acquire_release_and_busy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             lock_dir = Path(tmp) / "locks" / "docker-vm"

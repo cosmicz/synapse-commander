@@ -29,10 +29,23 @@ def budgets(observation: dict[str, Any]) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def produced_units(observation: dict[str, Any], commander_id: Any) -> list[dict[str, Any]]:
-    """Own units that carry a controller and are not the bound commander."""
+def produced_units(observation: dict[str, Any], existing_ids: set[Any]) -> list[dict[str, Any]]:
+    """Own units carrying a controller that did not exist before the PRODUCE.
+
+    Predeployed assets and the commander can carry the same controller kind,
+    so a produced unit is recognised as new, not by its controller alone.
+    """
     return [e for e in observation.get("entities", [])
-            if e.get("source") == "own_unit" and e.get("controller") and e.get("id") != commander_id]
+            if e.get("source") == "own_unit" and e.get("controller") and e.get("id") not in existing_ids]
+
+
+def known_unit_ids(observation: dict[str, Any]) -> set[Any]:
+    """Every unit id the team already knows: entities, the commander and roster ids."""
+    ids = {e.get("id") for e in observation.get("entities", [])}
+    if observation.get("commander"):
+        ids.add(observation["commander"].get("unit_id"))
+    ids.update(entry.get("unit_id") for entry in observation.get("roster") or [] if entry.get("unit_id") is not None)
+    return ids
 
 
 class ProvisionSmoke:
@@ -86,6 +99,9 @@ class ProvisionSmoke:
                           produce_choice=choice)
         self._step("scenario_observed", frame=first["frame"], budgets=before)
 
+        existing = known_unit_ids(first)
+        self.trace["units_before_produce"] = sorted(existing, key=str)
+
         # 2. One funded PRODUCE.
         produce = self.envelope("produce", first, "PRODUCE", choice)
         status, receipt = self.client.submit(produce)
@@ -99,9 +115,9 @@ class ProvisionSmoke:
             lambda o: int(o["frame"]) > int(receipt["frame"]) and budgets(o) is not None, "budgets after the receipt")
         self.trace.update(budgets_after=budgets(spent), budgets_after_frame=spent["frame"])
         built = self.wait_observation(
-            lambda o: any(u.get("controller") == choice["controller"] for u in produced_units(o, commander_id)),
+            lambda o: any(u.get("controller") == choice["controller"] for u in produced_units(o, existing)),
             "the produced unit carrying its controller")
-        unit = next(u for u in produced_units(built, commander_id) if u.get("controller") == choice["controller"])
+        unit = next(u for u in produced_units(built, existing) if u.get("controller") == choice["controller"])
         self.trace.update(built_observation=built, produced_unit=unit)
         self._step("unit_observed", frame=built["frame"], unit_id=unit["id"])
 
