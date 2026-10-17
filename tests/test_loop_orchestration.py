@@ -164,7 +164,11 @@ class FakeEngine:
                 reason = "verb_not_supported"
             elif envelope.based_on_observation_id not in self.observations:
                 reason = "unknown_observation"
-            elif frame - self.observations[envelope.based_on_observation_id] > 900 and not self.accept_stale:
+            elif frame - self.observations[envelope.based_on_observation_id] > 900:
+                # accept_stale models a broken reducer that lets a stale intent through.
+                if self.accept_stale:
+                    self.seen.add(envelope.intent_id)
+                    return self._accept(envelope, frame)
                 reason = "stale_observation"
             elif envelope.expires_at_frame < frame:
                 reason = "expired"
@@ -172,16 +176,23 @@ class FakeEngine:
                 reason = "expiry_out_of_range"
             elif str(payload.get("unit")) != str(self.unit["id"]):
                 reason = "not_owned"
+            elif math.hypot(self.unit["pos"][0] - self.w1[0], self.unit["pos"][2] - self.w1[2]) <= 32.0:
+                reason = "already_at_waypoint"
             self.seen.add(envelope.intent_id)
-            status = "rejected" if reason else "accepted"
-            self._emit("receipt", {"schema": "IntentReceipt/v1", "intent_id": envelope.intent_id, "team": 0,
-                                   "status": status, "reason": reason, "frame": frame})
             if reason is None:
-                self.unit["target"] = list(self.w1)
-                self.unit["intent"] = envelope.intent_id
-                self._emit("effect", {"schema": "EffectEvent/v1", "effect": "order_started", "frame": frame,
-                                      "unit_id": self.unit["id"], "team": 0, "intent_id": envelope.intent_id})
-            return IntentReceipt(envelope.intent_id, reason is None, frame, f"fake-{envelope.intent_id}", reason)
+                return self._accept(envelope, frame)
+            self._emit("receipt", {"schema": "IntentReceipt/v1", "intent_id": envelope.intent_id, "team": 0,
+                                   "status": "rejected", "reason": reason, "frame": frame})
+            return IntentReceipt(envelope.intent_id, False, frame, f"fake-{envelope.intent_id}", reason)
+
+    def _accept(self, envelope, frame: int) -> IntentReceipt:
+        self._emit("receipt", {"schema": "IntentReceipt/v1", "intent_id": envelope.intent_id, "team": 0,
+                               "status": "accepted", "reason": None, "frame": frame})
+        self.unit["target"] = list(self.w1)
+        self.unit["intent"] = envelope.intent_id
+        self._emit("effect", {"schema": "EffectEvent/v1", "effect": "order_started", "frame": frame,
+                              "unit_id": self.unit["id"], "team": 0, "intent_id": envelope.intent_id})
+        return IntentReceipt(envelope.intent_id, True, frame, f"fake-{envelope.intent_id}", None)
 
 
 def gateway_passes_scenario() -> bool:
@@ -213,7 +224,7 @@ class LoopOrchestrationTests(unittest.TestCase):
                      "ledger_verified", "probes_no_effect_records", "no_movement_after_probes",
                      "probe_foreign_unit", "probe_stale_observation", "probe_expired", "probe_produce_unsupported",
                      "probe_raw_engine_payload", "probe_unsupported_verb", "probe_unknown_observation",
-                     "probe_far_future_expiry",
+                     "probe_far_future_expiry", "probe_repeat_advance_at_waypoint",
                      "identity_injected_by_gateway", "teardown_bounded", "not_autonomous",
                      "no_movement_after_foreign_probes", "exclusive_runtime"):
             self.assertTrue(checks[name]["ok"], (name, checks[name]))

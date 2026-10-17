@@ -114,7 +114,8 @@ no effect or acceptance in the ledger; no movement after the probes; ledger
 verified and classified as not autonomous; no other engine process on the
 host during the run; bounded teardown. The probes are an
 unsupported verb, =PRODUCE=, a raw-engine payload, an unknown observation, an
-expired intent, an expiry more than 900 frames ahead, a foreign (Gaia) unit, a caller-supplied identity, and a stale
+expired intent, an expiry more than 900 frames ahead, a repeat advance of the
+unit already at =W1=, a foreign (Gaia) unit, a caller-supplied identity, and a stale
 observation over 900 frames old. The HTTP path cannot express a wrong team:
 the gateway injects principal and team, which the identity probe checks.
 
@@ -122,6 +123,13 @@ Evidence limits: the client's intents are preloaded, so the ledger classifies
 the run as =scripted_replay=; it is not autonomous play. It is headless, not a
 visual demo. It moves one unit to a fixed waypoint and is not the Broken Relay
 mission. The ledger hash chain detects accidental corruption, not forgery.
+The bridge emits no recent receipts or effects inside its observation frames,
+so the public =recent_receipts= and =recent_effects= lists are empty; the
+authoritative receipts and effects come from the separate outbox stream and are
+recorded in the ledger. Accepted gateway residuals: a GET failure other than a
+ledger error may go unrecorded, the request timeout bounds each receive rather
+than the whole request, and observation entities are passed through as the
+bridge filters them rather than field-allowlisted by the gateway.
 =tests/test_loop_orchestration.py= exercises the same orchestration with an
 in-process fake engine; it checks wiring and verdict rules, not the engine.
 

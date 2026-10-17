@@ -272,6 +272,9 @@ class ScriptedSmoke:
             Probe("expired", "expired", (400, 409),
                   self.envelope("expired", current, "TASK", {"unit": own, "verb": "advance", "args": {}},
                                 expires_in=-30)),
+            # Well formed and owned, but the unit already stands at W1.
+            Probe("repeat_advance_at_waypoint", "already_at_waypoint", (409,),
+                  self.envelope("repeat", current, "TASK", {"unit": own, "verb": "advance", "args": {}})),
             Probe("far_future_expiry", "expiry_out_of_range", (400, 409),
                   self.envelope("farexpiry", current, "TASK", {"unit": own, "verb": "advance", "args": {}},
                                 expires_in=MAX_EXPIRY_AHEAD + 300)),
