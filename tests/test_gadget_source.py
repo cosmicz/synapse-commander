@@ -113,6 +113,8 @@ class GadgetSourceContractTests(unittest.TestCase):
 
     def test_declared_impairment_survives_runtime_spawn_and_is_recorded(self) -> None:
         self.assertIn("contact = a.contact, health = a.health", self.source)
+        spawn = self.source[self.source.index("local function spawn_asset"):self.source.index("local function world_init_record")]
+        self.assertIn('SetGroundMoveTypeData(unitID, "maxSpeed", definition.speed * a.health)', spawn)
         record = function_body(self.source, "local function world_init_record")
         self.assertIn("health = a.health or Json.null", record)
         self.assertIn('impairment = impaired and "persistent" or Json.null', record)

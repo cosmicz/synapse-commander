@@ -536,6 +536,10 @@ if gadgetHandler:IsSyncedCode() then
     if a.health then
       local _, max_health = Spring.GetUnitHealth(unitID)
       if max_health then Spring.SetUnitHealth(unitID, max_health * a.health) end
+      local definition = UnitDefs[Spring.GetUnitDefID(unitID)]
+      if Spring.MoveCtrl and Spring.MoveCtrl.SetGroundMoveTypeData and definition and definition.speed then
+        Spring.MoveCtrl.SetGroundMoveTypeData(unitID, "maxSpeed", definition.speed * a.health)
+      end
     end
   end
 
