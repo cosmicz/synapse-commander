@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from synapse_commander import launch
 from synapse_commander.protocol import IntentReceipt, bounded_observation
@@ -271,6 +273,27 @@ class LoopOrchestrationTests(unittest.TestCase):
         self.assertFalse(verdict["checks"]["exclusive_runtime"]["ok"])
         self.assertEqual(verdict["checks"]["exclusive_runtime"]["other_engine_pids"], [4242])
         self.assertEqual(verdict["verdict"], "FAIL")
+
+    def test_inherited_wrapper_lock_is_recorded_and_left_in_place(self) -> None:
+        lock_dir = self.out / "locks" / "fake"
+        lock_dir.mkdir(parents=True)
+        line = f"plt-loop wrapped pid={os.getpid()} 2026-10-17T19:00:00Z"
+        (lock_dir / "owner").write_text(line + "\n")
+        with mock.patch.dict(os.environ, {"VMLOCK_OWNER": line, "VMLOCK_WAITED": "7"}):
+            verdict, _engine = self.run_fake("fake-wrapped")
+        self.assertEqual(verdict["lock"], {"name": "fake", "waited_s": 7.0, "owner": line,
+                                           "held_by": "enclosing with-vmlock.sh"})
+        self.assertEqual((lock_dir / "owner").read_text().strip(), line, "outer lock untouched")
+        self.assertTrue(verdict["checks"]["advance_accepted"]["ok"])
+
+    def test_launcher_held_lock_is_recorded_and_released(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VMLOCK_OWNER", None)
+            verdict, _engine = self.run_fake("fake-own-lock")
+        self.assertEqual(verdict["lock"]["held_by"], "launcher")
+        self.assertIn(f"pid={os.getpid()}", verdict["lock"]["owner"])
+        self.assertTrue(verdict["lock"]["released"])
+        self.assertFalse((self.out / "locks" / "fake").exists())
 
     def test_rig_commit_required(self) -> None:
         config = SmokeConfig(engine_dir=self.out, data_dir=self.out, out_dir=self.out, run_id="x", rig_commit=None)

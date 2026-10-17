@@ -175,6 +175,17 @@ class LockTests(unittest.TestCase):
             lock.release()
             self.assertEqual((lock_dir / "owner").read_text().strip(), line)
 
+    def test_malformed_waited_is_a_launch_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_dir = Path(tmp) / "docker-vm"
+            lock_dir.mkdir()
+            line = f"plt-loop final pid={os.getpid()}"
+            (lock_dir / "owner").write_text(line + "\n")
+            lock = launch.RuntimeLock(lock_dir, "inner", environ={"VMLOCK_OWNER": line, "VMLOCK_WAITED": "soon"})
+            with self.assertRaises(launch.LaunchError):
+                lock.acquire()
+            self.assertIsNone(lock.owner_line)
+
     def test_foreign_owner_in_env_does_not_grant_the_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             lock_dir = Path(tmp) / "docker-vm"

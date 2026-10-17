@@ -406,8 +406,12 @@ class RuntimeLock:
         # lock's current owner, this process tree already holds the lock.
         enclosing = self.environ.get("VMLOCK_OWNER")
         if enclosing and self._owner() == enclosing:
+            waited = self.environ.get("VMLOCK_WAITED") or "0"
+            try:
+                self.waited_s = float(waited)
+            except ValueError:
+                raise LaunchError(f"malformed VMLOCK_WAITED from the enclosing lock holder: {waited!r}") from None
             self.inherited = enclosing
-            self.waited_s = float(self.environ.get("VMLOCK_WAITED") or 0)
             return
         self.lock_dir.parent.mkdir(parents=True, exist_ok=True)
         begin = time.monotonic()
