@@ -80,15 +80,17 @@ rendered frame shows presentation; it does not change how the run's decisions
 are classified. The exclusivity check counts both =spring-headless= and
 =spring= processes.
 
-=--scenario NAME= (for example =rescue_smoke=) selects a =ScenarioTable/v1=
+On scenario-aware commands, =--scenario NAME= (for example =rescue_smoke=)
+selects a =ScenarioTable/v1=
 from =game/SynapseCommander.sdd/scenarios/= by adding =synapse_scenario=NAME=
-to the start script's =[MODOPTIONS]=; omitted, the run is the unchanged Loop 0
-smoke. The table is loaded and validated before anything starts, and the
+to the start script's =[MODOPTIONS]=. The table is loaded and validated before
+anything starts, and the
 manifest records its id, version and hash. A table that declares an integer
 =seed= sets the start script's =FixedRNGSeed= and the manifest's scenario seed
 (otherwise both stay 1), and the verdict checks that the engine's hello echoes
-the same seed. The scripted Loop 0 client and its
-verdict assume no scenario.
+the same seed. The scripted Loop 0 client and its verdict assume no scenario,
+so =run-smoke --scenario NAME= is rejected before launch. Use =run-provision=
+for the provisioning scenario check; it defaults to =rescue_smoke=.
 
 | Layer | Module |
 |-------+--------|

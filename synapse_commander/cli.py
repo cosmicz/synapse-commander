@@ -30,7 +30,7 @@ def add_run_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument("--rig-commit", required=True, help="exact rig commit recorded in the manifest")
     command.add_argument("--scenario", default=None,
                          help="ScenarioTable/v1 name in the app archive (e.g. rescue_smoke), passed to the "
-                              "engine as synapse_scenario; omitted, the run is the Loop 0 smoke")
+                              "engine as synapse_scenario; unsupported by run-smoke")
     command.add_argument("--run-id", default=None, help="run id [A-Za-z0-9_-]{1,64} (default: generated)")
     command.add_argument("--hello-timeout", type=float, default=180.0, help="seconds to wait for the engine hello")
     command.add_argument("--allow-dirty", action="store_true",
@@ -72,7 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "run-smoke" and args.scenario is not None:
+        parser.error("run-smoke does not support --scenario; use run-provision for a provisioning scenario")
     if args.command in ("run-smoke", "run-agent", "run-provision"):
         extra = {}
         if args.command == "run-provision":
