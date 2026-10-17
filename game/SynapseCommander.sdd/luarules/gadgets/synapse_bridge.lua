@@ -980,12 +980,20 @@ if gadgetHandler:IsSyncedCode() then
         -- engine UnitCmdDone callback. Physical arrival is still terminal.
         effect("order_done", frame, unitID, command.intent_id, { reason = "arrived" }, command.principal)
         pending[unitID] = nil
-      elseif x and ((x - command.last_x) * (x - command.last_x) + (z - command.last_z) * (z - command.last_z) >= 1 then
-        command.last_x, command.last_z, command.progress_frame = x, z, frame
-        effect("unit_moved", frame, unitID, command.intent_id, { pos = { x, z } }, command.principal)
-      elseif frame - command.progress_frame >= 150 then
-        effect("order_done", frame, unitID, command.intent_id, { reason = "no_progress" }, command.principal)
-        pending[unitID] = nil
+      elseif x then
+        -- Progress is any displacement of at least one elmo since the last mark;
+        -- unit_moved is still reported only every 32 elmos so a moving body does
+        -- not flood the outbox once per frame.
+        local mx, mz = x - (command.mark_x or command.last_x), z - (command.mark_z or command.last_z)
+        if mx * mx + mz * mz >= 1 then command.mark_x, command.mark_z, command.progress_frame = x, z, frame end
+        local dx, dz = x - command.last_x, z - command.last_z
+        if dx * dx + dz * dz >= 32 * 32 then
+          command.last_x, command.last_z = x, z
+          effect("unit_moved", frame, unitID, command.intent_id, { pos = { x, z } }, command.principal)
+        elseif frame - command.progress_frame >= 150 then
+          effect("order_done", frame, unitID, command.intent_id, { reason = "no_progress" }, command.principal)
+          pending[unitID] = nil
+        end
       end
     end
     update_rescue_state(frame)

@@ -64,6 +64,43 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn('arrival_radius = payload.verb == "advance" and 16 or 50', self.source)
         self.assertIn("Physical arrival is still terminal", self.source)
 
+    def test_lua_delimiters_are_balanced(self) -> None:
+        # This is a preflight, not a full Lua parser.  It catches the missing
+        # ')' that prevented LuaRules from loading in native world-smoke; the
+        # pinned engine remains the authority for complete Lua validation.
+        pairs = {"(": ")", "[": "]", "{": "}"}
+        closing = set(pairs.values())
+        stack: list[tuple[str, int]] = []
+        quote: str | None = None
+        escaped = False
+        index = 0
+        while index < len(self.source):
+            char = self.source[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+                index += 1
+                continue
+            if self.source.startswith("--", index):
+                newline = self.source.find("\n", index + 2)
+                index = len(self.source) if newline < 0 else newline + 1
+                continue
+            if char in {"'", '"'}:
+                quote = char
+            elif char in pairs:
+                stack.append((char, index))
+            elif char in closing:
+                self.assertTrue(stack, f"unexpected {char!r} at byte {index}")
+                opening, opened_at = stack.pop()
+                self.assertEqual(pairs[opening], char, f"mismatch from byte {opened_at}")
+            index += 1
+        self.assertIsNone(quote, "unterminated Lua string")
+        self.assertFalse(stack, f"unclosed Lua delimiter(s): {stack}")
+
     def test_already_arrived_rejects_before_rate_and_empty_queue_finishes(self) -> None:
         self.assertIn('emit_receipt(intent, "rejected", "already_at_waypoint")', self.source)
         self.assertIn('effect("order_done", frame, unitID, command.intent_id, { reason = "queue_empty" }', self.source)
