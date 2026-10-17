@@ -185,6 +185,19 @@ that record and carries the decision label only if the submitted envelope is
 the one the model produced. Raw prompts and outputs are kept in the private
 =decisions.jsonl=, never in the ledger.
 
+Optional provider routes use the same one-call =ModelReply= seam and only the
+documented HTTPS OpenAI-compatible chat endpoint: OpenRouter uses
+=OPENROUTER_API_KEY= and =https://openrouter.ai/api/v1=; Crusoe uses
+=CRUSOE_API_KEY= and =https://api.inference.crusoecloud.com/v1=. A run chooses
+one explicit route and model; the route sends a system prompt and bounded
+observation as chat messages, has one bounded non-streaming request, and does
+not retry or silently fall back to Claude or a scripted action. A missing key,
+HTTP failure, malformed response, or unavailable reported model is a model
+error, never an accepted decision. Keys are request headers only: never argv,
+prompt, ledger, private decision record, or error body. Provider access and
+model availability remain event-day setup dependencies; no live request is
+implied by the fake-route tests.
+
 =PASS= needs: hello; unit and =W1= observed; an accepted advance chosen by the
 model; displacement within 300 frames after its receipt; =order_done= within
 600 frames; inference, submission, receipt, effect and moved observation in

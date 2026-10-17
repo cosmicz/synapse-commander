@@ -137,6 +137,7 @@ class ClaudeCliRouteTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--tools") + 1], "")
         self.assertIn("--no-session-persistence", argv)
         self.assertEqual(argv[argv.index("--model") + 1], "claude-sonnet-5")
+        self.assertIn("commander of team 0", argv[argv.index("--system-prompt") + 1])
         self.assertIs(seen["stdin"], subprocess.DEVNULL)
         self.assertEqual(seen["timeout"], 60)
 

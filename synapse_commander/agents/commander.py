@@ -74,15 +74,19 @@ class ClaudeCliRoute:
     name = "claude-cli"
 
     def __init__(self, model: str, *, timeout_s: float = DEFAULT_CALL_TIMEOUT_S,
-                 executable: str = "claude", runner: Callable[..., Any] = subprocess.run) -> None:
+                 system_prompt: str = SYSTEM_PROMPT, executable: str = "claude",
+                 runner: Callable[..., Any] = subprocess.run) -> None:
         self.model = model
         self.timeout_s = timeout_s
+        if not isinstance(system_prompt, str) or not system_prompt:
+            raise ValueError("system_prompt must be a non-empty string")
+        self.system_prompt = system_prompt
         self.executable = executable
         self.runner = runner
 
     def argv(self, prompt: str) -> list[str]:
         return [self.executable, "-p", prompt, "--output-format", "json", "--model", self.model,
-                "--system-prompt", SYSTEM_PROMPT, "--tools", "", "--safe-mode",
+                "--system-prompt", self.system_prompt, "--tools", "", "--safe-mode",
                 "--strict-mcp-config", "--no-session-persistence"]
 
     def call(self, prompt: str) -> ModelReply:

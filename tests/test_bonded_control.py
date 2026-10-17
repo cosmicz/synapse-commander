@@ -119,6 +119,7 @@ class BondedTests(unittest.TestCase):
 
     def test_route_keeps_tools_disabled_and_uses_rescue_prompt(self):
         argv = BondedClaudeRoute('test-model').argv('human order')
+        self.assertIn("bonded commander", argv[argv.index('--system-prompt') + 1])
         self.assertEqual(argv[argv.index('--tools') + 1], '')
         self.assertIn('move_to', argv[argv.index('--system-prompt') + 1])
 

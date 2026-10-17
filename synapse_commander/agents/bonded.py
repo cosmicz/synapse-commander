@@ -35,10 +35,8 @@ For extraction messages, the local recipient policy understands 'extract at X Z'
 
 
 class BondedClaudeRoute(ClaudeCliRoute):
-    def argv(self, prompt):
-        argv = super().argv(prompt)
-        argv[argv.index('--system-prompt') + 1] = SYSTEM_PROMPT
-        return argv
+    def __init__(self, model, **kwargs):
+        super().__init__(model, system_prompt=SYSTEM_PROMPT, **kwargs)
 
 
 class BondedCommander:
