@@ -16,7 +16,7 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(self.t.hello(),{})
     def test_pending_and_size_cap(self):
         env=IntentEnvelope("IntentEnvelope/v1","i","p","0","o",1,"TASK",{"unit":"1","verb":"advance","args":{}})
-        self.assertEqual(self.t.submit_intent(env,0).reason,"pending")
+        with self.assertRaises(TimeoutError): self.t.submit_intent(env,0)
         self.assertIn(b'"seq":1',self.t.inbox.read_bytes())
         self.assertIn(b'"team":0',self.t.inbox.read_bytes()); self.assertIn(b'"unit_id":1',self.t.inbox.read_bytes())
     def test_events_preserve_sequence(self):

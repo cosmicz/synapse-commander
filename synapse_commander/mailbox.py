@@ -51,7 +51,7 @@ class MailboxTransport:
             receipt = self.receipt(envelope.intent_id)
             if receipt: return IntentReceipt(envelope.intent_id, receipt.get("status") == "accepted", int(receipt.get("frame") or 0), "engine-" + envelope.intent_id, receipt.get("reason"))
             time.sleep(.01)
-        return IntentReceipt(envelope.intent_id, False, self.current_frame(), "mailbox", "pending")
+        raise TimeoutError("engine receipt is pending")
     def close(self) -> None:
         self._seq += 1
         with self.inbox.open("ab") as file: file.write(json.dumps({"seq": self._seq, "kind": "control", "op": "quit"}).encode() + b"\n")
