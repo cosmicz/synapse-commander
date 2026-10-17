@@ -1,6 +1,7 @@
 """Append-only synapse-mailbox/0 transport; the engine remains authoritative."""
 from __future__ import annotations
 from collections.abc import Mapping
+import hashlib
 import json
 from pathlib import Path
 from threading import RLock
@@ -12,6 +13,7 @@ from .protocol import IntentEnvelope, IntentReceipt
 MAX_LINE = 4096
 MAX_OUTBOX_LINE = 32768
 MAX_READ_BATCH = 256
+MAX_PRINCIPAL_MESSAGES = 16
 OUTBOX_KINDS = frozenset({"hello", "observation", "receipt", "effect", "scenario", "bridge_error", "bye"})
 
 
@@ -57,10 +59,60 @@ class MailboxTransport:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.inbox, self.outbox = self.dir / "inbox.jsonl", self.dir / "outbox.jsonl"
         self.inbox.touch(); self.outbox.touch(); self._offset = 0; self._seq = 0; self._events: list[dict[str, Any]] = []; self._receipts: dict[str, dict[str, Any]] = {}; self._observation: dict[str, Any] | None = None; self._principal_observations: dict[str, dict[str, Any]] = {}; self._hello: dict[str, Any] | None = None
+        # Outbox ingestion continues while a principal is inside a slow model
+        # call.  Keep a tiny per-principal message inbox before replacing the
+        # latest body, so one engine tick cannot erase a delivered delegation.
+        self._principal_messages: dict[str, dict[tuple[str, int, str], dict[str, Any]]] = {}
         self._read_lock = RLock()
         self._submit_lock = RLock()
         self._receipt_seq: dict[str, int] = {}
         self._pending_receipts: dict[str, int] = {}
+
+    @staticmethod
+    def _message_key(report: Mapping[str, Any]) -> tuple[str, int, str]:
+        return (str(report["from"]), int(report["observed_frame"]),
+                hashlib.sha256(str(report["text"]).encode("utf-8")).hexdigest())
+
+    def _ingest_messages(self, body: dict[str, Any], frame: int) -> None:
+        principal, reports = body.get("principal"), body.get("reports")
+        if not isinstance(principal, str) or not isinstance(reports, list):
+            return
+        inbox = self._principal_messages.setdefault(principal, {})
+        for report in reports:
+            if not isinstance(report, dict) or set(report) != {
+                    "kind", "from", "text", "observed_frame", "delivered_frame", "age_frames"}:
+                continue
+            sender, text = report.get("from"), report.get("text")
+            observed, delivered = report.get("observed_frame"), report.get("delivered_frame")
+            if (report.get("kind") != "message" or not isinstance(sender, str) or not sender
+                    or not isinstance(text, str) or len(text) > 256
+                    or not isinstance(observed, int) or isinstance(observed, bool) or observed < 0
+                    or not isinstance(delivered, int) or isinstance(delivered, bool)
+                    or delivered < 0 or observed > frame or delivered > frame):
+                continue
+            item = {"kind": "message", "from": sender, "text": text,
+                    "observed_frame": observed, "delivered_frame": delivered,
+                    "age_frames": frame - observed}
+            inbox[self._message_key(item)] = item
+        if len(inbox) > MAX_PRINCIPAL_MESSAGES:
+            keep = sorted(inbox.items(), key=lambda entry: (
+                entry[1]["delivered_frame"], entry[1]["observed_frame"], entry[0]))[-MAX_PRINCIPAL_MESSAGES:]
+            self._principal_messages[principal] = dict(keep)
+
+    def _principal_view(self, principal: str) -> dict[str, Any]:
+        body = self._principal_observations[principal]
+        messages = self._principal_messages.get(principal)
+        if not messages:
+            return body
+        frame = body.get("frame")
+        if not isinstance(frame, int):
+            return body
+        replayed = [{**item, "age_frames": frame - item["observed_frame"]}
+                    for item in messages.values() if item["observed_frame"] <= frame]
+        replayed.sort(key=lambda item: (item["delivered_frame"], item["observed_frame"], self._message_key(item)))
+        reports = body.get("reports", [])
+        return {**body, "reports": [item for item in reports
+                                      if not isinstance(item, dict) or item.get("kind") != "message"] + replayed}
     def _read(self) -> None:
         # One writer may be midway through a JSONL write while several HTTP
         # readers poll. Advance the cursor only after a whole validated line.
@@ -88,7 +140,9 @@ class MailboxTransport:
                     self._hello = body
                 elif event["kind"] == "observation" and str(body.get("team")) == self.team:
                     self._observation = body
-                    if isinstance(body.get("principal"), str): self._principal_observations[body["principal"]] = body
+                    if isinstance(body.get("principal"), str):
+                        self._ingest_messages(body, event["frame"])
+                        self._principal_observations[body["principal"]] = body
                 elif event["kind"] == "receipt":
                     self._receipts[body["intent_id"]] = body
                     self._receipt_seq[body["intent_id"]] = event["seq"]
@@ -99,7 +153,7 @@ class MailboxTransport:
         if str(team) != self.team or self._observation is None: raise KeyError(team)
         if principal is not None:
             if principal not in self._principal_observations: raise KeyError(principal)
-            return self._principal_observations[principal]
+            return self._principal_view(principal)
         return self._observation
     def receipt(self, intent_id: str) -> dict[str, Any] | None:
         """Return a delayed engine receipt without creating another attempt."""
