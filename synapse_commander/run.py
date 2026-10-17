@@ -48,6 +48,13 @@ TEAM = "0"
 FPS = 30
 ORDER_DONE_LIMIT_FRAMES = 600
 AGENT_PRINCIPAL = "agent-commander"
+# LiveMind decision labels: PRODUCE create_agent, MESSAGE delegate, TASK the mind's task label.
+AGENTS_REQUIRED_DECISIONS = [
+    {"label": "create_agent", "principal": "commander", "type": "PRODUCE"},
+    {"label": "delegate", "principal": "commander", "type": "MESSAGE"},
+    {"label": "relay_move", "principal": "job-1", "type": "TASK"},
+    {"label": "return_home", "principal": "M1", "type": "TASK"},
+]
 JOB_PRINCIPALS = tuple(f"job-{number}" for number in range(1, 9))
 AGENT_LABEL = ("agent commander: headless; every intent chosen by a live model from gateway observations; "
                "autonomy only as the verified ledger classifies it; not visual")
@@ -505,6 +512,8 @@ def run_smoke(config: SmokeConfig, *,
                     else "agent" if bonded and name == "commander" else "scripted")
              for name in view_principals},
             model_id=config.model if bonded or agents_mode else None,
+            # The live chain the recorder must see from live inference to label a principal agent_only.
+            required_decisions=AGENTS_REQUIRED_DECISIONS if agents_mode else None,
             external_budgets={"model_calls": config.call_budget, "per_call_timeout_s": config.call_timeout_s,
                               "wall_deadline_s": config.agent_deadline_s,
                               "route": getattr(model_route, "name", "claude-cli")} if bonded or agents_mode else None,
