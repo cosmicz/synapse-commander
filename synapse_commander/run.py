@@ -15,6 +15,7 @@ import hashlib
 import json
 from pathlib import Path
 import secrets
+import sys
 import threading
 import time
 from typing import Any, Callable, Protocol
@@ -31,6 +32,7 @@ from .agents.scripted import (
 from .agents.provision import ProvisionSmoke
 from .agents.world import WorldObserver
 from .agents.view import ViewSmoke
+from .agents.rescue import RescuePlay, RescueRehearsal, rescue_points
 from .agents.commander import SYSTEM_PROMPT, AgentCommander, ClaudeCliRoute, displacement_after_receipt
 from .gateway import LoopbackGateway
 from .scenarios import ScenarioError, load_scenario
@@ -148,6 +150,9 @@ class OrderedLedger:
         self._inference_links: dict[str, tuple[str, str, dict[str, Any]]] = {}
         self.inference_link_mismatches: list[str] = []
         self.done_intents: set[str] = set()
+        # Per-principal intent source when one gateway serves differently driven
+        # principals (a person at the prompt beside a scripted mind).
+        self.principal_origins: dict[str, str] = {}
 
     def record_inference(self, observation_id: str, payload: dict[str, Any],
                          intent: dict[str, Any] | None, label: str | None) -> str | None:
@@ -176,6 +181,7 @@ class OrderedLedger:
             self._drain(upto=sim_frame)
             if kind == "INTENT_SUBMITTED":
                 payload, causes = self._link_inference(payload, list(causes))
+                origin = self.principal_origins.get(str(payload.get("principal")), origin)
             return self._write(kind, sim_frame=sim_frame, origin=origin, payload=payload, causes=causes)
 
     def _link_inference(self, payload: dict[str, Any], causes: list[str]) -> tuple[dict[str, Any], list[str]]:
@@ -290,7 +296,10 @@ class SmokeConfig:
     client_timeout_s: float = 120.0
     client_poll_s: float = 0.25
     lock_wait_s: float = 1200.0
-    mode: str = "scripted"            # scripted, agent, provision, world, or embodied two-client view
+    mode: str = "scripted"            # scripted, agent, provision, world, view, or rescue
+    rescue_mode: str = "scripted"     # rescue: scripted rehearsal or play (a person commands)
+    play_stdin: Any = None
+    play_stdout: Any = None
     engine_binary: str = launch.HEADLESS_BINARY  # or "spring", the rendered client
     scenario: str | None = None       # a ScenarioTable/v1 name in the archive; None is Loop 0
     model: str = "claude-sonnet-5"    # agent mode: model pinned for the CLI route
@@ -368,13 +377,17 @@ def run_smoke(config: SmokeConfig, *,
     "agent" with the agent commander, whose decisions come from a live model.
     """
     run_id = launch.check_run_id(config.run_id)
-    if config.mode not in ("scripted", "agent", "provision", "world", "view"):
+    if config.mode not in ("scripted", "agent", "provision", "world", "view", "rescue"):
         raise launch.LaunchError(f"unknown mode {config.mode!r}")
     agent = config.mode == "agent"
     provision = config.mode == "provision"
     world = config.mode == "world"
     view = config.mode == "view"
-    if (provision or world or view) and config.scenario is None:
+    rescue = config.mode == "rescue"
+    play = rescue and config.rescue_mode == "play"
+    if rescue and config.rescue_mode not in ("scripted", "play"):
+        raise launch.LaunchError("rescue mode is scripted or play")
+    if (provision or world or view or rescue) and config.scenario is None:
         raise launch.LaunchError(f"{config.mode} mode needs a scenario table (--scenario)")
     if not config.rig_commit:
         raise launch.LaunchError("rig commit is required for the manifest")
@@ -397,7 +410,7 @@ def run_smoke(config: SmokeConfig, *,
         except ScenarioError as exc:
             raise launch.LaunchError(f"scenario {config.scenario!r}: {exc}") from exc
     view_principals: list[str] | None = None
-    if view:
+    if view or rescue:
         raw_principals = None if table is None else table.get("principals")
         if not isinstance(raw_principals, dict) or set(raw_principals) != {"commander", "M1"}:
             raise launch.LaunchError("view mode needs a table declaring commander and M1 principals")
@@ -424,7 +437,7 @@ def run_smoke(config: SmokeConfig, *,
     package = Path(__file__).resolve().parent
     for module in ("mailbox.py", "gateway.py", "protocol.py", "recording.py", "run.py", "launch.py",
                    "agents/scripted.py", "agents/commander.py", "agents/provision.py", "agents/world.py",
-                   "agents/view.py"):
+                   "agents/view.py", "agents/rescue.py"):
         path = package / module
         if path.exists():
             config_hashes[f"synapse_commander/{module}"] = launch.sha256_file(path)
@@ -441,11 +454,14 @@ def run_smoke(config: SmokeConfig, *,
                               "wall_deadline_s": config.agent_deadline_s,
                               "route": getattr(model_route, "name", "claude-cli")},
             required_decisions=[{"label": "advance_to_W1", "type": "TASK"}])
-    elif view:
+    elif view or rescue:
+        # A person at the prompt is not a declarable principal source (scripted or
+        # agent); play runs mark the commander's intents human in the ledger instead.
         manifest = build_manifest(
             run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit, identity=identity,
             config_hashes=config_hashes, presentation=presentation, scenario=scenario_identity(table),
-            principals=view_principals, principal_sources={name: "scripted" for name in view_principals},
+            principals=view_principals,
+            principal_sources=None if play else {name: "scripted" for name in view_principals},
         )
     else:
         manifest = build_manifest(run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit,
@@ -501,7 +517,9 @@ def run_smoke(config: SmokeConfig, *,
         verdict["hello_wall_s"] = round(time.monotonic() - t0, 3)
         ordered.pump()
 
-        gateway = LoopbackGateway(transport, principal=AGENT_PRINCIPAL if agent else ("commander" if view else PRINCIPAL),
+        if play:
+            ordered.principal_origins = {"commander": "human", "M1": "scripted"}
+        gateway = LoopbackGateway(transport, principal=AGENT_PRINCIPAL if agent else ("commander" if view or rescue else PRINCIPAL),
                                   team=TEAM, origin="agent" if agent else "scripted", ledger=ordered,
                                   scenario=config.scenario,
                                   sessions=None if principal_tokens is None else gateway_sessions(principal_tokens))
@@ -547,6 +565,14 @@ def run_smoke(config: SmokeConfig, *,
                                          poll_s=config.client_poll_s)
         elif world:
             driver = WorldObserver(client, wall_timeout_s=config.client_timeout_s, poll_s=config.client_poll_s)
+        elif rescue:
+            m1_client = GatewayClient(f"http://127.0.0.1:{server.server_port}", token=principal_tokens["M1"])
+            if play:
+                driver = RescuePlay(client, m1_client, stdin=config.play_stdin or sys.stdin,
+                                    stdout=config.play_stdout or sys.stdout, poll_s=config.client_poll_s)
+            else:
+                driver = RescueRehearsal(client, m1_client, points=rescue_points(table), poll_s=config.client_poll_s,
+                                         wall_timeout_s=config.client_timeout_s)
         elif view:
             driver = ViewSmoke(client, GatewayClient(f"http://127.0.0.1:{server.server_port}",
                                                       token=principal_tokens["M1"]),
@@ -1121,6 +1147,74 @@ def world_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) ->
     return checks
 
 
+def evaluate_rescue(trace: dict[str, Any], ordered: OrderedLedger | None,
+                    verdict: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Rescue rehearsal or play checks from the HTTP transcript; ledger checks follow."""
+    checks: dict[str, dict[str, Any]] = {}
+
+    def check(name: str, ok: bool, **detail: Any) -> None:
+        checks[name] = {"ok": bool(ok), **detail}
+
+    check("hello_seen", ordered is not None and ordered.hello is not None)
+    if "phases" in trace:  # scripted rehearsal
+        names = [p["phase"] for p in trace["phases"]]
+        check("relay_produced_and_moved", {"produce_relay", "relay_built", "relay_moving"} <= set(names),
+              relay_unit=trace.get("relay_unit"))
+        check("link_restored", trace.get("link_restored") is True)
+        check("extraction_point_delivered", "message_delivered" in names)
+        check("outcome_reached_or_labelled_pending", trace.get("outcome") in ("extracted", "pending"),
+              outcome=trace.get("outcome"),
+              label="extraction verbs not in the engine yet" if trace.get("outcome") == "pending" else None)
+        verdict["rescue_outcome"] = trace.get("outcome")
+    else:  # play
+        intents = trace.get("intents", [])
+        check("human_intents_answered", all(i.get("http") in (202, 400, 409) for i in intents),
+              count=len(intents), inputs=len(trace.get("inputs", [])))
+    _host_checks(verdict, check)
+    return checks
+
+
+def rescue_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    checks: dict[str, dict[str, Any]] = {}
+    submitted = [r for r in records if r["kind"] == "INTENT_SUBMITTED"]
+    origins = {(r["payload"].get("principal"), r["origin"]) for r in submitted}
+    checks["intent_sources"] = {"ok": bool(submitted), "principal_origins": sorted(origins)}
+    if "phases" in trace:
+        restored = [r for r in records if r["kind"] == "EFFECT" and r["payload"].get("type") == "link_restored"]
+        checks["link_restored_effect"] = {"ok": bool(restored),
+                                          "frames": [r["payload"].get("engine_frame") for r in restored]}
+        outcome = [r for r in records if r["kind"] == "SCENARIO_EVENT" and r["payload"].get("name") == "mission_outcome"]
+        if trace.get("outcome") == "extracted":
+            extracted = [r for r in records if r["kind"] == "EFFECT" and r["payload"].get("type") == "mind_extracted"]
+            checks["mind_extracted_once"] = {"ok": len(extracted) == 1, "count": len(extracted)}
+            checks["mission_outcome_extracted"] = {
+                "ok": len(outcome) == 1 and outcome[0]["payload"].get("result") == "extracted",
+                "outcome": None if not outcome else outcome[0]["payload"]}
+    else:
+        human = [r for r in submitted if r["origin"] == "human"]
+        checks["human_inputs_recorded"] = {
+            "ok": len(human) == len(trace.get("intents", [])) and all(r["payload"].get("principal") == "commander"
+                                                                        for r in human),
+            "human_intents": len(human)}
+    return checks
+
+
+def write_phase_plan(run_dir: Path, trace: dict[str, Any], verdict: dict[str, Any]) -> None:
+    """Phase labels with simulation time for the rendered capture's edit."""
+    phases = trace.get("phases")
+    if not phases:
+        return
+    lines = ["# Rescue rehearsal phase plan", "",
+             f"run {verdict.get('run_id')}  app {verdict.get('app_commit')}  outcome {trace.get('outcome')}",
+             "times are simulation seconds from game start (30 frames/s); wall seconds from client start", "",
+             "| phase | sim s | frame | wall s | camera |", "|---|---|---|---|---|"]
+    for phase in phases:
+        lines.append(f"| {phase['phase']} | {phase.get('sim_s')} | {phase.get('frame')} | {phase.get('wall_s')} | "
+                     f"{phase.get('camera')} |")
+    (run_dir / "phase_plan.md").write_text("\n".join(lines) + "\n")
+    (run_dir / "phase_plan.json").write_text(json.dumps(phases, indent=1) + "\n")
+
+
 def _probe_id(trace: dict[str, Any], name: str) -> str | None:
     for probe in trace.get("probes", []):
         if probe.get("name") == name:
@@ -1130,7 +1224,7 @@ def _probe_id(trace: dict[str, Any], name: str) -> str | None:
 
 def _evaluator(mode: str) -> Callable[..., dict[str, dict[str, Any]]]:
     return {"agent": evaluate_agent, "provision": evaluate_provision, "world": evaluate_world,
-            "view": evaluate_view}.get(mode, evaluate)
+            "view": evaluate_view, "rescue": evaluate_rescue}.get(mode, evaluate)
 
 
 def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedger | None,
@@ -1154,6 +1248,11 @@ def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedg
             checks["not_autonomous"] = {"ok": verification.autonomous is False
                                         and verification.classification in ("scripted_replay", "scripted_fixture"),
                                         "classification": verification.classification}
+        elif mode == "rescue":
+            checks.update(rescue_ledger_checks(records, trace))
+            checks["not_autonomous"] = {"ok": verification.autonomous is False,
+                                        "classification": verification.classification,
+                                        "principal_classifications": getattr(verification, "principal_classifications", None)}
         elif view:
             checks.update(view_ledger_checks(records, trace))
             checks["not_autonomous"] = {"ok": verification.autonomous is False
@@ -1176,6 +1275,8 @@ def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedg
         echoed = ((ordered.hello or {}).get("scenario") or {}).get("seed") if ordered is not None else None
         checks["scenario_seed_consistent"] = {"ok": echoed == selected["seed"], "manifest_and_start_script": selected["seed"],
                                               "engine_hello": echoed}
+    if mode == "rescue":
+        write_phase_plan(layout.run_dir, trace, verdict)
     verdict["checks"] = checks
     verdict["failed_checks"] = sorted(name for name, c in checks.items() if not c["ok"])
     verdict["verdict"] = "PASS" if not verdict["failed_checks"] and not verdict.get("error") else "FAIL"

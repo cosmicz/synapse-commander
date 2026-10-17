@@ -72,6 +72,16 @@ def build_parser() -> argparse.ArgumentParser:
                     "evaluator-only world_init record, and that no player observation carries hidden truth. "
                     "Exit 0 only on PASS. A scripted fixture.")
     add_run_arguments(world)
+    rescue = commands.add_parser(
+        "run-rescue",
+        help="the rescue demo: scripted rehearsal, or a person commanding the commander principal",
+        description="Runs a two-principal rescue table (default rescue_baseline) with the commander and the "
+                    "stranded mind M1, each through the gateway with its own session token. --mode scripted "
+                    "plays the relay-then-extract rescue and writes phase_plan.md (phase labels with "
+                    "simulation time); --mode play reads commander commands at a prompt (type help) while M1 "
+                    "runs a scripted policy, and records the commander's intents as human.")
+    add_run_arguments(rescue)
+    rescue.add_argument("--mode", dest="rescue_mode", choices=("scripted", "play"), default="scripted")
     view = commands.add_parser(
         "run-view",
         help="two-principal scripted view seam: M1 acts locally and sends a bounded message",
@@ -92,8 +102,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "run-smoke" and args.scenario is not None:
         parser.error("run-smoke does not support --scenario; use run-provision or run-world for a scenario")
-    if args.command in ("run-smoke", "run-agent", "run-provision", "run-world", "run-view"):
+    if args.command in ("run-smoke", "run-agent", "run-provision", "run-world", "run-rescue", "run-view"):
         extra = {}
+        if args.command == "run-rescue":
+            extra = dict(mode="rescue", rescue_mode=args.rescue_mode)
+            args.scenario = args.scenario or "rescue_baseline"
         if args.command == "run-world":
             extra = dict(mode="world")
             args.scenario = args.scenario or "rescue_baseline"
