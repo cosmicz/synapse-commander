@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from synapse_commander import launch
 
@@ -140,6 +141,26 @@ class OtherEnginesTests(unittest.TestCase):
             self.assertNotIn(proc.pid, launch.other_engines(own_pgid=proc.pid, binary=name))
             self.assertEqual(launch.engine_processes(binary=name)[proc.pid]["identified_by"], "exe")
             self.assertNotIn(proc.pid, launch.other_engines())
+
+    def test_unreadable_executable_falls_back_to_argv0_and_says_so(self) -> None:
+        name = f"synapse-test-engine-{os.getpid()}"
+        with tempfile.TemporaryDirectory() as tmp:
+            link = Path(tmp) / name
+            link.symlink_to(shutil.which("sleep"))
+            proc = self._start(link, "30")
+            real_readlink = os.readlink
+
+            def readlink(path, *args, **kwargs):
+                if str(path) == f"/proc/{proc.pid}/exe":
+                    raise PermissionError(path)
+                return real_readlink(path, *args, **kwargs)
+
+            with mock.patch("synapse_commander.launch.os.readlink", side_effect=readlink):
+                found = launch.engine_processes(binary=name)
+            self.assertEqual(found[proc.pid]["identified_by"], "argv0 (exe unreadable)")
+            self.assertIn(name, found[proc.pid]["cmdline"])
+            # With the executable readable, the same symlink is not an engine.
+            self.assertNotIn(proc.pid, launch.engine_processes(binary=name))
 
     def test_ignores_a_symlink_or_script_merely_named_like_the_engine(self) -> None:
         # Such as this suite's own helpers: a concurrent test run must not look like an engine.
