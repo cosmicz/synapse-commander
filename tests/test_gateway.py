@@ -146,7 +146,8 @@ class GatewayTests(unittest.TestCase):
     def test_principal_observation_keeps_only_typed_body_reports_and_message_permission(self) -> None:
         transport = MemoryTransport(frame=100)
         transport.publish_principal_observation("blue", "M1", observation(
-            "obs-M1-100", principal="M1", body={"id": 2, "pos": [1, 0, 0], "source": "own_body",
+            "obs-M1-100", principal="M1", body={"id": 2, "pos": [1, 0, 0], "source": "own_body", "link": False,
+                                                   "sensor_range": 900,
                                                    "private": "not forwarded"},
             reports=[{"kind": "message", "from": "commander", "text": "hold position",
                       "observed_frame": 70, "delivered_frame": 100, "age_frames": 30}],
@@ -154,7 +155,8 @@ class GatewayTests(unittest.TestCase):
         gateway = LoopbackGateway(transport, principal="legacy", team="blue", scenario="rescue_smoke",
                                   sessions={"m": "M1", "c": "commander"})
         result = gateway.observation("M1")
-        self.assertEqual(result["body"], {"id": 2, "pos": [1, 0, 0], "source": "own_body"})
+        self.assertEqual(result["body"], {"id": 2, "pos": [1, 0, 0], "source": "own_body", "link": False,
+                                           "sensor_range": 900})
         self.assertEqual(result["reports"], [{"kind": "message", "from": "commander", "text": "hold position",
                                                 "observed_frame": 70, "delivered_frame": 100, "age_frames": 30}])
         self.assertIn({"type": "MESSAGE"}, result["permitted_intents"])

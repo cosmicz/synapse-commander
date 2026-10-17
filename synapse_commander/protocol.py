@@ -309,7 +309,7 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
     controllers = frozenset() if scenario_table is None else frozenset(scenario_table["chips"])
     fields = frozenset({
         "id", "pos", "source", "team", "observed_frame", "age_frames",
-        "def", "health", "max_health", "commands", "controller",
+        "def", "health", "max_health", "commands", "controller", "sensor_range", "link",
     })
     for entity in value:
         if not isinstance(entity, Mapping):
@@ -325,6 +325,17 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
                     raise ProtocolError("invalid_observation", f"entity {field} must be finite and non-negative")
         if "commands" in projected:
             projected["commands"] = _public_count(projected["commands"], "entity commands")
+        if "sensor_range" in projected:
+            radius = projected["sensor_range"]
+            if type(radius) not in (int, float) or not math.isfinite(radius) or radius < 0:
+                raise ProtocolError("invalid_observation", "entity sensor_range must be finite and non-negative")
+            if projected.get("source") != "own_body":
+                projected.pop("sensor_range")
+        if "link" in projected:
+            if not isinstance(projected["link"], bool):
+                raise ProtocolError("invalid_observation", "entity link must be boolean")
+            if projected.get("source") != "own_body":
+                projected.pop("link")
         if "controller" in projected:
             if scenario_table is None or projected.get("source") not in {"own_unit", "own_body"}:
                 projected.pop("controller")
