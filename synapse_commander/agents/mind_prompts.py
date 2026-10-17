@@ -11,7 +11,8 @@ intent while its receipt, effect, or body command is pending.
 
 Reply with exactly one JSON object and nothing else:
  {"action":"intent","envelope":{"schema":"IntentEnvelope/v1",
-  "intent_id":"<new unique id>","principal":"<your exact principal>",
+  "intent_id":"<exact next_intent_id supplied in this call>",
+  "principal":"<your exact principal>",
   "based_on_observation_id":"<exact current observation_id>",
   "expires_at_frame":<current frame + 600>,"type":"<permitted type>",
   "payload":{...}}}
