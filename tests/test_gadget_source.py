@@ -101,6 +101,16 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIsNone(quote, "unterminated Lua string")
         self.assertFalse(stack, f"unclosed Lua delimiter(s): {stack}")
 
+    def test_mission_outcome_keeps_initial_and_runtime_losses_distinct(self) -> None:
+        # Extraction destroys the embodied unit to remove it from play.  The
+        # outcome must retain the fixture's initial loss set rather than
+        # retrospectively counting that removal as a loss before the run.
+        self.assertIn("initial_losses[a.name] = true", self.source)
+        start = self.source.index("local function outcome")
+        outcome = self.source[start:self.source.index("local function update_rescue_state", start)]
+        self.assertIn("if initial_losses[name] then before[#before + 1] = name end", outcome)
+        self.assertIn("if lost[name] and not initial_losses[name] then during[#during + 1] = name end", outcome)
+
     def test_already_arrived_rejects_before_rate_and_empty_queue_finishes(self) -> None:
         self.assertIn('emit_receipt(intent, "rejected", "already_at_waypoint")', self.source)
         self.assertIn('effect("order_done", frame, unitID, command.intent_id, { reason = "queue_empty" }', self.source)

@@ -23,7 +23,7 @@ if gadgetHandler:IsSyncedCode() then
   local SCENARIO_LIMIT, MAX_JOBS = 16384, 8
   local scenario, budgets, commander, factory = nil, nil, nil, nil
   local scenario_origin_x, scenario_origin_z = nil, nil
-  local extracted, lost, extraction_dwell, mission_outcome = {}, {}, {}, nil
+  local extracted, lost, initial_losses, extraction_dwell, mission_outcome = {}, {}, {}, {}, nil
   local jobs, job_seq, job_spawning, embodied, commander_lost = {}, 0, nil, {}, false
   -- Initial world (rah26-5hf). Assets hold evaluator truth; principal-mode
   -- observations derive only from each body and delivered reports.
@@ -517,6 +517,7 @@ if gadgetHandler:IsSyncedCode() then
                      position = { ax, Spring.GetGroundHeight(ax, az), az } }
     assets[a.name] = record
     asset_order[#asset_order + 1] = a.name
+    if a.state ~= "active" then initial_losses[a.name] = true end
     -- A loss the team witnessed before the run is legitimately known.
     record.known_lost = a.state ~= "active" and a.contact
     if a.state ~= "active" then return end
@@ -769,8 +770,8 @@ if gadgetHandler:IsSyncedCode() then
     local before, during, got = {}, {}, {}
     for _, name in ipairs(asset_order) do
       local a = assets[name]
-      if a.state ~= "active" then before[#before + 1] = name end
-      if lost[name] then during[#during + 1] = name end
+      if initial_losses[name] then before[#before + 1] = name end
+      if lost[name] and not initial_losses[name] then during[#during + 1] = name end
       if extracted[name] then got[#got + 1] = name end
     end
     local detail = { result = result, frame = frame, target = target, losses_before_run = before,
