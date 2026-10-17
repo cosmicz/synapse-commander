@@ -34,9 +34,8 @@ def provisioning_observation():
         }]}],
         "permitted_intents": [
             {"type": "TASK", "verbs": ["advance"]},
-            {"type": "PRODUCE", "factories": [{"id": "F0", "jobs_free": 8}],
-             "chassis": [{"id": "scout_v1", "remaining": 0}, {"id": "carrier_v1", "remaining": 3}, {"id": "relay_support_v1", "remaining": 3}],
-             "controllers": [{"id": "reasoner_large_v1", "remaining": 0}, {"id": "reasoner_small_v1", "remaining": 1}, {"id": "escort_fixed_v1", "remaining": 1}]},
+            {"type": "PRODUCE", "factories": ["F0"], "chassis": ["scout_v1", "carrier_v1", "relay_support_v1"],
+             "controllers": ["reasoner_large_v1", "reasoner_small_v1", "escort_fixed_v1"]},
         ],
     })
     return value
@@ -100,8 +99,8 @@ class SmokeObservationTests(unittest.TestCase):
         self.assertEqual(observed["factories"][0]["jobs"][0]["controller"], "reasoner_small_v1")
         self.assertEqual(observed["factories"][0]["jobs"][0]["done_frame"], 135)
         produce = next(item for item in observed["permitted_intents"] if item["type"] == "PRODUCE")
-        self.assertEqual(produce["factories"], [{"id": "F0", "jobs_free": 8}])
-        self.assertIn({"id": "reasoner_large_v1", "remaining": 0}, produce["controllers"])
+        self.assertEqual(produce["factories"], ["F0"])
+        self.assertIn("reasoner_large_v1", produce["controllers"])
 
     def test_provisioning_requires_the_declared_scenario_and_known_vocabularies(self):
         source = provisioning_observation()

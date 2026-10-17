@@ -380,13 +380,11 @@ def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
                 table = load_scenario()
             except ValueError as error:
                 raise ProtocolError("scenario_unavailable") from error
-            def entries(items, key, allowed):
-                if not all(isinstance(item, Mapping) and set(item) == {"id", key} and isinstance(item.get("id"), str) and item["id"] in allowed and _public_count(item.get(key), key) >= 0 for item in items):
-                    raise ProtocolError("invalid_observation", "invalid PRODUCE permission")
-                return [{"id": item["id"], key: item[key]} for item in items]
-            public_factories = entries(factories, "jobs_free", {table["factory"]["name"]})
-            public_chassis = entries(chassis, "remaining", set(table["chassis"]))
-            public_controllers = entries(controllers, "remaining", set(table["chips"]))
+            if not all(isinstance(item, str) for item in [*factories, *chassis, *controllers]):
+                raise ProtocolError("invalid_observation", "invalid PRODUCE permission")
+            public_factories = sorted({item for item in factories if item == table["factory"]["name"]})
+            public_chassis = sorted({item for item in chassis if item in table["chassis"]})
+            public_controllers = sorted({item for item in controllers if item in table["chips"]})
             if public_factories and public_chassis and public_controllers:
                 result["permitted_intents"].append({
                     "type": "PRODUCE",
