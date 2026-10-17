@@ -61,6 +61,7 @@ class ModelReply:
     latency_ms: int
     raw: str
     error: str | None = None
+    usage: dict[str, Any] | None = None   # provider-reported tokens and cost, when the route has them
 
 
 class ModelRoute(Protocol):

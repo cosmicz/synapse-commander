@@ -42,10 +42,31 @@ class OpenAICompatibleRouteTests(unittest.TestCase):
                          ("https://openrouter.ai/api/v1/chat/completions", 7.0))
         self.assertEqual(seen["authorization"], "Bearer test-only-secret")
         self.assertEqual(seen["body"], {
-            "model": "openai/gpt-oss-120b", "stream": False, "max_tokens": 512,
+            "model": "openai/gpt-oss-120b", "stream": False, "max_tokens": 1200,
+            "reasoning": {"enabled": True},
             "messages": [{"role": "system", "content": "bonded prompt"},
                          {"role": "user", "content": "current bounded observation"}],
         })
+
+    def test_reported_usage_keeps_numeric_tokens_and_cost_only(self) -> None:
+        def opener(_wire, *, timeout):
+            return Response({"model": "nvidia/nemotron-3-nano-30b-a3b",
+                             "choices": [{"message": {"content": "{}", "reasoning": "thinking"}}],
+                             "usage": {"prompt_tokens": 900, "completion_tokens": 450, "total_tokens": 1350,
+                                       "cost": 0.0001, "provider": "x",
+                                       "completion_tokens_details": {"reasoning_tokens": 402}}})
+
+        route = OpenRouterRoute("nvidia/nemotron-3-nano-30b-a3b", system_prompt="p",
+                                environment={"OPENROUTER_API_KEY": "k"}, opener=opener)
+        reply = route.call("o")
+        self.assertIsNone(reply.error)
+        self.assertEqual(reply.usage, {"prompt_tokens": 900, "completion_tokens": 450, "total_tokens": 1350,
+                                       "cost": 0.0001, "reasoning_tokens": 402})
+
+    def test_max_tokens_is_bounded(self) -> None:
+        for bad in (0, 9000, True, 1.5):
+            with self.assertRaises(ValueError):
+                OpenRouterRoute("m", system_prompt="p", max_tokens=bad, environment={})
 
     def test_crusoe_uses_its_explicit_endpoint_and_reports_the_provider_model(self) -> None:
         seen = {}

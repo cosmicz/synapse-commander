@@ -22,6 +22,11 @@ MAX_OUTPUT_CHARS = 32_768
 MAX_MODEL_CHARS = 256
 MAX_PROMPT_CHARS = 65_536
 MAX_SYSTEM_PROMPT_CHARS = 16_384
+DEFAULT_MAX_TOKENS = 512
+# Nemotron on OpenRouter needs reasoning on and room for its reasoning tokens
+# before the decision (a probe used about 400); with reasoning off it emits garbage.
+OPENROUTER_MAX_TOKENS = 1200
+USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "cost")
 
 
 def _reject_constant(_value: str) -> None:
@@ -49,6 +54,7 @@ class OpenAICompatibleRoute:
 
     def __init__(self, *, name: str, model: str, endpoint: str, key_env: str,
                  system_prompt: str, timeout_s: float = DEFAULT_CALL_TIMEOUT_S,
+                 max_tokens: int = DEFAULT_MAX_TOKENS, extra_body: Mapping[str, Any] | None = None,
                  environment: Mapping[str, str] | None = None,
                  opener: Callable[..., Any] = _NO_REDIRECT_OPENER) -> None:
         if not isinstance(name, str) or not name:
@@ -64,6 +70,10 @@ class OpenAICompatibleRoute:
         if (not isinstance(timeout_s, (int, float)) or isinstance(timeout_s, bool)
                 or not math.isfinite(timeout_s) or not 0 < timeout_s <= 600):
             raise ValueError("timeout_s must be a positive finite value no greater than 600")
+        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or not 0 < max_tokens <= 8192:
+            raise ValueError("max_tokens must be an integer in 1..8192")
+        self.max_tokens = max_tokens
+        self.extra_body = dict(extra_body or {})
         self.name, self.model, self.endpoint = name, model, endpoint.rstrip("/")
         self.key_env, self.system_prompt, self.timeout_s = key_env, system_prompt, float(timeout_s)
         self._environment = os.environ if environment is None else environment
@@ -86,8 +96,9 @@ class OpenAICompatibleRoute:
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": prompt},
                 ],
+                **self.extra_body,
                 "stream": False,
-                "max_tokens": 512,
+                "max_tokens": self.max_tokens,
             }, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
         except (TypeError, ValueError, UnicodeError):
             return ModelReply("", [], _ms_since(begin), "", error="invalid request")
@@ -121,17 +132,19 @@ class OpenAICompatibleRoute:
         text = choices[0]["message"]["content"]
         if len(text) > MAX_OUTPUT_CHARS:
             return ModelReply("", [reported_model], _ms_since(begin), raw, error="model output too large")
-        return ModelReply(text, [reported_model], _ms_since(begin), raw)
+        return ModelReply(text, [reported_model], _ms_since(begin), raw, usage=_usage(value.get("usage")))
 
 
 class OpenRouterRoute(OpenAICompatibleRoute):
     """OpenRouter's documented OpenAI-compatible chat route."""
 
     def __init__(self, model: str, *, system_prompt: str, timeout_s: float = DEFAULT_CALL_TIMEOUT_S,
+                 max_tokens: int = OPENROUTER_MAX_TOKENS,
                  environment: Mapping[str, str] | None = None,
                  opener: Callable[..., Any] = _NO_REDIRECT_OPENER) -> None:
         super().__init__(name="openrouter", model=model, endpoint="https://openrouter.ai/api/v1",
                          key_env="OPENROUTER_API_KEY", system_prompt=system_prompt, timeout_s=timeout_s,
+                         max_tokens=max_tokens, extra_body={"reasoning": {"enabled": True}},
                          environment=environment, opener=opener)
 
 
@@ -144,6 +157,19 @@ class CrusoeRoute(OpenAICompatibleRoute):
         super().__init__(name="crusoe", model=model, endpoint="https://api.inference.crusoecloud.com/v1",
                          key_env="CRUSOE_API_KEY", system_prompt=system_prompt, timeout_s=timeout_s,
                          environment=environment, opener=opener)
+
+
+def _usage(value: Any) -> dict[str, Any] | None:
+    """Numeric token counts and cost only; anything else the provider sends stays in the raw record."""
+    if not isinstance(value, dict):
+        return None
+    usage = {k: value[k] for k in USAGE_KEYS
+             if isinstance(value.get(k), (int, float)) and not isinstance(value[k], bool) and math.isfinite(value[k])}
+    details = value.get("completion_tokens_details")
+    reasoning = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    if isinstance(reasoning, int) and not isinstance(reasoning, bool):
+        usage["reasoning_tokens"] = reasoning
+    return usage or None
 
 
 def _ms_since(begin: float) -> int:

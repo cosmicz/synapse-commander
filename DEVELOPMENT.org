@@ -198,6 +198,14 @@ prompt, ledger, private decision record, or error body. Provider access and
 model availability remain event-day setup dependencies; no live request is
 implied by the fake-route tests.
 
+=run-rescue --mode agents --route openrouter= gives every mind an OpenRouter
+route (default model =nvidia/nemotron-3-nano-30b-a3b=, reasoning on,
+=max_tokens= 1200; Nemotron emits unusable text with reasoning off). The run
+stops before the engine starts if =OPENROUTER_API_KEY= is unset. Each
+inference record carries its route and the provider's reported token counts
+and cost; the verdict's =live_inference_recorded= check sums the cost. The
+default route stays =claude=.
+
 =PASS= needs: hello; unit and =W1= observed; an accepted advance chosen by the
 model; displacement within 300 frames after its receipt; =order_done= within
 600 frames; inference, submission, receipt, effect and moved observation in

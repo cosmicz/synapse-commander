@@ -191,7 +191,10 @@ class LiveMind:
             payload = {'principal': self.principal, 'inference_id': f'mind-{self.principal}-{call}',
                        'live': live, 'model_id': self.route.model, 'latency_ms': reply.latency_ms,
                        'prompt_sha256': sha256_text(prompt), 'output_sha256': sha256_text(reply.raw),
-                       'action': 'discarded' if canceled else decision.action}
+                       'action': 'discarded' if canceled else decision.action,
+                       'route': self.route.name}
+            if getattr(reply, 'usage', None):
+                payload['usage'] = reply.usage
             if envelope:
                 payload.update(intent_id=envelope['intent_id'], decision=label)
             if generation:

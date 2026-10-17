@@ -11,7 +11,7 @@ from typing import Sequence
 
 from . import launch
 from .launch import ENGINE_BINARIES, HEADLESS_BINARY
-from .run import SmokeConfig, new_run_id, run_smoke
+from .run import ROUTE_DEFAULT_MODELS, SmokeConfig, new_run_id, run_smoke
 
 
 def env_path(name: str) -> Path | None:
@@ -100,7 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
     rescue.add_argument("--mode", dest="rescue_mode", choices=("scripted", "play", "bonded", "agents"), default="scripted",
                         help="bonded: a person's orders reach a live model commander through a loopback control "
                              "surface (token in the run directory); M1 runs the shared policy")
-    rescue.add_argument("--model", default="claude-sonnet-5", help="bonded: model for the commander's CLI route")
+    rescue.add_argument("--route", choices=("claude", "openrouter"), default="claude",
+                        help="bonded/agents: model route for the minds; claude is the authenticated CLI, openrouter "
+                             "is one HTTPS chat call per decision with OPENROUTER_API_KEY (no fallback)")
+    rescue.add_argument("--model", default=None,
+                        help="bonded/agents: model for the route (claude-sonnet-5 for claude, "
+                             "nvidia/nemotron-3-nano-30b-a3b for openrouter)")
     rescue.add_argument("--call-budget", type=int, default=20, help="bonded: maximum model calls")
     rescue.add_argument("--call-timeout", type=float, default=60.0, help="bonded: seconds per model call")
     rescue.add_argument("--deadline", type=float, default=400.0, help="bonded/agents: wall seconds for the run")
@@ -131,7 +136,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command in ("run-smoke", "run-agent", "run-provision", "run-world", "run-rescue", "run-view"):
         extra = {}
         if args.command == "run-rescue":
-            extra = dict(mode="rescue", rescue_mode=args.rescue_mode, model=args.model, call_budget=args.call_budget,
+            extra = dict(mode="rescue", rescue_mode=args.rescue_mode, route=args.route,
+                         model=args.model or ROUTE_DEFAULT_MODELS[args.route], call_budget=args.call_budget,
                          call_timeout_s=args.call_timeout, agent_deadline_s=args.deadline,
                          control_port=args.control_port, agents_orders=args.orders)
             args.scenario = args.scenario or "rescue_baseline"

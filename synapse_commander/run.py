@@ -14,6 +14,7 @@ import datetime as _dt
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import secrets
@@ -320,6 +321,7 @@ class SmokeConfig:
     springsettings: Path | None = None    # replaces the empty per-run settings (window size for capture)
     extra_widgets_dir: Path | None = None  # *.lua copied into the run's LuaUI/Widgets (capture widget)
     model: str = "claude-sonnet-5"    # agent mode: model pinned for the CLI route
+    route: str = "claude"             # rescue agents/bonded: claude (CLI) or openrouter (HTTPS, OPENROUTER_API_KEY)
     call_budget: int = 20
     call_timeout_s: float = 60.0
     agent_deadline_s: float = 600.0
@@ -427,6 +429,12 @@ def run_smoke(config: SmokeConfig, *,
         raise launch.LaunchError(f"{config.mode} mode needs a scenario table (--scenario)")
     if not config.rig_commit:
         raise launch.LaunchError("rig commit is required for the manifest")
+    if config.route not in ROUTE_NAMES:
+        raise launch.LaunchError(f"model route is one of {sorted(ROUTE_NAMES)}")
+    if config.route != "claude" and model_route is None and (bonded or agents_mode) \
+            and not os.environ.get("OPENROUTER_API_KEY"):
+        # Checked before the engine starts; the key itself is read only by the route, per call.
+        raise launch.LaunchError("route openrouter needs OPENROUTER_API_KEY in the environment")
     if (not isinstance(config.receipt_wait_s, (int, float)) or isinstance(config.receipt_wait_s, bool)
             or not math.isfinite(config.receipt_wait_s) or config.receipt_wait_s <= 0):
         raise launch.LaunchError("receipt wait must be a positive finite number")
@@ -517,7 +525,8 @@ def run_smoke(config: SmokeConfig, *,
             required_decisions=AGENTS_REQUIRED_DECISIONS if agents_mode else None,
             external_budgets={"model_calls": config.call_budget, "per_call_timeout_s": config.call_timeout_s,
                               "wall_deadline_s": config.agent_deadline_s,
-                              "route": getattr(model_route, "name", "claude-cli")} if bonded or agents_mode else None,
+                              "route": getattr(model_route, "name", ROUTE_NAMES[config.route])}
+            if bonded or agents_mode else None,
         )
     else:
         manifest = build_manifest(run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit,
@@ -1288,7 +1297,14 @@ def rescue_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -
         for record in inferences:
             key = str(record["payload"].get("principal"))
             by_principal[key] = by_principal.get(key, 0) + 1
-        checks["live_inference_recorded"] = {"ok": bool(inferences), "by_principal": by_principal}
+        costs = [r["payload"]["usage"]["cost"] for r in inferences
+                 if isinstance(r["payload"].get("usage"), dict) and "cost" in r["payload"]["usage"]]
+        checks["live_inference_recorded"] = {
+            "ok": bool(inferences), "by_principal": by_principal,
+            "live": sum(1 for r in inferences if r["payload"].get("live")),
+            "routes": sorted({str(r["payload"].get("route")) for r in inferences}),
+            "models": sorted({str(r["payload"].get("model_id")) for r in inferences}),
+            "reported_cost_usd": round(sum(costs), 6) if costs else None}
     elif trace.get("bonded"):
         interventions = [r for r in records if r["kind"] == "OPERATOR_INTERVENTION"]
         inferences = [r for r in records if r["kind"] == "INFERENCE"]
@@ -1306,6 +1322,20 @@ def rescue_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -
     return checks
 
 
+ROUTE_NAMES = {"claude": "claude-cli", "openrouter": "openrouter"}
+ROUTE_DEFAULT_MODELS = {"claude": "claude-sonnet-5", "openrouter": "nvidia/nemotron-3-nano-30b-a3b"}
+
+
+def live_route(config: SmokeConfig, system_prompt: str, claude: Callable[[], Any]) -> Any:
+    """The selected model route for one mind; never a fallback to another route."""
+    if config.route == "claude":
+        return claude()
+    if config.route == "openrouter":
+        from .agents.model_routes import OpenRouterRoute
+        return OpenRouterRoute(config.model, system_prompt=system_prompt, timeout_s=config.call_timeout_s)
+    raise launch.LaunchError(f"unknown model route {config.route!r}")
+
+
 def make_agents(config: SmokeConfig, layout: launch.RunLayout, ordered: OrderedLedger, port: int,
                 tokens: dict[str, str], http_timeout_s: float, model_route: Any) -> Any:
     """Commander, job-1 and M1 as live minds, each with its own token, view and prompt."""
@@ -1314,7 +1344,9 @@ def make_agents(config: SmokeConfig, layout: launch.RunLayout, ordered: OrderedL
     prompts = {"commander": COMMANDER_PROMPT, "job-1": CHILD_PROMPT, "M1": TARGET_PROMPT}
     clients = {name: GatewayClient(f"http://127.0.0.1:{port}", token=tokens[name], timeout_s=http_timeout_s)
                for name in prompts}
-    routes = {name: model_route or LiveClaudeRoute(config.model, system_prompt=prompt, timeout_s=config.call_timeout_s)
+    routes = {name: model_route or live_route(
+                  config, prompt, lambda p=prompt: LiveClaudeRoute(config.model, system_prompt=p,
+                                                                   timeout_s=config.call_timeout_s))
               for name, prompt in prompts.items()}
     decisions_path = layout.run_dir / "decisions.jsonl"
     lock = threading.Lock()
@@ -1349,7 +1381,7 @@ def make_agents(config: SmokeConfig, layout: launch.RunLayout, ordered: OrderedL
 def make_bonded(config: SmokeConfig, layout: launch.RunLayout, ordered: OrderedLedger, transport: Any,
                 commander: GatewayClient, m1: GatewayClient, model_route: Any) -> Any:
     """Wire the bonded commander: private control token, orders as operator interventions."""
-    from .agents.bonded import BondedClaudeRoute
+    from .agents.bonded import SYSTEM_PROMPT as BONDED_PROMPT, BondedClaudeRoute
     token = secrets.token_urlsafe(32)
     token_path = layout.run_dir / "control_token"
     token_path.write_text(token + "\n", encoding="utf-8")
@@ -1369,7 +1401,8 @@ def make_bonded(config: SmokeConfig, layout: launch.RunLayout, ordered: OrderedL
         with decisions_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
-    route = model_route or BondedClaudeRoute(config.model, timeout_s=config.call_timeout_s)
+    route = model_route or live_route(config, BONDED_PROMPT,
+                                      lambda: BondedClaudeRoute(config.model, timeout_s=config.call_timeout_s))
     out = config.play_stdout or sys.stdout
     return BondedRescue(commander, m1, route=route, sink=ordered, on_order=on_order, on_decision=on_decision,
                         control_token=token, control_port=config.control_port, call_budget=config.call_budget,

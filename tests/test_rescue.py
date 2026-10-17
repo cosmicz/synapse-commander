@@ -17,6 +17,7 @@ import threading
 import unittest
 
 from synapse_commander.agents.rescue import absolute, parse_extraction, render_observation, rescue_points
+from synapse_commander import launch
 from synapse_commander.protocol import IntentReceipt
 from synapse_commander.run import SmokeConfig, run_smoke
 from synapse_commander.scenarios import load_scenario
@@ -337,6 +338,45 @@ class LuaRulesErrorTests(unittest.TestCase):
             self.assertEqual(len(found), 2)
             self.assertTrue(all("LuaRules" in line for line in found))
             self.assertEqual(luarules_errors(Path(tmp) / "missing.log"), [])
+
+
+class RouteSelectionTests(unittest.TestCase):
+    def config(self, out, **extra):
+        return SmokeConfig(engine_dir=out, data_dir=out, out_dir=out, run_id="route", rig_commit="b" * 40,
+                           scenario="rescue_baseline", mode="rescue", rescue_mode="agents", **extra)
+
+    def test_openrouter_route_is_selected_explicitly_with_its_prompt(self):
+        from synapse_commander.agents.model_routes import OpenRouterRoute
+        from synapse_commander.run import live_route
+        out = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(out))
+        route = live_route(self.config(out, route="openrouter", model="nvidia/nemotron-3-nano-30b-a3b"),
+                           "mind prompt", lambda: self.fail("no fallback to the claude route"))
+        self.assertIsInstance(route, OpenRouterRoute)
+        self.assertEqual((route.name, route.model, route.system_prompt, route.max_tokens),
+                         ("openrouter", "nvidia/nemotron-3-nano-30b-a3b", "mind prompt", 1200))
+        self.assertEqual(live_route(self.config(out), "p", lambda: "claude-route"), "claude-route")
+
+    def test_openrouter_without_a_key_stops_before_the_engine_starts(self):
+        from unittest import mock
+        out = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(out))
+        started = []
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(launch.LaunchError):
+                run_smoke(self.config(out, route="openrouter", model="m"), app=("a" * 40, 0),
+                          engine_factory=lambda _l: started.append(1))
+            with self.assertRaises(launch.LaunchError):
+                run_smoke(self.config(out, route="nowhere"), app=("a" * 40, 0),
+                          engine_factory=lambda _l: started.append(1))
+        self.assertEqual(started, [])
+
+    def test_cli_route_picks_the_route_default_model(self):
+        from synapse_commander.cli import build_parser
+        base = ["run-rescue", "--engine-dir", "e", "--data-dir", "d", "--out", "o", "--rig-commit", "r"]
+        args = build_parser().parse_args(base + ["--mode", "agents", "--route", "openrouter"])
+        self.assertEqual((args.route, args.model), ("openrouter", None))
+        self.assertEqual(build_parser().parse_args(base).route, "claude")
 
 
 class AgentsOrdersTests(unittest.TestCase):
