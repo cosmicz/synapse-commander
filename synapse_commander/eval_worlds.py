@@ -252,6 +252,14 @@ def validate(table: Mapping[str, Any], truth: Mapping[str, Any]) -> None:
     # Principals: the commander plus live reasoning minds, never a destroyed or invented one.
     names = {a["name"]: a for a in table["predeployed"]}
     reasoners = set(table["reasoner_chips"])
+    if not reasoners <= set(table["chips"]):
+        fail("reasoner chips must be declared chips")
+    commander_chip = table["commander"]["chip"]
+    if commander_chip not in reasoners or table["principals"].get("commander") != {"chip": commander_chip}:
+        fail("the commander principal carries the commander's own reasoner chip")
+    for asset in names.values():
+        if asset.get("controller") not in table["chips"]:
+            fail(f"{asset['name']} needs a declared controller chip")
     for name, principal in table["principals"].items():
         if name == "commander":
             continue
@@ -261,9 +269,11 @@ def validate(table: Mapping[str, Any], truth: Mapping[str, Any]) -> None:
     for asset in names.values():
         if asset.get("controller") in reasoners and asset["state"] == "active" and asset["name"] not in table["principals"]:
             fail(f"live reasoner {asset['name']} must be a principal")
-        if asset.get("controller") is None:
-            fail(f"{asset['name']} needs a real controller")
     distress = table["distress"]
+    ages = DESTROYED_PACKET_AGES if state == "destroyed_before_run" else DISTRESS_AGES
+    age = distress["last_known"].get("age_frames")
+    if not isinstance(age, int) or isinstance(age, bool) or age not in ages or truth.get("report_age_frames") != age:
+        fail(f"distress age must be one of the declared ages {ages}")
     source = names.get(distress["asset"])
     if source is None:
         fail("distress source must be a deployed asset")

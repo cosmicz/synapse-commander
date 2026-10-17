@@ -168,6 +168,19 @@ class InvalidCombinations(unittest.TestCase):
         self.refused("destroyed_before_run", lambda _, tr: tr.__setitem__("destroyed_at_frame", 10))
         self.refused("never_deployed", lambda t, _: assets(t)["E1"].__setitem__("controller", "reasoner_small_v1"))
 
+    def test_commander_principal_and_controllers_are_declared_chips(self) -> None:
+        self.refused("present_stranded", lambda t, _: t["principals"]["commander"].__setitem__("chip", "reasoner_small_v1"))
+        self.refused("present_stranded", lambda t, _: t["commander"].__setitem__("chip", "escort_fixed_v1"))
+        self.refused("never_deployed", lambda t, _: assets(t)["E1"].__setitem__("controller", "invented_v9"))
+        self.refused("present_stranded", lambda t, _: t["reasoner_chips"].append("invented_v9"))
+
+    def test_report_ages_are_declared_and_positive(self) -> None:
+        for age in (-900, 0, 901, True):
+            with self.subTest(age=age):
+                self.refused("present_stranded", lambda t, tr, age=age: (
+                    t["distress"]["last_known"].__setitem__("age_frames", age), tr.__setitem__("report_age_frames", age)))
+        self.refused("present_stranded", lambda _, tr: tr.__setitem__("report_age_frames", 600 if tr["report_age_frames"] != 600 else 900))
+
     def test_truth_must_describe_the_table(self) -> None:
         table, truth = world("present_stranded")
         self.assertRaises(ew.EvalWorldError, ew.validate, table, dict(truth, table_sha256="0" * 64))
