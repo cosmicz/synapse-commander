@@ -1209,7 +1209,15 @@ def rescue_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -
         outcome = [r for r in records if r["kind"] == "SCENARIO_EVENT" and r["payload"].get("name") == "mission_outcome"]
         if trace.get("outcome") == "extracted":
             extracted = [r for r in records if r["kind"] == "EFFECT" and r["payload"].get("type") == "mind_extracted"]
-            checks["mind_extracted_once"] = {"ok": len(extracted) == 1, "count": len(extracted)}
+            # One record per viewer stream (the extracted mind and the commander), never a second extraction.
+            per_principal: dict[str, int] = {}
+            for record in extracted:
+                key = str(record["payload"].get("principal"))
+                per_principal[key] = per_principal.get(key, 0) + 1
+            units = {(record["payload"].get("detail") or {}).get("unit_id") for record in extracted}
+            checks["mind_extracted_once"] = {"ok": bool(extracted) and set(per_principal.values()) == {1}
+                                             and len(units) == 1,
+                                             "per_principal": per_principal, "units": sorted(units, key=str)}
             checks["mission_outcome_extracted"] = {
                 "ok": len(outcome) == 1 and outcome[0]["payload"].get("result") == "extracted",
                 "outcome": None if not outcome else outcome[0]["payload"]}
