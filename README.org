@@ -14,11 +14,20 @@ useful cooperation through the game's mechanics, not privileged information
 or arbitrary handicaps. Whether it works is a question to test.
 
 * State of the project
-Repository scaffold only. The selected engine path is Recoil/Beyond All Reason
-in a Linux VM; runtime verification and the first mission are still in progress.
-No playable build, benchmark result or release is claimed.
+Early backend only. The selected engine path is Recoil/Beyond All Reason. The
+first loop (/Loop 0/) is a headless smoke: a scripted client sends one typed
+intent through a loopback HTTP gateway, a game-side Lua bridge validates it and
+orders one unit, and the movement is read back through the same gateway, with
+a manifest and hash-chained ledger recorded from the start. It is a scripted
+fixture, not autonomous play, not the Broken Relay mission and not a visual
+demo. No playable build, benchmark result or release is claimed.
 See [[file:DEVELOPMENT.org][development context]] and [[file:AGENTS.md][contribution rules]].
 
-There are no application build/run/test commands yet. The first runtime
-milestone must supply and verify them. This repository is independent of
-event coordination and contains no tracker database or private event records.
+* Commands
+- Tests (Python 3.13 standard library, no engine): =python3 -m unittest discover -s tests=
+- Loop 0 headless smoke against staged engine artifacts:
+  =python3 -m synapse_commander run-smoke --engine-dir ENGINE --data-dir DATA --game-dir BAR --out EVIDENCE --lock-dir LOCK --rig-commit SHA=
+  (exit 0 only on PASS; see [[file:DEVELOPMENT.org::*Loop 0 native smoke][Loop 0 native smoke]]).
+
+This repository is independent of event coordination and contains no tracker
+database, private event records, engine binaries or BAR assets.

@@ -2,9 +2,10 @@
 #+startup: overview
 
 * Implementation boundary
-The repository currently contains project context, not game behavior.
-The selected engine path is Recoil/Beyond All Reason in a Linux VM. Demonstrate
-that runtime before committing to an adapter or engine extension.
+The repository contains the Loop 0 backend smoke, not game behavior. The
+selected engine path is Recoil/Beyond All Reason; the smoke runs the native
+Linux headless engine. Demonstrate each runtime claim with a bounded run before
+building on it.
 Separate deterministic simulation, bounded unit controllers,
 external reasoning and the human/spectator interface.
 
@@ -54,6 +55,66 @@ links. The configured gateway origin is trusted configuration, never a caller
 field. It records the whole normalized observation and typed envelope, not only
 their identifiers. It emits no =EFFECT= record: that can only come from an
 authoritative engine-side state change.
+
+* Loop 0 native smoke
+=python3 -m synapse_commander run-smoke= is the first end-to-end entry point.
+It needs the pinned Recoil 2026.07.04 =spring-headless= (=--engine-dir=), an
+engine data directory with =maps/supreme_isthmus_v2.1.sd7= (=--data-dir=), the
+stock BAR checkout at =f6f07eaf= (=--game-dir=), a private evidence root
+(=--out=), the project runtime lock directory (=--lock-dir=) and the rig commit
+for the manifest (=--rig-commit=). All of these are supplied at launch; no host
+path, credential or downloaded asset is stored in this repository.
+
+| Layer | Module |
+|-------+--------|
+| Native launcher: run directory, start script, process group, lock | =synapse_commander/launch.py= |
+| Orchestration, ledger ingestion, verdict | =synapse_commander/run.py=, =cli.py= |
+| Scripted reference client (HTTP only) | =synapse_commander/agents/scripted.py= |
+| Loopback gateway and intent schema | =gateway.py=, =protocol.py= |
+| Engine port: file mailbox =synapse-mailbox/0= | =mailbox.py= |
+| Engine side: synced validation/orders, unsynced mailbox I/O | =game/SynapseCommander.sdd= |
+| Manifest, append-only ledger, verification | =recording.py= |
+
+One run creates =OUT/RUN_ID/= and refuses to reuse it. Its =write/= directory is
+the engine's =--write-dir=, with =games/BAR.sdd=, =games/SynapseCommander.sdd=
+and the map linked in, a generated start script (one player on team 0, no cheat
+or debug commands, =synapse_run_id= modoption, =GameType=Synapse Commander 0=)
+and an empty per-run =springsettings.cfg=. The app archive depends on stock BAR
+and must not shadow BAR files: an archive =modoptions.lua= replaced BAR's and
+aborted unit-definition loading. The engine runs in its own process group;
+teardown sends SIGTERM to that group only, escalates to SIGKILL after a bound
+and records the result. The lock is the rig's atomic =mkdir= lock with a
+=pid== owner line, compatible with its shell =vmlock.sh=.
+
+Order of a run: manifest (rig/app commits, engine/map hashes, game commit,
+start-script, settings, archive and module hashes, scenario, clock mode,
+presentation) and =RUN_START= are written before the engine starts. The client
+waits for an observation with its unit, submits one =TASK advance=, watches
+later observations for displacement, then submits negative probes and checks
+that nothing moves. Engine outbox effects and scenario events are ingested into
+the same ledger, each effect citing the receipt or event that caused it. The
+ledger's =sim_frame= is the frame of ingestion; a record ingested after a later
+frame keeps its own frame as =source_frame= or =engine_frame=.
+
+=verdict.json= is computed from the verified ledger and the client's HTTP
+transcript. =PASS= needs every check: engine hello; unit and waypoint =W1=
+observed; advance accepted; displacement over 50 map units observed within 300
+frames of the receipt, at a frame later than the receipt; =order_done= within
+600 frames; submission, receipt, effect and moved observation in causal ledger
+order; each probe rejected with its stable code (gateway or engine layer) and
+no effect or acceptance in the ledger; no movement after the probes; ledger
+verified and classified as not autonomous; bounded teardown. The probes are an
+unsupported verb, =PRODUCE=, a raw-engine payload, an unknown observation, an
+expired intent, a foreign (Gaia) unit, a caller-supplied identity, and a stale
+observation over 900 frames old. The HTTP path cannot express a wrong team:
+the gateway injects principal and team, which the identity probe checks.
+
+Evidence limits: the client's intents are preloaded, so the ledger classifies
+the run as =scripted_replay=; it is not autonomous play. It is headless, not a
+visual demo. It moves one unit to a fixed waypoint and is not the Broken Relay
+mission. The ledger hash chain detects accidental corruption, not forgery.
+=tests/test_loop_orchestration.py= exercises the same orchestration with an
+in-process fake engine; it checks wiring and verdict rules, not the engine.
 
 * Initial upstream runtime evidence — October 17, 2026
 Recoil 2026.07.04 ARM64 Linux executes in a VM. Stock BAR at
