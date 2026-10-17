@@ -28,6 +28,10 @@ from .transport import EngineTransport
 OBSERVATION_HISTORY_FRAMES = 900
 
 
+class PrincipalUnembodied(RuntimeError):
+    """An authenticated future job has no engine body/view yet."""
+
+
 class LoopbackGateway:
     """Serve one fixed principal/team on loopback only.
 
@@ -45,6 +49,7 @@ class LoopbackGateway:
         ledger: LedgerSink | None = None,
         scenario: str | None = None,
         sessions: dict[str, str] | None = None,
+        unembodied_principals: set[str] | frozenset[str] = frozenset(),
         receipt_wait_s: float = 1.0,
     ) -> None:
         self.transport = transport
@@ -57,6 +62,9 @@ class LoopbackGateway:
             raise ValueError("receipt_wait_s must be a positive finite number")
         self.receipt_wait_s = float(receipt_wait_s)
         self._sessions = dict(sessions or {})
+        self._unembodied_principals = set(unembodied_principals)
+        if not self._unembodied_principals.issubset(set(self._sessions.values())):
+            raise ValueError("unembodied principals require authenticated sessions")
         self._scenario = None
         if scenario is not None:
             try:
@@ -70,10 +78,9 @@ class LoopbackGateway:
         # would turn the engine's response into an oracle for another
         # principal's fetch history.
         self._observation_principals: dict[str, tuple[str, int]] = {}
-        self._submission_meta: dict[str, tuple[int | None, str]] = {}
-        self._submission_events: dict[str, str | None] = {}
-        self._intent_principals: dict[str, str] = {}
-        self._known_receipts: dict[str, Any] = {}
+        self._submission_meta: dict[tuple[str, str], int | None] = {}
+        self._submission_events: dict[tuple[str, str], str | None] = {}
+        self._known_receipts: dict[tuple[str, str], Any] = {}
         self._ledger_lock = RLock()
 
     def _prune_observation_history(self, current_frame: int) -> None:
@@ -107,7 +114,7 @@ class LoopbackGateway:
                    "envelope": envelope.to_wire(), "client": envelope.principal}
         if received is not None:
             payload["received_wall_ns"] = received
-        self._submission_meta[envelope.intent_id] = (received, envelope.principal)
+        self._submission_meta[(envelope.principal, envelope.intent_id)] = received
         return self.ledger.record(
             "INTENT_SUBMITTED",
             sim_frame=self.transport.current_frame(),
@@ -121,7 +128,7 @@ class LoopbackGateway:
             return
         payload = {"intent_id": receipt.intent_id, "status": "accepted" if receipt.accepted else "rejected",
                    "principal": principal, "client": principal}
-        received, _client = self._submission_meta.get(receipt.intent_id, (None, principal))
+        received = self._submission_meta.get((principal, receipt.intent_id))
         if received is not None:
             payload["received_wall_ns"] = received
         payload["frame"] = receipt.frame
@@ -143,6 +150,7 @@ class LoopbackGateway:
             observation = bounded_observation(source, scenario_table=self._scenario,
                                               principal=principal if self._sessions else None)
             if self._sessions:
+                self._unembodied_principals.discard(principal)
                 self._prune_observation_history(self.transport.current_frame())
                 self._observation_principals[observation["observation_id"]] = (principal, observation["frame"])
             self._record_observation(observation, principal)
@@ -151,6 +159,8 @@ class LoopbackGateway:
     def submit(self, value: Any, principal: str | None = None) -> Any:
         with self._ledger_lock:
             principal = self.principal if principal is None else principal
+            if self._sessions and principal in self._unembodied_principals:
+                raise PrincipalUnembodied(principal)
             if self._sessions and isinstance(value, dict) and value.get("principal") != principal:
                 raise ProtocolError("principal_mismatch", "session principal does not match envelope")
             if self._sessions and isinstance(value, dict):
@@ -163,22 +173,23 @@ class LoopbackGateway:
                                                      controllers=None if self._scenario is None else frozenset(self._scenario["chips"]),
                                                      principals=None if not self._sessions else frozenset(self._sessions.values()))
             submission_event = self._record_submission(envelope)
-            self._submission_events[envelope.intent_id] = submission_event
-            self._intent_principals[envelope.intent_id] = principal
+            key = (principal, envelope.intent_id)
+            self._submission_events[key] = submission_event
             receipt = self.transport.submit_intent(envelope, wait_s=self.receipt_wait_s)
             if receipt.reason in {"pending", "receipt_timeout"}:
                 raise TimeoutError("engine receipt is not yet known")
-            self._known_receipts[envelope.intent_id] = receipt
+            self._known_receipts[key] = receipt
             self._record_receipt(receipt, submission_event, principal)
             return receipt
 
     @staticmethod
-    def _receipt_from_transport(value: Any, intent_id: str) -> Any | None:
+    def _receipt_from_transport(value: Any, intent_id: str, principal: str) -> Any | None:
         if value is None:
             return None
         if hasattr(value, "to_wire") and hasattr(value, "intent_id"):
             return value
-        if not isinstance(value, dict) or value.get("intent_id") != intent_id:
+        if (not isinstance(value, dict) or value.get("intent_id") != intent_id
+                or value.get("principal") not in (None, principal)):
             raise ValueError("invalid receipt")
         accepted = value.get("status") == "accepted"
         if value.get("status") not in {"accepted", "rejected"} or not isinstance(value.get("frame"), int):
@@ -189,18 +200,19 @@ class LoopbackGateway:
     def receipt(self, intent_id: str, principal: str) -> Any | None:
         """Return one principal's known engine receipt without re-submitting it."""
         with self._ledger_lock:
-            if self._intent_principals.get(intent_id) != principal:
+            key = (principal, intent_id)
+            if key not in self._submission_events:
                 return None
-            receipt = self._known_receipts.get(intent_id)
+            receipt = self._known_receipts.get(key)
             if receipt is None:
                 lookup = getattr(self.transport, "receipt", None)
                 if lookup is None:
                     return None
-                receipt = self._receipt_from_transport(lookup(intent_id), intent_id)
+                receipt = self._receipt_from_transport(lookup(intent_id), intent_id, principal)
                 if receipt is None:
                     return None
-                self._known_receipts[intent_id] = receipt
-                self._record_receipt(receipt, self._submission_events.get(intent_id), principal)
+                self._known_receipts[key] = receipt
+                self._record_receipt(receipt, self._submission_events.get(key), principal)
             return receipt
 
     def make_server(self, port: int = 0, *, host: str = "127.0.0.1") -> ThreadingHTTPServer:
@@ -273,6 +285,8 @@ class LoopbackGateway:
                 try:
                     observation = gateway.observation(principal)
                     self._send(HTTPStatus.OK, observation)
+                except PrincipalUnembodied:
+                    self._send(HTTPStatus.NOT_FOUND, {"error": "not_found"})
                 except (KeyError, ProtocolError, ValueError):
                     self._send(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "observation_unavailable"})
 
@@ -304,6 +318,8 @@ class LoopbackGateway:
                     self._send(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "gateway_unavailable"})
                 except ProtocolError as exc:
                     self._send(HTTPStatus.BAD_REQUEST, {"error": exc.code})
+                except PrincipalUnembodied:
+                    self._send(HTTPStatus.CONFLICT, {"reason": "principal_unembodied"})
                 except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                     self._send(HTTPStatus.BAD_REQUEST, {"error": "malformed_json"})
                 except Exception:

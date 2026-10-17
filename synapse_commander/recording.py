@@ -302,7 +302,11 @@ class _LedgerState:
         self.observation_principals: dict[str, str] = {}  # observation_id -> principal
         # Rescue outcomes (rah26-kbk), keyed by roster/principal name.
         self.extracted_views: set[tuple[str, str]] = set()  # (viewer, target)
-        self.terminal: dict[str, tuple[str, int]] = {}      # target -> (mind_extracted|mind_lost, frame)
+        self.terminal: dict[str, tuple[str, int]] = {}      # target -> (mind_extracted|mind_lost, earliest frame)
+        # Each principal's latest observation and accepted-receipt engine frames,
+        # so a terminal fact recorded late still bounds what came before it.
+        self.last_observed: dict[str, int] = {}
+        self.last_accepted: dict[str, int] = {}
 
     def accept(self, record: Mapping[str, Any]) -> None:
         if not isinstance(record, Mapping):
@@ -514,21 +518,39 @@ class _LedgerState:
             if previous and previous[0] != effect:
                 raise LedgerError("extraction_after_loss" if effect == MIND_EXTRACTED else "loss_after_extraction",
                                   f"seq {seq} {target}")
+            if effect == MIND_EXTRACTED and (viewer, target) in self.extracted_views:
+                raise LedgerError("duplicate_extraction", f"seq {seq} {target} seen by {viewer}")
+            # The same terminal fact may reach several viewers; it keeps its
+            # earliest engine frame, whatever order the records arrive in.
+            earliest = (effect, frame) if previous is None or frame < previous[1] else previous
+            self._terminal_bound(target, seq, terminal=earliest)
             if effect == MIND_EXTRACTED:
-                if (viewer, target) in self.extracted_views:
-                    raise LedgerError("duplicate_extraction", f"seq {seq} {target} seen by {viewer}")
                 self.extracted_views.add((viewer, target))
-            # The same terminal fact may reach several viewers; it keeps its first frame.
-            self.terminal.setdefault(target, (effect, frame))
+            self.terminal[target] = earliest
             return
         principal = payload.get("principal")
-        if not _one_of(principal, self.terminal) or kind not in (OBSERVATION, INTENT_RECEIPT):
+        if not isinstance(principal, str) or kind not in (OBSERVATION, INTENT_RECEIPT):
             return
-        effect, frame = self.terminal[principal]
-        if kind == OBSERVATION and _engine_frame(payload, sim_frame) > frame:
-            # One final observation at the terminal frame, none after.
+        if kind == INTENT_RECEIPT and payload.get("status") != "accepted":
+            return  # a refusal is never an action
+        latest = self.last_observed if kind == OBSERVATION else self.last_accepted
+        frame = _engine_frame(payload, sim_frame)
+        frame = max(frame, latest.get(principal, frame))
+        self._terminal_bound(principal, seq, **{"observed" if kind == OBSERVATION else "accepted": frame})
+        latest[principal] = frame  # only once the record is admitted
+
+    def _terminal_bound(self, principal: str, seq: int, *, observed: int | None = None,
+                        accepted: int | None = None, terminal: tuple[str, int] | None = None) -> None:
+        """K5 by engine frame: one final observation at the terminal frame and no
+        accepted intent after it, regardless of the order records were written."""
+        effect, frame = terminal or self.terminal.get(principal, (None, None))
+        if effect is None:
+            return
+        observed = self.last_observed.get(principal, frame) if observed is None else observed
+        accepted = self.last_accepted.get(principal, frame) if accepted is None else accepted
+        if observed > frame:
             raise LedgerError("terminal_principal_observed", f"seq {seq} {principal} after {effect}")
-        if kind == INTENT_RECEIPT and payload.get("status") == "accepted":
+        if accepted > frame:
             raise LedgerError("terminal_principal_acted", f"seq {seq} {principal} after {effect}")
 
     @staticmethod

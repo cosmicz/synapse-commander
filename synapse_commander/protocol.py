@@ -478,7 +478,7 @@ def _bounded_expedition(value: Mapping[str, Any], result: dict[str, Any], scenar
             raise ProtocolError("invalid_observation", "invalid roster entry")
         status = item.get("status")
         expected = {"name", "def", "controller", "status", "unit_id"} if status == "in_contact" else {"name", "def", "controller", "status"}
-        if set(item) != expected or status not in {"in_contact", "no_contact"}:
+        if set(item) != expected or status not in {"in_contact", "no_contact", "extracted", "lost"}:
             raise ProtocolError("invalid_observation", "invalid roster entry")
         name = _public_identifier(item.get("name"), "roster name")
         if name in roster_names:
@@ -567,8 +567,11 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
     waypoints = scenario.get("waypoints", {})
     if not isinstance(waypoints, Mapping):
         raise ProtocolError("invalid_observation", "waypoints must be an object")
-    if "W1" in waypoints:
-        goal = waypoints["W1"]
+    public_waypoints: dict[str, list[int | float]] = {}
+    for waypoint in sorted(key for key in waypoints if isinstance(key, str)):
+        goal = waypoints[waypoint]
+        if not waypoint.startswith("W") or not waypoint[1:].isdigit():
+            continue
         valid = isinstance(goal, list) and len(goal) == 3
         if valid:
             try:
@@ -576,8 +579,10 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
             except OverflowError:
                 valid = False
         if not valid:
-            raise ProtocolError("invalid_observation", "W1 must contain three finite coordinates")
-        result["scenario"] = {"waypoints": {"W1": list(goal)}}
+            raise ProtocolError("invalid_observation", "waypoint must contain three finite coordinates")
+        public_waypoints[waypoint] = list(goal)
+    if public_waypoints:
+        result["scenario"] = {"waypoints": public_waypoints}
     if principal == "commander" and "objective" in value:
         objective = value["objective"]
         declared = None if scenario_table is None else scenario_table.get("objective")
@@ -589,7 +594,7 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
             raise ProtocolError("invalid_observation", "invalid commander objective")
         result["objective"] = {"type": objective["type"], "target": objective["target"],
                                "status": objective["status"]}
-    if principal == "commander" and "extraction" in scenario:
+    if principal is not None and "extraction" in scenario:
         extraction = scenario["extraction"]
         declared = None if scenario_table is None else scenario_table.get("objective")
         if (not isinstance(extraction, Mapping) or set(extraction) != {"id", "position", "radius"}

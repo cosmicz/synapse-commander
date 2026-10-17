@@ -1401,6 +1401,44 @@ class OutcomeRules(PrincipalLedgerCase):
         r.run_end(12, {})
         self.assertTrue(verify_ledger(self.path).ok)
 
+    def test_terminal_enforcement_uses_engine_frames_not_record_order(self):
+        # nav-rec yha review: a receipt for frame 9 recorded after a frame-10 terminal is fine.
+        r, ids = self.m1_extracted(frame=10)
+        sub = self.intent(r, "M1", "m-early", "obs-M1-0", [ids["om"]], frame=11)
+        self.receipt(r, "M1", "m-early", sub, frame=11, engine_frame=9)
+        r.run_end(12, {})
+        self.assertTrue(verify_ledger(self.path).ok)
+
+    def test_a_late_terminal_record_bounds_what_was_recorded_before_it(self):
+        # An accepted frame-11 receipt recorded before the delayed frame-10 terminal fact.
+        r, ids = self.two_streams(end=False)
+        sub = self.intent(r, "M1", "m-late", "obs-M1-0", [ids["om"]], frame=11)
+        self.receipt(r, "M1", "m-late", sub, frame=11)
+        self.refused("terminal_principal_acted",
+                     lambda: self.outcome_at(r, rec.MIND_EXTRACTED, "M1", "commander", recorded=12, frame=10))
+        r.close()
+        self.path.unlink()
+        r, _ = self.two_streams(end=False)
+        self.obs(r, "M1", "obs-M1-11", frame=11)
+        self.refused("terminal_principal_observed",
+                     lambda: self.outcome_at(r, rec.MIND_LOST, "M1", "M1", recorded=12, frame=10))
+        r.close()
+
+    def test_the_earliest_terminal_frame_bounds_the_principal(self):
+        # A second viewer's record of the same extraction at an earlier frame lowers the bound.
+        r, ids = self.two_streams(end=False)
+        self.outcome_at(r, rec.MIND_EXTRACTED, "M1", "commander", recorded=20, frame=20)
+        self.obs(r, "M1", "obs-M1-15", frame=20)  # fine against frame 20 alone
+        self.refused("terminal_principal_observed",
+                     lambda: self.outcome_at(r, rec.MIND_EXTRACTED, "M1", "M1", recorded=21, frame=10))
+        r.close()
+
+    def outcome_at(self, r, effect, target, viewer, *, recorded, frame):
+        cause = r.record(rec.SCENARIO_EVENT, sim_frame=recorded, origin="scenario", payload={"name": f"{effect}-cause"})
+        return r.record(rec.EFFECT, sim_frame=recorded, origin="engine",
+                        payload={"type": effect, "principal": viewer, "frame": frame,
+                                 "detail": {"target": target, "unit_id": 991}}, causes=[cause])
+
     def test_terminal_effects_name_their_target(self):
         r, _ = self.two_streams(end=False)
         cause = r.record(rec.SCENARIO_EVENT, sim_frame=3, origin="scenario", payload={"name": "x"})

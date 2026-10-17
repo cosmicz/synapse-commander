@@ -48,6 +48,7 @@ TEAM = "0"
 FPS = 30
 ORDER_DONE_LIMIT_FRAMES = 600
 AGENT_PRINCIPAL = "agent-commander"
+JOB_PRINCIPALS = tuple(f"job-{number}" for number in range(1, 9))
 AGENT_LABEL = ("agent commander: headless; every intent chosen by a live model from gateway observations; "
                "autonomy only as the verified ledger classifies it; not visual")
 CLASSIFICATION_LABEL = "scripted fixture: headless, scripted reference client, not autonomous, not visual"
@@ -439,11 +440,16 @@ def run_smoke(config: SmokeConfig, *,
         except ScenarioError as exc:
             raise launch.LaunchError(f"scenario {config.scenario!r}: {exc}") from exc
     view_principals: list[str] | None = None
+    session_principals: list[str] | None = None
     if view or rescue:
         raw_principals = None if table is None else table.get("principals")
         if not isinstance(raw_principals, dict) or set(raw_principals) != {"commander", "M1"}:
             raise launch.LaunchError("view mode needs a table declaring commander and M1 principals")
         view_principals = ["commander", "M1"]
+        # A produced reasoner body receives one deterministic principal.  Its
+        # private bearer token exists at launch, but the gateway refuses its
+        # view and intents until the engine publishes that body's first view.
+        session_principals = [*view_principals, *JOB_PRINCIPALS]
     seed = scenario_seed(table)
     script = launch.start_script(run_id=run_id, scenario=config.scenario, seed=seed,
                                  host_port=launch.JOIN_PORT if config.allow_join else launch.free_udp_port(),
@@ -537,7 +543,7 @@ def run_smoke(config: SmokeConfig, *,
                                    held_by="enclosing with-vmlock.sh" if lock.inherited else "launcher")
         recorder = Recorder.create(ledger_path, manifest)
         recorder.run_start(0)
-        principal_tokens = mint_principal_tokens(layout.run_dir, view_principals) if view_principals else None
+        principal_tokens = mint_principal_tokens(layout.run_dir, session_principals) if session_principals else None
         # The rendered client reads the mailbox once per drawn frame (a few per second),
         # so its receipts can take seconds; preserve its 10 s minimum while
         # allowing the run command to request a still longer bounded wait.
@@ -566,6 +572,7 @@ def run_smoke(config: SmokeConfig, *,
                                   team=TEAM, origin="agent" if agent else "scripted", ledger=ordered,
                                   scenario=config.scenario,
                                   sessions=None if principal_tokens is None else gateway_sessions(principal_tokens),
+                                  unembodied_principals=frozenset(JOB_PRINCIPALS) if principal_tokens else frozenset(),
                                   receipt_wait_s=receipt_wait_s)
         server = gateway.make_server(0)
         threading.Thread(target=server.serve_forever, name="gateway", daemon=True).start()
