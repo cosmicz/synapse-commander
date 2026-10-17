@@ -52,12 +52,12 @@ STRANDED_HEALTH = (0.3, 0.4, 0.5)
 DESTROYED_PACKET_AGES = (1800, 2700)    # the packet predates the destruction
 DESTRUCTION_LAG = (300, 600)            # frames between that packet and the loss
 
-# rah26-68j forward-base anchors (map-centre offsets) and their provenance.
+# Portable pins: the application fixture these anchors come from. The native
+# measurements behind them are pinned and cross-checked on the evaluator side.
 SOURCE_PINS = {
+    "fixture": "game/SynapseCommander.sdd/scenarios/rescue_baseline.json",
     "fixture_commit": "e57e680a29f738010c4e3a5603bfe8898ac15078",
     "fixture_sha256": "2e07e5b5a364d5c2eb2d849115cbc72e1fbd1f57ca7ea89d64d6b46b08656ec5",
-    "placement_rig_commit": "190bb47ebd16f1afd18d9a211693debbb4869680",
-    "placement_evidence": ["placement-20261017T204100Z", "placement-20261017T204444Z"],
 }
 ANCHORS = {
     "factory": (-512, 896), "S0": (-332, 576), "target": (-1536, 2176), "last_known": (-1312, 2176),
@@ -70,6 +70,13 @@ LINK_FACTS = {
     "target": {"from_factory": 1639.2, "from_commander": 1459.51, "terrain_clear": False},
     "S0": {"terrain_clear": True},
 }
+# Content pin for the geometry above; the evaluator side maps it to native evidence.
+GEOMETRY_SHA256 = hashlib.sha256(json.dumps(
+    {"anchors": ANCHORS, "commander_from_factory": COMMANDER_FROM_FACTORY, "radio_range": RADIO_RANGE,
+     "link_facts": LINK_FACTS}, sort_keys=True).encode()).hexdigest()
+
+
+SOURCE_PINS["geometry_sha256"] = GEOMETRY_SHA256
 
 
 class EvalWorldError(ValueError):
@@ -195,10 +202,6 @@ def inventory(table: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _anchor_offsets() -> set[tuple[int, int]]:
-    return {tuple(point) for point in ANCHORS.values()}
-
-
 def validate(table: Mapping[str, Any], truth: Mapping[str, Any]) -> None:
     """Raise EvalWorldError unless table and truth form one consistent evaluation world."""
     def fail(reason: str) -> None:
@@ -212,13 +215,29 @@ def validate(table: Mapping[str, Any], truth: Mapping[str, Any]) -> None:
     state = truth.get("target_state")
     if state not in TARGET_STATES or truth.get("cause") != CAUSES[state]:
         fail("unsupported target state or cause combination")
-    # Geometry: anchors only; contact flags as the measured links allow.
-    anchors = _anchor_offsets()
-    points = [table["factory"]["offset"], table["extraction_zones"]["extraction_v1"]["position"],
-              table["distress"]["last_known"]["position"]]
-    points += [a["position"] for a in table["predeployed"]] + [[w[0], w[2]] for w in table["waypoints"].values()]
-    if any(tuple(p) not in anchors for p in points) or table["commander"]["position"] != list(COMMANDER_FROM_FACTORY):
-        fail("positions must be 68j forward-base anchors")
+    # Geometry: every role sits on its own measured anchor, and the radio
+    # range is the one the link facts were measured against; anchor
+    # membership alone would let roles swap and void those facts.
+    roles = {"factory": table["factory"]["offset"], "extraction": table["extraction_zones"]["extraction_v1"]["position"],
+             "last_known": table["distress"]["last_known"]["position"]}
+    roles.update({"corridor_turn": table["waypoints"].get("W1", [None, 0, None])[0::2],
+                  "relay_corner": table["waypoints"].get("W2", [None, 0, None])[0::2],
+                  "target": table["waypoints"].get("W3", [None, 0, None])[0::2]})
+    if set(table["waypoints"]) != {"W1", "W2", "W3"}:
+        fail("waypoints must be the measured corridor W1, W2, W3")
+    if list(table["extraction_zones"]) != ["extraction_v1"]:
+        fail("one extraction zone, extraction_v1")
+    for asset in table["predeployed"]:
+        role = asset["name"] if asset["name"] in ("S0", "H0") else "target"
+        if tuple(asset["position"]) != ANCHORS[role]:
+            fail(f"{asset['name']} must sit on the {role} anchor")
+    for role, point in roles.items():
+        if tuple(point) != ANCHORS[role]:
+            fail(f"{role} must sit on its measured anchor {ANCHORS[role]}")
+    if table["commander"]["position"] != list(COMMANDER_FROM_FACTORY):
+        fail("commander.position must be the measured offset from the factory")
+    if table["comms"].get("range") != RADIO_RANGE or table["comms"].get("relay_chassis") != ["relay_support_v1"]:
+        fail("comms range and relay chassis must match the measured link facts")
     for asset in table["predeployed"]:
         if tuple(asset["position"]) == ANCHORS["target"] and asset["contact"]:
             fail(f"{asset['name']} at the target anchor cannot be in contact: blocked and beyond radio range")

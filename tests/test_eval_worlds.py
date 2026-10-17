@@ -144,6 +144,24 @@ class InvalidCombinations(unittest.TestCase):
         self.refused("present_stranded", lambda t, _: assets(t)["S0"].__setitem__("contact", False))
         self.refused("present_stranded", lambda t, _: t["commander"].__setitem__("position", [0, 0]))
 
+    def test_roles_cannot_swap_measured_anchors(self) -> None:
+        # Each position is an anchor, but in the wrong role, so the link facts no longer hold.
+        target, factory = list(ew.ANCHORS["target"]), list(ew.ANCHORS["factory"])
+        self.refused("present_stranded", lambda t, _: t["factory"].__setitem__("offset", target))
+        self.refused("present_stranded", lambda t, _: t["extraction_zones"]["extraction_v1"].__setitem__("position", factory))
+        self.refused("present_stranded", lambda t, _: assets(t)["S0"].__setitem__("position", list(ew.ANCHORS["H0"])))
+        self.refused("present_stranded", lambda t, _: t["distress"]["last_known"].__setitem__("position", target))
+
+        def swap_waypoints(t, _):
+            t["waypoints"]["W1"], t["waypoints"]["W3"] = t["waypoints"]["W3"], t["waypoints"]["W1"]
+        self.refused("present_stranded", swap_waypoints)
+        self.refused("present_stranded", lambda t, _: t["waypoints"].pop("W2"))
+        self.refused("present_stranded", lambda t, _: t["waypoints"].__setitem__("W4", [-512, 0, 1536]))
+
+    def test_comms_must_match_the_measured_links(self) -> None:
+        self.refused("present_stranded", lambda t, _: t["comms"].__setitem__("range", 2000))
+        self.refused("present_stranded", lambda t, _: t["comms"].__setitem__("relay_chassis", ["scout_v1"]))
+
     def test_distress_needs_a_valid_source_and_age(self) -> None:
         self.refused("present_stranded", lambda t, _: t["distress"].__setitem__("asset", "Z9"))
         self.refused("destroyed_before_run", lambda _, tr: tr.__setitem__("destroyed_at_frame", -5000))
@@ -177,6 +195,14 @@ class HiddenTruth(unittest.TestCase):
         table["objective"]["type"] = "never_deployed"
         truth = dict(truth, table_sha256=ew.table_sha256(table))
         self.assertRaises(ew.EvalWorldError, ew.validate, table, truth)
+
+    def test_portable_artifacts_carry_no_rig_provenance(self) -> None:
+        # Native evidence ids and rig commits are pinned on the evaluator side, not in the app.
+        self.assertEqual(set(ew.SOURCE_PINS), {"fixture", "fixture_commit", "fixture_sha256", "geometry_sha256"})
+        for seed, table, truth in ew.rehearsal_worlds():
+            with self.subTest(seed=seed):
+                self.assertNotIn("placement", json.dumps(truth))
+                self.assertNotIn("placement", json.dumps(table))
 
     def test_rehearsal_truth_is_outside_the_game_archive(self) -> None:
         for seed, _, _ in ew.rehearsal_worlds():

@@ -38,13 +38,10 @@
   "schema": "EvalWorldTruth/v1",
   "seed": 3,
   "source_pins": {
+    "fixture": "game/SynapseCommander.sdd/scenarios/rescue_baseline.json",
     "fixture_commit": "e57e680a29f738010c4e3a5603bfe8898ac15078",
     "fixture_sha256": "2e07e5b5a364d5c2eb2d849115cbc72e1fbd1f57ca7ea89d64d6b46b08656ec5",
-    "placement_evidence": [
-      "placement-20261017T204100Z",
-      "placement-20261017T204444Z"
-    ],
-    "placement_rig_commit": "190bb47ebd16f1afd18d9a211693debbb4869680"
+    "geometry_sha256": "aa576ce71b5f164e8afc1fdb436ac41d10adf03f211e9ec04b3b59afe0c65bcf"
   },
   "state_weights": {
     "destroyed_before_run": 1,
