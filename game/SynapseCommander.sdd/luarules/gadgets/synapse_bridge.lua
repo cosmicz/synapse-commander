@@ -32,7 +32,7 @@ if gadgetHandler:IsSyncedCode() then
   -- Per-principal state is enabled only by a declared principals table.
   -- In that mode observations are calculated from geometry below, never from
   -- team LOS or an engine sensor-radius mutation.
-  local principal_mode, principals, principal_order, unit_principal = false, {}, {}, {}
+  local principal_mode, principals, principal_order, unit_principal, principal_body_ids = false, {}, {}, {}, {}
   local links, delivered_reports, queued_reports, entity_names = {}, {}, {}, {}
   local local_status, factory_name = {}, "F0"
   local terrain_method = Spring.TraceRayGroundBetweenPositions and "native" or "sampled"
@@ -407,7 +407,7 @@ if gadgetHandler:IsSyncedCode() then
       end
     end
     embodied[unitID] = chip
-    if principal_mode then unit_principal[unitID] = "commander" end
+    if principal_mode then unit_principal[unitID], principal_body_ids[unitID] = "commander", true end
     effect("commander_bound", Spring.GetGameFrame(), unitID, nil, { chip = chip }, principal_mode and "commander" or nil)
   end
 
@@ -495,7 +495,7 @@ if gadgetHandler:IsSyncedCode() then
           principals[job.job_id] = { chip = chip }
           principal_order[#principal_order + 1] = job.job_id
           table.sort(principal_order)
-          unit_principal[unitID] = job.job_id
+          unit_principal[unitID], principal_body_ids[unitID] = job.job_id, true
           delivered_reports[job.job_id] = {}
           break
         end
@@ -532,7 +532,7 @@ if gadgetHandler:IsSyncedCode() then
     record.unit_id = unitID
     if a.controller then embodied[unitID] = a.controller end
     entity_names[unitID] = a.name
-    if principal_mode and principals[a.name] then unit_principal[unitID] = a.name end
+    if principal_mode and principals[a.name] then unit_principal[unitID], principal_body_ids[unitID] = a.name, true end
     if a.health then
       local _, max_health = Spring.GetUnitHealth(unitID)
       if max_health then Spring.SetUnitHealth(unitID, max_health * a.health) end
@@ -951,7 +951,8 @@ if gadgetHandler:IsSyncedCode() then
     if scenario then
       for _, name in ipairs(asset_order) do
         local a = assets[name]
-        if a.health and a.unit_id and Spring.ValidUnitID(a.unit_id) then
+        if a.health and a.state == "active" and not extracted[name] and not lost[name]
+          and a.unit_id and Spring.ValidUnitID(a.unit_id) then
           local health, max_health = Spring.GetUnitHealth(a.unit_id)
           if health and max_health and health > max_health * a.health then Spring.SetUnitHealth(a.unit_id, max_health * a.health) end
           local definition = UnitDefs[Spring.GetUnitDefID(a.unit_id)]
@@ -1041,14 +1042,15 @@ if gadgetHandler:IsSyncedCode() then
             body.factories = { { name = factory.name, unit_id = factory.unit_id or Json.null } }
             body.link_state, body.roster = {}, {}
             for _, unitID in ipairs(Spring.GetTeamUnits(TEAM0) or {}) do
-              if not unit_principal[unitID] then body.link_state[#body.link_state + 1] = { unit_id = unitID, linked = links[unitID] == true } end
+              if not principal_body_ids[unitID] then body.link_state[#body.link_state + 1] = { unit_id = unitID, linked = links[unitID] == true } end
             end
             for _, name in ipairs(asset_order) do
               local a = assets[name]
               local linked = a.unit_id and links[a.unit_id] == true
+              local status = extracted[name] and "extracted" or (lost[name] and "lost" or (linked and "in_contact" or "no_contact"))
               body.roster[#body.roster + 1] = { name = name, def = a.def, controller = a.controller or Json.null,
-                                                 status = linked and "in_contact" or "no_contact",
-                                                 unit_id = linked and a.unit_id or nil }
+                                                 status = status,
+                                                 unit_id = status == "in_contact" and a.unit_id or nil }
             end
             if #reports > 0 then body.reports = body.reports or {}; for _, report in ipairs(reports) do table.insert(body.reports, report) end end
           end

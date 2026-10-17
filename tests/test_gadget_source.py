@@ -119,6 +119,13 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn("health = a.health or Json.null", record)
         self.assertIn('impairment = impaired and "persistent" or Json.null', record)
 
+    def test_extraction_stops_impairment_and_never_leaks_a_former_principal(self) -> None:
+        self.assertIn("principal_body_ids", self.source)
+        self.assertIn("not principal_body_ids[unitID]", self.source)
+        self.assertIn('a.state == "active" and not extracted[name] and not lost[name]', self.source)
+        self.assertIn('extracted[name] and "extracted"', self.source)
+        self.assertIn('unit_id = status == "in_contact" and a.unit_id or nil', self.source)
+
     def test_already_arrived_rejects_before_rate_and_empty_queue_finishes(self) -> None:
         self.assertIn('emit_receipt(intent, "rejected", "already_at_waypoint")', self.source)
         self.assertIn('effect("order_done", frame, unitID, command.intent_id, { reason = "queue_empty" }', self.source)
