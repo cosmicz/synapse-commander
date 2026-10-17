@@ -1,1 +1,7 @@
-return { name="Synapse Commander", shortname="SYNAPSE", version="0", depend={"Beyond All Reason $VERSION"} }
+return {
+  name = "Synapse Commander",
+  shortname = "SYNAPSE",
+  version = "0",
+  modtype = 1,
+  depend = { "Beyond All Reason $VERSION" },
+}
