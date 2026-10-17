@@ -80,7 +80,7 @@ class IntentEnvelope:
     payload: dict[str, Any]
 
     @classmethod
-    def from_untrusted(cls, value: Any, *, principal: str, team: str) -> "IntentEnvelope":
+    def from_untrusted(cls, value: Any, *, principal: str, team: str, chassis: frozenset[str] | None = None, controllers: frozenset[str] | None = None) -> "IntentEnvelope":
         """Parse a client request and inject, rather than trust, identity."""
         if not isinstance(value, dict):
             raise ProtocolError("malformed_json", "body must be a JSON object")
@@ -102,9 +102,9 @@ class IntentEnvelope:
             raise ProtocolError("invalid_payload", "payload fields do not match the typed intent")
         for field in required - {"parameters", "args"}:
             _bounded_string(payload[field], field)
-        if intent_type == "PRODUCE" and (payload["chassis"] not in supported_chassis() or payload["controller"] not in supported_controllers()):
+        if intent_type == "PRODUCE" and chassis is not None and controllers is not None and (payload["chassis"] not in chassis or payload["controller"] not in controllers):
             raise ProtocolError("invalid_payload", "unknown chassis or controller")
-        if intent_type == "INSTALL" and (payload["expected_version"] not in supported_controllers() or payload["replacement_version"] not in supported_controllers()):
+        if intent_type == "INSTALL" and controllers is not None and (payload["expected_version"] not in controllers or payload["replacement_version"] not in controllers):
             raise ProtocolError("invalid_payload", "unknown controller version")
         if intent_type == "TASK" and payload["verb"] != "advance":
             raise ProtocolError("verb_not_supported", "only the engine-smoke advance task is exposed")

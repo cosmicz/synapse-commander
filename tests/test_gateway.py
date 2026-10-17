@@ -55,7 +55,7 @@ class GatewayTests(unittest.TestCase):
     def setUp(self) -> None:
         self.transport = MemoryTransport(frame=100)
         self.transport.publish_observation("blue", observation())
-        self.server = LoopbackGateway(self.transport, principal="agent-alpha", team="blue").make_server()
+        self.server = LoopbackGateway(self.transport, principal="agent-alpha", team="blue", scenario="rescue_smoke").make_server()
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 

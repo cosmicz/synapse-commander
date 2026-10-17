@@ -19,6 +19,7 @@ from .protocol import (
     compact_json,
 )
 from .recording import LedgerError
+from .scenarios import ScenarioError, load_scenario
 from .transport import EngineTransport
 
 
@@ -37,12 +38,19 @@ class LoopbackGateway:
         team: str,
         origin: str = "agent",
         ledger: LedgerSink | None = None,
+        scenario: str | None = None,
     ) -> None:
         self.transport = transport
         self.principal = principal
         self.team = team
         self.origin = origin
         self.ledger = ledger
+        self._scenario = None
+        if scenario is not None:
+            try:
+                self._scenario = load_scenario(scenario)
+            except ScenarioError as error:
+                raise ValueError("scenario_unavailable") from error
         self._observation_events: dict[str, str] = {}
         self._ledger_lock = RLock()
 
@@ -94,7 +102,9 @@ class LoopbackGateway:
 
     def submit(self, value: Any) -> Any:
         with self._ledger_lock:
-            envelope = IntentEnvelope.from_untrusted(value, principal=self.principal, team=self.team)
+            envelope = IntentEnvelope.from_untrusted(value, principal=self.principal, team=self.team,
+                                                     chassis=None if self._scenario is None else frozenset(self._scenario["chassis"]),
+                                                     controllers=None if self._scenario is None else frozenset(self._scenario["chips"]))
             submission_event = self._record_submission(envelope)
             receipt = self.transport.submit_intent(envelope)
             if receipt.reason in {"pending", "receipt_timeout"}:
