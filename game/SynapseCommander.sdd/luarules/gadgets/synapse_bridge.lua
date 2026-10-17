@@ -25,7 +25,8 @@ if gadgetHandler:IsSyncedCode() then
   local jobs, job_seq, job_spawning, embodied, commander_lost = {}, 0, nil, {}, false
   -- Initial world (rah26-5hf). Assets hold evaluator truth; principal-mode
   -- observations derive only from each body and delivered reports.
-  local assets, asset_order, reports = {}, {}, {}
+  local assets, asset_order, hidden, reports = {}, {}, {}, {}
+  local spawning_hidden = false
   -- Per-principal state is enabled only by a declared principals table.
   -- In that mode observations are calculated from geometry below, never from
   -- team LOS or an engine sensor-radius mutation.
@@ -322,15 +323,23 @@ if gadgetHandler:IsSyncedCode() then
     out("receipt", body)
   end
 
-  local function legacy_visible_source(observer, unitID)
+  -- K1 keeps the pre-principal public boundary intact: a single team view
+  -- uses engine LOS, while principal-mode observations below use only body
+  -- geometry.  Do not route this compatibility path through detects(), whose
+  -- observer must never become the candidate unit itself.
+  local function legacy_visible_source(unitID, teamID, allyTeam)
+    if hidden[unitID] then return nil end
     if Spring.GetUnitTeam(unitID) == TEAM0 then return "own_unit" end
-    return detects(observer, unitID) and "sensor" or nil
+    local state = Spring.GetUnitLosState(unitID, allyTeam, false)
+    if state and state.los then return "los" end
+    return nil
   end
 
   local function can_emit_effect(unitID, teamID)
-    -- Legacy Loop 0 has one authority and no hidden team-LOS projection.
+    -- Legacy Loop 0 has one team view; effects obey that same projection.
     if principal_mode then return false end
-    return teamID == TEAM0 or Spring.ValidUnitID(unitID)
+    local _, _, _, _, _, allyTeam = Spring.GetTeamInfo(TEAM0, false)
+    return legacy_visible_source(unitID, teamID, allyTeam) ~= nil
   end
 
   local function observation_known(scope, id)
@@ -509,7 +518,9 @@ if gadgetHandler:IsSyncedCode() then
     -- A loss the team witnessed before the run is legitimately known.
     record.known_lost = a.state ~= "active" and a.contact
     if a.state ~= "active" then return end
+    spawning_hidden = not principal_mode and not a.contact
     local unitID = Spring.CreateUnit(a.def, ax, record.position[2], az, 0, TEAM0)
+    spawning_hidden = false
     if not unitID then
       record.state = "spawn_failed"
       out("bridge_error", { reason = "predeployed_spawn_failed", asset = a.name })
@@ -623,7 +634,8 @@ if gadgetHandler:IsSyncedCode() then
       -- about the asset; the cause stays in the evaluator-only record.
       local px, pz = x + d.last_known.position[1], z + d.last_known.position[2]
       reports[1] = { kind = "distress", asset = d.asset, position = { px, Spring.GetGroundHeight(px, pz), pz },
-                     observed_frame = frame - d.last_known.age_frames, symptom = d.symptom }
+                     observed_frame = frame - d.last_known.age_frames, delivered_frame = frame,
+                     age_frames = d.last_known.age_frames, symptom = d.symptom }
     end
     out("scenario", world_init_record(frame))
     return true
@@ -748,6 +760,18 @@ if gadgetHandler:IsSyncedCode() then
     queued_reports = remaining
   end
 
+  -- Principal-mode rejection must not turn an arbitrary numeric id into an
+  -- existence oracle.  A principal may name its own body, a body it currently
+  -- detects, or (for the commander) a named principal body that is already
+  -- exposed by the in-contact roster.  Static authority is deliberately
+  -- checked only after this visibility boundary.
+  local function principal_can_name_unit(principal, unitID)
+    local bodyID = body_for_principal(principal)
+    if not bodyID or not Spring.ValidUnitID(bodyID) then return false end
+    if unitID == bodyID or detects(bodyID, unitID) then return true end
+    return principal == "commander" and unit_principal[unitID] ~= nil and links[unitID] == true
+  end
+
   function gadget:RecvLuaMsg(msg, playerID)
     if msg:sub(1, #PREFIX) ~= PREFIX then return false end
     -- MAX_LINE bounds the JSONL record; the internal SYN0 prefix is not part
@@ -819,6 +843,9 @@ if gadgetHandler:IsSyncedCode() then
     -- A unit out of contact answers exactly like a missing one, so probing ids
     -- cannot confirm that it exists.
     if not unitID or unitID % 1 ~= 0 or not Spring.ValidUnitID(unitID) then
+      emit_receipt(intent, "rejected", "unknown_unit"); return true
+    end
+    if principal_mode and not principal_can_name_unit(principal, unitID) then
       emit_receipt(intent, "rejected", "unknown_unit"); return true
     end
     if Spring.GetUnitTeam(unitID) ~= teamID then emit_receipt(intent, "rejected", "not_owned"); return true end
@@ -929,7 +956,8 @@ if gadgetHandler:IsSyncedCode() then
     local entities = {}
     for _, unitID in ipairs(Spring.GetAllUnits()) do
       local teamID = Spring.GetUnitTeam(unitID)
-      local source = legacy_visible_source(commander and commander.unit_id or unitID, unitID)
+      local _, _, _, _, _, allyTeam = Spring.GetTeamInfo(TEAM0, false)
+      local source = legacy_visible_source(unitID, teamID, allyTeam)
       if source then
         local x, y, z = Spring.GetUnitPosition(unitID)
         if x then
@@ -983,7 +1011,8 @@ if gadgetHandler:IsSyncedCode() then
         local listed_reports = {}
         for i, r in ipairs(reports) do
           listed_reports[i] = { kind = r.kind, asset = r.asset, position = r.position, symptom = r.symptom,
-                                observed_frame = r.observed_frame, age_frames = frame - r.observed_frame }
+                                observed_frame = r.observed_frame, delivered_frame = r.delivered_frame,
+                                age_frames = r.age_frames or (frame - r.observed_frame) }
         end
         body.reports = listed_reports
       end
@@ -996,6 +1025,9 @@ if gadgetHandler:IsSyncedCode() then
   function gadget:UnitCreated(unitID, _, teamID)
     -- A factory job reports its own unit_created carrying the controller id.
     if job_spawning then return end
+    -- An out-of-contact legacy asset is evaluator state, not an observation or
+    -- an effect, until the scenario explicitly reports it.
+    if spawning_hidden then hidden[unitID] = true; return end
     if scenario_emitted and can_emit_effect(unitID, teamID) then out("effect", { schema = "EffectEvent/v1", effect = "unit_created", frame = Spring.GetGameFrame(), unit_id = unitID, team = teamID }) end
     bind_commander(unitID)
   end

@@ -86,7 +86,7 @@ class SmokeObservationTests(unittest.TestCase):
                 {"name": "H0", "def": "armck", "controller": "escort_fixed_v1", "status": "no_contact"},
             ],
             "reports": [{"kind": "distress", "asset": "M1", "position": [2400, 0, 1300], "observed_frame": -900, "age_frames": 900, "symptom": "no_heartbeat"}],
-            "world_init": {"seed": 1017, "cause_hidden": "terrain_entrapment", "unit_ids": {"M1": 991}},
+            "world_init": {"seed": 1017, "cause_hidden": load_scenario("rescue_baseline")["distress"]["cause_hidden"], "unit_ids": {"M1": 991}},
         })
         observed = bounded_observation(source, scenario_table=load_scenario("rescue_baseline"))
         self.assertEqual(observed["roster"][0], {"name": "H0", "def": "armck", "controller": "escort_fixed_v1", "status": "no_contact"})
@@ -94,7 +94,7 @@ class SmokeObservationTests(unittest.TestCase):
         self.assertEqual(observed["reports"][0]["observed_frame"], -900)
         public = json.dumps(observed)
         self.assertNotIn("world_init", public)
-        self.assertNotIn("terrain_entrapment", public)
+        self.assertNotIn(load_scenario("rescue_baseline")["distress"]["cause_hidden"], public)
         self.assertNotIn("991", public)
 
     def test_http_gateway_uses_selected_table_for_rescue_baseline_projection(self):
@@ -103,7 +103,7 @@ class SmokeObservationTests(unittest.TestCase):
             "scenario": {"id": "rescue_baseline", "version": load_scenario("rescue_baseline")["version"], "waypoints": {"W1": [500, 0, 100]}},
             "roster": [{"name": "M1", "def": "armck", "controller": "reasoner_small_v1", "status": "no_contact"}],
             "reports": [{"kind": "distress", "asset": "M1", "position": [2400, 0, 1300], "observed_frame": -900, "age_frames": 900, "symptom": "no_heartbeat"}],
-            "world_init": {"cause_hidden": "terrain_entrapment"},
+            "world_init": {"cause_hidden": load_scenario("rescue_baseline")["distress"]["cause_hidden"]},
         })
         transport = MemoryTransport(frame=15)
         transport.publish_observation("0", source)

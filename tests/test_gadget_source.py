@@ -187,7 +187,7 @@ class InitialWorldSourceTests(unittest.TestCase):
     def test_principal_views_use_geometry_not_team_los_or_sensor_mutation(self) -> None:
         self.assertIn("Spring.TraceRayGroundBetweenPositions", self.source)
         self.assertIn("Spring.GetGroundHeight(x, z) > eye", self.source)
-        self.assertNotIn("Spring.GetUnitLosState", self.source)
+        self.assertNotIn("Spring.GetUnitLosState", self.observation)
         self.assertNotIn("Spring.SetUnitSensorRadius", self.source)
         self.assertNotIn("HIDDEN_SENSORS", self.source)
 
@@ -272,8 +272,20 @@ class PrincipalViewSourceTests(unittest.TestCase):
         self.assertIn("math.ceil(distance / 16)", self.source)
         self.assertIn("fraction / 0.5", self.source)
         self.assertIn("terrain_occlusion = terrain_method", self.source)
-        self.assertNotIn("Spring.GetUnitLosState", self.source)
+        start = self.source.index("if principal_mode then", self.source.index("function gadget:GameFrame"))
+        principal_observation = self.source[start:self.source.index("return\n    end", start)]
+        self.assertNotIn("Spring.GetUnitLosState", principal_observation)
         self.assertNotIn("Spring.SetUnitSensorRadius", self.source)
+
+    def test_legacy_mode_keeps_one_team_los_projection(self) -> None:
+        self.assertIn("local function legacy_visible_source(unitID, teamID, allyTeam)", self.source)
+        self.assertIn('if state and state.los then return "los" end', self.source)
+        self.assertIn("if spawning_hidden then hidden[unitID] = true; return end", self.source)
+        self.assertIn("return legacy_visible_source(unitID, teamID, allyTeam) ~= nil", self.source)
+
+    def test_distress_reports_keep_delivery_and_age_metadata(self) -> None:
+        self.assertIn("delivered_frame = frame", self.source)
+        self.assertIn("age_frames = d.last_known.age_frames", self.source)
 
     def test_observations_and_effects_are_scoped_to_a_principal(self) -> None:
         self.assertIn('observation_id = "obs-" .. principal .. "-" .. frame', self.source)
@@ -290,6 +302,12 @@ class PrincipalViewSourceTests(unittest.TestCase):
             self.assertIn(reason, self.source)
         self.assertLess(task.index('"not_authorized"'), task.index("Spring.GetUnitPosition"))
         self.assertIn("principal_mode and principal or teamID", task)
+
+    def test_principal_task_ids_are_visibility_gated_before_authority(self) -> None:
+        task = self.source[self.source.index('if intent.type ~= "TASK"'):self.source.index("Spring.GiveOrderToUnit")]
+        self.assertIn("local function principal_can_name_unit", self.source)
+        self.assertLess(task.index("principal_can_name_unit(principal, unitID)"), task.index('"not_authorized"'))
+        self.assertLess(task.index("principal_can_name_unit(principal, unitID)"), task.index('"not_owned"'))
 
     def test_messages_are_accepted_then_link_gated_at_delivery(self) -> None:
         branch = self.source[self.source.index('intent.type == "MESSAGE"'):self.source.index('if intent.type ~= "TASK"')]
