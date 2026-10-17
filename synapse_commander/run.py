@@ -242,7 +242,8 @@ def run_smoke(config: SmokeConfig, *,
               transport_factory: Callable[[Path, str], SmokeTransport] | None = None,
               engine_factory: Callable[[launch.RunLayout], SmokeEngine] | None = None,
               identity: dict[str, Any] | None = None,
-              app: tuple[str, int] | None = None) -> dict[str, Any]:
+              app: tuple[str, int] | None = None,
+              engine_scan: Callable[[int | None], list[int]] = launch.other_engines) -> dict[str, Any]:
     """Run one Loop 0 smoke and return its verdict; writes evidence under out_dir/run_id."""
     run_id = launch.check_run_id(config.run_id)
     if not config.rig_commit:
@@ -309,6 +310,7 @@ def run_smoke(config: SmokeConfig, *,
         transport = (transport_factory or _mailbox_factory)(mailbox_dir, run_id)
         ordered = OrderedLedger(recorder, transport)
         engine = (engine_factory or (lambda lay: launch.EngineProcess(artifacts, lay)))(layout)
+        verdict["other_engines_at_start"] = engine_scan(None)
         engine.start()
         t0 = time.monotonic()
         while transport.hello() is None:
@@ -326,6 +328,10 @@ def run_smoke(config: SmokeConfig, *,
 
         def pump_loop() -> None:
             while not pump_stop.wait(0.2):
+                others = engine_scan(getattr(engine, "pid", None))
+                if others:
+                    seen = verdict.setdefault("other_engines_during_run", [])
+                    seen.extend(pid for pid in others if pid not in seen)
                 if engine.poll() is not None:
                     # Fail fast: without an engine the client could only time out.
                     verdict["engine_exited_early"] = engine.poll()
@@ -455,6 +461,9 @@ def evaluate(trace: dict[str, Any], ordered: OrderedLedger | None, verdict: dict
               probe_target_moved=target_moves, unprobed_foreign_moved=other_moves)
     else:
         check("no_movement_after_probes", False, detail="no settled/final observation")
+    others = sorted(set(verdict.get("other_engines_at_start", [])) | set(verdict.get("other_engines_during_run", [])))
+    check("exclusive_runtime", not others, other_engine_pids=others,
+          detail="no other spring-headless process ran on this host during the run")
     teardown = verdict.get("teardown") or {}
     check("teardown_bounded", teardown.get("group_alive_after") is False
           and float(teardown.get("teardown_s", 1e9)) <= 20.0, teardown=teardown)

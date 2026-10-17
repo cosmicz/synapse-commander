@@ -189,13 +189,14 @@ class LoopOrchestrationTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.out = Path(self.tmp.name)
 
-    def run_fake(self, run_id: str, **fake_options) -> tuple[dict, FakeEngine]:
+    def run_fake(self, run_id: str, *, others: list[int] | None = None, **fake_options) -> tuple[dict, FakeEngine]:
         engine = FakeEngine(run_id, **fake_options)
         config = SmokeConfig(engine_dir=self.out, data_dir=self.out, out_dir=self.out, run_id=run_id,
                              rig_commit="b" * 40, lock_dir=self.out / "locks" / "fake", hello_timeout_s=10,
                              client_timeout_s=20, client_poll_s=0.02)
         verdict = run_smoke(config, transport_factory=lambda _dir, _id: engine,
-                            engine_factory=lambda _layout: engine, app=("a" * 40, 0))
+                            engine_factory=lambda _layout: engine, app=("a" * 40, 0),
+                            engine_scan=lambda _pgid: list(others or []))
         return verdict, engine
 
     def test_full_loop_with_fake_engine(self) -> None:
@@ -245,6 +246,12 @@ class LoopOrchestrationTests(unittest.TestCase):
         self.assertIsNotNone(verdict["error"])
         self.assertLess(time.monotonic() - begin, 15)
         self.assertTrue(verdict["checks"]["advance_accepted"]["ok"])  # it got that far
+
+    def test_concurrent_engine_fails_exclusivity(self) -> None:
+        verdict, _engine = self.run_fake("fake-shared", others=[4242])
+        self.assertFalse(verdict["checks"]["exclusive_runtime"]["ok"])
+        self.assertEqual(verdict["checks"]["exclusive_runtime"]["other_engine_pids"], [4242])
+        self.assertEqual(verdict["verdict"], "FAIL")
 
     def test_rig_commit_required(self) -> None:
         config = SmokeConfig(engine_dir=self.out, data_dir=self.out, out_dir=self.out, run_id="x", rig_commit=None)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 import stat
 import subprocess
@@ -114,6 +115,22 @@ class TeardownTests(unittest.TestCase):
         finally:
             bystander.kill()
             bystander.wait()
+
+
+class OtherEnginesTests(unittest.TestCase):
+    def test_sees_foreign_engine_but_not_own_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            named = Path(tmp) / "bin" / "spring-headless"
+            named.parent.mkdir()
+            named.symlink_to(shutil.which("sleep"))
+            proc = subprocess.Popen([str(named), "30"], start_new_session=True)
+            try:
+                time.sleep(0.2)
+                self.assertIn(proc.pid, launch.other_engines())
+                self.assertNotIn(proc.pid, launch.other_engines(own_pgid=proc.pid))
+            finally:
+                proc.kill()
+                proc.wait()
 
 
 class LockTests(unittest.TestCase):

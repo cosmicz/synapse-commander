@@ -348,6 +348,23 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
+def other_engines(own_pgid: int | None = None) -> list[int]:
+    """Pids of spring-headless processes outside our own process group (Linux /proc)."""
+    found = []
+    for entry in Path("/proc").glob("[0-9]*"):
+        try:
+            argv0 = (entry / "cmdline").read_bytes().split(b"\0", 1)[0]
+            if not argv0.endswith(b"spring-headless"):
+                continue
+            pid = int(entry.name)
+            if own_pgid is not None and os.getpgid(pid) == own_pgid:
+                continue
+        except (OSError, ValueError):
+            continue
+        found.append(pid)
+    return sorted(found)
+
+
 def wait_for_log(path: Path, needles: Sequence[str], *, timeout_s: float,
                  engine: EngineProcess | None = None, poll_s: float = 0.25) -> str:
     """Wait until the engine log contains one of NEEDLES; fail on exit or timeout."""
