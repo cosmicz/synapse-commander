@@ -148,7 +148,7 @@ if gadgetHandler:IsSyncedCode() then
       return true
     end
     local intent = record.envelope
-    if type(intent) ~= "table" or type(intent.payload) ~= "table" then
+    if type(intent) ~= "table" or intent.schema ~= "IntentEnvelope/v1" or type(intent.payload) ~= "table" then
       emit_receipt(intent, "rejected", "schema_invalid")
       return true
     end

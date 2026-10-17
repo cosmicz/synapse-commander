@@ -41,6 +41,9 @@ class GadgetSourceContractTests(unittest.TestCase):
             self.source.index("if not use_token(teamID, frame)"),
         )
 
+    def test_synced_reducer_requires_the_public_envelope_schema(self) -> None:
+        self.assertIn('intent.schema ~= "IntentEnvelope/v1"', self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
