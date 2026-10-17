@@ -82,7 +82,7 @@ class ClaudeCliRoute:
 
     def argv(self, prompt: str) -> list[str]:
         return [self.executable, "-p", prompt, "--output-format", "json", "--model", self.model,
-                "--system-prompt", SYSTEM_PROMPT, "--tools", "", "--no-session-persistence"]
+                "--system-prompt", SYSTEM_PROMPT, "--tools", "", "--strict-mcp-config", "--no-session-persistence"]
 
     def call(self, prompt: str) -> ModelReply:
         begin = time.monotonic()
@@ -101,6 +101,10 @@ class ClaudeCliRoute:
             result = json.loads(raw)
         except json.JSONDecodeError:
             return ModelReply("", [], latency, raw, error="cli output is not JSON")
+        if isinstance(result, list):
+            # Some CLI configurations print the whole event stream; the reply is its final result event.
+            result = next((event for event in reversed(result)
+                           if isinstance(event, dict) and event.get("type") == "result"), None)
         if not isinstance(result, dict) or result.get("is_error"):
             return ModelReply("", [], latency, raw, error="cli reported an error")
         usage = result.get("modelUsage")

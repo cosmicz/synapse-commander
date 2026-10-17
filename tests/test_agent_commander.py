@@ -140,6 +140,18 @@ class ClaudeCliRouteTests(unittest.TestCase):
         self.assertIs(seen["stdin"], subprocess.DEVNULL)
         self.assertEqual(seen["timeout"], 60)
 
+    def test_event_stream_output_uses_its_final_result(self) -> None:
+        def runner(argv, **kwargs):
+            out = [{"type": "system", "subtype": "init", "tools": []},
+                   {"type": "result", "is_error": False, "result": '{"action": "wait"}',
+                    "modelUsage": {"claude-sonnet-5": {}}}]
+            return subprocess.CompletedProcess(argv, 0, json.dumps(out), "")
+
+        reply = ClaudeCliRoute("claude-sonnet-5", runner=runner).call("p")
+        self.assertIsNone(reply.error)
+        self.assertEqual(reply.model_ids, ["claude-sonnet-5"])
+        self.assertIn("--strict-mcp-config", ClaudeCliRoute("m").argv("p"))
+
     def test_failures_become_errors_not_decisions(self) -> None:
         def timeout(argv, **kwargs):
             raise subprocess.TimeoutExpired(argv, 60)
