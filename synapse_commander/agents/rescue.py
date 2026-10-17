@@ -469,3 +469,45 @@ class BondedRescue:
             self.trace["m1_actions"] = self.m1.actions
         self.trace.setdefault("outcome", "not_reached")
         return self.trace
+
+
+class AgentsRescue:
+    """Three live minds, each on its own gateway view and token: commander, job-1, M1.
+
+    job-1 is the principal the engine gives the reasoner body the commander may
+    produce; its mind makes no model call until that body exists. The run ends at
+    a terminal objective or the deadline.
+    """
+
+    def __init__(self, clients: dict[str, GatewayClient], routes: dict[str, Any], sink: Any, *,
+                 on_decision: Callable[[dict[str, Any]], None] | None, call_budget: int,
+                 wall_deadline_s: float, poll_s: float = 0.5, sleep: Callable[[float], None] = time.sleep) -> None:
+        from .embodied import LiveMind
+        labels = {"commander": "mind_task", "job-1": "relay_move", "M1": "return_home"}
+        principals = frozenset(clients)
+        self.minds = {name: LiveMind(name, clients[name], routes[name], sink, principals=principals,
+                                     on_decision=on_decision, call_budget=call_budget,
+                                     wall_deadline_s=wall_deadline_s, poll_s=poll_s, task_label=labels[name])
+                      for name in clients}
+        self.wall_deadline_s = wall_deadline_s
+        self.sleep = sleep
+        self.trace: dict[str, Any] = {"agents": True}
+
+    def run(self) -> dict[str, Any]:
+        for mind in self.minds.values():
+            mind.start()
+        began = time.monotonic()
+        try:
+            while time.monotonic() - began < self.wall_deadline_s:
+                snapshot = self.minds["commander"].snapshot()
+                status = ((snapshot.get("observation") or {}).get("objective") or {}).get("status")
+                if status in ("extracted", "lost", "timeout", "no_target"):
+                    self.trace["outcome"] = status
+                    break
+                if not any(mind.snapshot().get("running") for mind in self.minds.values()):
+                    break
+                self.sleep(0.5)
+        finally:
+            self.trace["minds"] = {name: mind.stop() for name, mind in self.minds.items()}
+        self.trace.setdefault("outcome", "not_reached")
+        return self.trace

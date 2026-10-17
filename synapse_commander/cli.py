@@ -97,13 +97,13 @@ def build_parser() -> argparse.ArgumentParser:
                     "simulation time); --mode play reads commander commands at a prompt (type help) while M1 "
                     "runs a scripted policy, and records the commander's intents as human.")
     add_run_arguments(rescue)
-    rescue.add_argument("--mode", dest="rescue_mode", choices=("scripted", "play", "bonded"), default="scripted",
+    rescue.add_argument("--mode", dest="rescue_mode", choices=("scripted", "play", "bonded", "agents"), default="scripted",
                         help="bonded: a person's orders reach a live model commander through a loopback control "
                              "surface (token in the run directory); M1 runs the shared policy")
     rescue.add_argument("--model", default="claude-sonnet-5", help="bonded: model for the commander's CLI route")
     rescue.add_argument("--call-budget", type=int, default=20, help="bonded: maximum model calls")
     rescue.add_argument("--call-timeout", type=float, default=60.0, help="bonded: seconds per model call")
-    rescue.add_argument("--deadline", type=float, default=400.0, help="bonded: wall seconds for the run")
+    rescue.add_argument("--deadline", type=float, default=400.0, help="bonded/agents: wall seconds for the run")
     rescue.add_argument("--control-port", type=int, default=8090, help="bonded: loopback control port")
     view = commands.add_parser(
         "run-view",
