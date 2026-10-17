@@ -1,1 +1,1 @@
-"""Bounded adapters for the Synapse Commander first-loop smoke test; no engine integration."""
+"""Synapse Commander: bounded gateway, engine mailbox bridge, run recording and Loop 0 launcher."""

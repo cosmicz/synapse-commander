@@ -14,6 +14,7 @@ import hashlib
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -26,7 +27,11 @@ GAME_DIR_NAME = "BAR.sdd"
 MAP_FILE = "supreme_isthmus_v2.1.sd7"
 MAP_NAME = "Supreme Isthmus v2.1"
 STOCK_GAME_TYPE = "Beyond All Reason $VERSION"
-LOCK_NAME = "docker-vm"
+APP_ARCHIVE_DIR = "SynapseCommander.sdd"
+APP_GAME_TYPE = "Synapse Commander 0"
+RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+# The app-owned dependent archive ships in this repository, next to the package.
+APP_ARCHIVE = Path(__file__).resolve().parent.parent / "game" / APP_ARCHIVE_DIR
 
 
 class LaunchError(RuntimeError):
@@ -74,20 +79,21 @@ def git_dirty_count(path: Path) -> int | None:
 
 @dataclass(frozen=True)
 class RuntimeArtifacts:
-    """The staged engine, stock game checkout and map under a private directory."""
+    """The staged engine, stock game checkout, map and the app's game archive."""
 
     engine_dir: Path
     game_dir: Path
     map_path: Path
+    app_archive: Path
 
     @classmethod
-    def from_private_dir(cls, private_dir: Path, arch: str | None = None) -> "RuntimeArtifacts":
-        private_dir = private_dir.resolve()
-        arch = arch or engine_arch()
+    def from_dirs(cls, *, engine_dir: Path, data_dir: Path, game_dir: Path | None = None) -> "RuntimeArtifacts":
+        data_dir = data_dir.resolve()
         artifacts = cls(
-            engine_dir=private_dir / "runtime" / f"recoil-{ENGINE_VERSION}-{arch}",
-            game_dir=private_dir / "sources" / GAME_DIR_NAME,
-            map_path=private_dir / "runtime" / "bar-data" / "maps" / MAP_FILE,
+            engine_dir=engine_dir.resolve(),
+            game_dir=(game_dir or data_dir / "games" / GAME_DIR_NAME).resolve(),
+            map_path=data_dir / "maps" / MAP_FILE,
+            app_archive=APP_ARCHIVE,
         )
         artifacts.check()
         return artifacts
@@ -99,7 +105,8 @@ class RuntimeArtifacts:
     def check(self) -> None:
         missing = [
             str(path.name)
-            for path in (self.engine, self.game_dir / "modinfo.lua", self.map_path)
+            for path in (self.engine, self.game_dir / "modinfo.lua", self.map_path,
+                         self.app_archive / "modinfo.lua")
             if not path.exists()
         ]
         if missing:
@@ -108,11 +115,19 @@ class RuntimeArtifacts:
     def identity(self) -> dict[str, object]:
         """Exact identities for the manifest; hashes, commits, never host paths."""
         return {
-            "engine": {"version": ENGINE_VERSION, "binary": self.engine.name,
+            "engine": {"name": "Recoil", "version": ENGINE_VERSION, "binary": self.engine.name,
                        "sha256": sha256_file(self.engine)},
-            "game": {"name": "Beyond All Reason", "commit": git_head(self.game_dir),
+            "game": {"name": "Beyond All Reason", "version": "$VERSION", "commit": git_head(self.game_dir),
                      "modified_files": git_dirty_count(self.game_dir)},
-            "map": {"name": MAP_NAME, "file": MAP_FILE, "sha256": sha256_file(self.map_path)},
+            "map": {"name": MAP_NAME, "version": "2.1", "file": MAP_FILE,
+                    "sha256": sha256_file(self.map_path)},
+        }
+
+    def archive_hashes(self) -> dict[str, str]:
+        """SHA-256 of every file in the app archive, keyed by archive-relative path."""
+        return {
+            f"{APP_ARCHIVE_DIR}/{path.relative_to(self.app_archive).as_posix()}": sha256_file(path)
+            for path in sorted(self.app_archive.rglob("*")) if path.is_file()
         }
 
 
@@ -125,22 +140,23 @@ def _settings_text(settings: Mapping[str, object]) -> str:
         if "\n" in value or "\r" in value:
             raise LaunchError(f"engine setting {key} spans lines")
         lines.append(f"{key} = {value}")
-    return "\n".join(lines) + "\n"
+    return "".join(line + "\n" for line in lines)
 
 
 def start_script(
     *,
-    game_type: str,
+    run_id: str,
+    game_type: str = APP_GAME_TYPE,
     map_name: str = MAP_NAME,
     seed: int = 1,
     player_name: str = "SynapseCommander",
 ) -> str:
-    """Two teams in separate ally teams, no cheats, no test runner.
+    """One player on team 0, no cheats or debug commands, no test runner.
 
-    Team 0 is the single local player whose team the gateway serves. Team 1 is
-    held by the engine's inert NullAI so ownership negatives have a real foreign
-    unit to refer to.  The game never ends by itself; the launcher stops it.
+    Foreign units for ownership probes are Gaia units the scenario spawns. The
+    game never ends by itself; the launcher stops it.
     """
+    check_run_id(run_id)
     for value in (game_type, map_name, player_name):
         if any(ch in value for ch in ";{}\n\r"):
             raise LaunchError("start script value contains a structural character")
@@ -154,44 +170,24 @@ def start_script(
 \tMyPlayerName={player_name};
 \tIsHost=1;
 \tFixedRNGSeed={int(seed)};
-\tNumPlayers=1;
-\tNumTeams=2;
-\tNumAllyTeams=2;
 \t[MODOPTIONS]
 \t{{
 \t\tdeathmode=neverend;
+\t\tsynapse_run_id={run_id};
 \t}}
 \t[ALLYTEAM0]
 \t{{
-\t\tNumAllies=0;
-\t}}
-\t[ALLYTEAM1]
-\t{{
-\t\tNumAllies=0;
 \t}}
 \t[TEAM0]
 \t{{
 \t\tTeamLeader=0;
 \t\tAllyTeam=0;
 \t}}
-\t[TEAM1]
-\t{{
-\t\tTeamLeader=0;
-\t\tAllyTeam=1;
-\t}}
 \t[PLAYER0]
 \t{{
 \t\tName={player_name};
 \t\tTeam=0;
 \t\tSpectator=0;
-\t}}
-\t[AI0]
-\t{{
-\t\tName=Inert;
-\t\tShortName=NullAI;
-\t\tVersion=0.1;
-\t\tTeam=1;
-\t\tHost=0;
 \t}}
 }}
 """
@@ -215,6 +211,9 @@ class RunLayout:
     def settings_path(self) -> Path:
         return self.write_dir / "springsettings.cfg"
 
+    def mailbox_dir(self, run_id: str) -> Path:
+        return self.write_dir / "synapse" / check_run_id(run_id)
+
     @property
     def stdout_path(self) -> Path:
         return self.run_dir / "engine-stdout.log"
@@ -231,15 +230,22 @@ class RunLayout:
         # Links into the staged, read-only artifacts; the run writes only here.
         (self.write_dir / "games" / GAME_DIR_NAME).symlink_to(artifacts.game_dir, target_is_directory=True)
         (self.write_dir / "maps" / MAP_FILE).symlink_to(artifacts.map_path)
+        (self.write_dir / "games" / APP_ARCHIVE_DIR).symlink_to(artifacts.app_archive, target_is_directory=True)
 
     def write_config(self, script: str, settings: Mapping[str, object]) -> None:
         self.script_path.write_text(script, encoding="ascii")
         self.settings_path.write_text(_settings_text(settings), encoding="ascii")
 
 
-def default_engine_settings() -> dict[str, object]:
-    # Headless needs no rendering knobs; keep the engine from phoning anywhere.
-    return {"LuaSocketEnabled": 0}
+def engine_settings() -> dict[str, object]:
+    """A per-run springsettings file, so no user or shared configuration is read."""
+    return {}
+
+
+def check_run_id(run_id: str) -> str:
+    if not RUN_ID.fullmatch(run_id):
+        raise LaunchError("run id must be 1-64 characters of [A-Za-z0-9_-]")
+    return run_id
 
 
 class EngineProcess:
