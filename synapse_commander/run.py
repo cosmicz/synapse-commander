@@ -438,7 +438,7 @@ def run_smoke(config: SmokeConfig, *,
         ordered.pump()
 
         gateway = LoopbackGateway(transport, principal=AGENT_PRINCIPAL if agent else PRINCIPAL, team=TEAM,
-                                  origin="agent" if agent else "scripted", ledger=ordered)
+                                  origin="agent" if agent else "scripted", ledger=ordered, scenario=config.scenario)
         server = gateway.make_server(0)
         threading.Thread(target=server.serve_forever, name="gateway", daemon=True).start()
 
