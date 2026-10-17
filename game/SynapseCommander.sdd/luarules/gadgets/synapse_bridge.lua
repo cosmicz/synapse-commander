@@ -110,7 +110,9 @@ if gadgetHandler:IsSyncedCode() then
     local y = Spring.GetGroundHeight(x, z)
     Spring.CreateUnit("armck", x, y, z, 0, TEAM0)
     local gaia = Spring.GetGaiaTeamID()
-    Spring.CreateUnit("armck", x, Spring.GetGroundHeight(x, z + 300), z + 300, 0, gaia)
+    -- Keep the visible foreign probe in LOS throughout the W1 advance rather
+    -- than only at the starting position, while leaving the far probe hidden.
+    Spring.CreateUnit("armck", x + 200, Spring.GetGroundHeight(x + 200, z + 100), z + 100, 0, gaia)
     Spring.CreateUnit("armck", x - 2500, Spring.GetGroundHeight(x - 2500, z), z, 0, gaia)
     local opts = Spring.GetModOptions() or {}
     out("hello", {
