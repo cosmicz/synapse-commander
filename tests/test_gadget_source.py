@@ -61,7 +61,7 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn('x + 200, Spring.GetGroundHeight(x + 200, z + 100), z + 100', self.source)
 
     def test_arrival_completes_a_move_without_waiting_for_engine_callback(self) -> None:
-        self.assertIn("<= 16 * 16", self.source)
+        self.assertIn('arrival_radius = payload.verb == "advance" and 16 or 50', self.source)
         self.assertIn("Physical arrival is still terminal", self.source)
 
     def test_already_arrived_rejects_before_rate_and_empty_queue_finishes(self) -> None:
@@ -308,6 +308,9 @@ class PrincipalViewSourceTests(unittest.TestCase):
         self.assertIn("local function principal_can_name_unit", self.source)
         self.assertLess(task.index("principal_can_name_unit(principal, unitID)"), task.index('"not_authorized"'))
         self.assertLess(task.index("principal_can_name_unit(principal, unitID)"), task.index('"not_owned"'))
+
+    def test_commander_can_name_a_linked_authorized_escort(self) -> None:
+        self.assertIn('principal == "commander" and Spring.GetUnitTeam(unitID) == TEAM0 and links[unitID] == true', self.source)
 
     def test_messages_are_accepted_then_link_gated_at_delivery(self) -> None:
         branch = self.source[self.source.index('intent.type == "MESSAGE"'):self.source.index('if intent.type ~= "TASK"')]

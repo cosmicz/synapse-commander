@@ -102,9 +102,10 @@ MANIFEST_FIELDS: dict[str, type | tuple[type, ...]] = {
 }
 _COMMIT = re.compile(r"^[0-9a-f]{7,64}$")
 _PRINCIPAL = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
-PRINCIPAL_SOURCES = frozenset({"scripted", "agent"})
+PRINCIPAL_SOURCES = frozenset({"scripted", "agent", "human"})
 # The labels that bear out each declared source; anything else is reported.
-SUPPORTED_BY = {"scripted": frozenset({"scripted_replay", "scripted_fixture"}), "agent": frozenset({"agent_only"})}
+SUPPORTED_BY = {"scripted": frozenset({"scripted_replay", "scripted_fixture"}), "agent": frozenset({"agent_only"}),
+                "human": frozenset({"human_only"})}
 # With declared principals, every record of these kinds names the principal
 # whose view or authority it belongs to (for an EFFECT: the viewer).
 PRINCIPAL_KINDS = frozenset({OBSERVATION, INFERENCE, INTENT_SUBMITTED, INTENT_RECEIPT, EFFECT})

@@ -1,7 +1,7 @@
 {
   "schema": "ScenarioTable/v1",
   "id": "rescue_baseline",
-  "version": "4-provisional",
+  "version": "5-provisional",
   "seed": 1017,
   "factory": {"name": "F0", "def": "armlab", "offset": [-512, 896]},
   "bodies": 6,
@@ -28,5 +28,6 @@
   "recovery_responses": ["relay", "rendezvous", "extract"],
   "waypoints": {"W1": [-512, 0, 1536], "W2": [-512, 0, 2176], "W3": [-1536, 0, 2176]},
   "extraction_zones": {"extraction_v1": {"position": [-752, 896], "radius": 160, "dwell_frames": 150}},
+  "mission": {"timeout_frames": 12000},
   "objective": {"type": "rescue_return", "target": "M1", "extraction": "extraction_v1"}
 }

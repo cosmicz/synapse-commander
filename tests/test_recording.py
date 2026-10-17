@@ -1260,7 +1260,7 @@ class PrincipalStreams(LedgerCase):
             if sources[principal] == "agent":
                 cause, origin = self.inference(r, principal, f"inf-{principal}", o, frame=frame), "agent"
             else:
-                cause, origin = o, "scripted"
+                cause, origin = o, sources[principal]
             sub = self.intent(r, principal, f"i-{principal}", f"obs-{principal}-0", [cause], origin=origin,
                               decision=f"d-{principal}", frame=frame)
             self.receipt(r, principal, f"i-{principal}", sub, frame=frame)
@@ -1303,6 +1303,24 @@ class PrincipalStreams(LedgerCase):
         result = verify_ledger(self.path)
         self.assertEqual(result.principal_classifications["M1"], "agent_partial")
         self.assertIn("principal M1 declared scripted but its evidence classifies as agent_partial", result.evidence_limits)
+
+    def test_a_declared_human_principal_is_labelled_human_only(self):
+        rec.validate_manifest(manifest(principals=["commander", "M1"], principal_sources={"commander": "human", "M1": "scripted"}))
+        result = self.agent_run({"commander": "human", "M1": "scripted"}, [])
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(result.principal_classifications, {"M1": "scripted_replay", "commander": "human_only"})
+        self.assertEqual(result.classification, "scripted_replay")
+        self.assertFalse(result.autonomous)
+        self.assertFalse(any("declared" in x for x in result.evidence_limits), result.evidence_limits)
+
+    def test_declared_human_needs_human_evidence(self):
+        result = self.agent_run({"commander": "human", "M1": "human"}, [])
+        self.assertEqual(result.classification, "human_only")
+        self.path.unlink()
+        self.two_streams(principal_sources={"commander": "human", "M1": "scripted"})
+        result = verify_ledger(self.path)
+        self.assertEqual(result.principal_classifications["commander"], "scripted_replay")
+        self.assertIn("principal commander declared human but its evidence classifies as scripted_replay", result.evidence_limits)
 
     def test_a_declared_source_never_upgrades_the_label(self):
         self.two_streams(principal_sources={"commander": "agent", "M1": "scripted"})

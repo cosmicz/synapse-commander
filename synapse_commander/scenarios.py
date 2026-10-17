@@ -73,6 +73,23 @@ def _validate(table: Any, scenario_name: str) -> dict[str, Any]:
         _coordinates(point, "waypoint", 3)
     if set(objective) != {"type", "target", "extraction"} or any(not _identifier(value) for value in objective.values()):
         raise ScenarioError("invalid objective")
+    if "extraction_zones" in root:
+        zones = _mapping(root["extraction_zones"], "extraction_zones")
+        if not 1 <= len(zones) <= 8 or any(not _identifier(name) for name in zones):
+            raise ScenarioError("invalid extraction zones")
+        for zone in zones.values():
+            zone = _mapping(zone, "extraction zone")
+            _coordinates(zone.get("position"), "extraction zone position", 2)
+            radius, dwell = zone.get("radius"), zone.get("dwell_frames")
+            if set(zone) != {"position", "radius", "dwell_frames"} or type(radius) not in (int, float) or not math.isfinite(radius) or radius <= 0 or not _non_negative_int(dwell) or dwell == 0:
+                raise ScenarioError("invalid extraction zone")
+        # A physical extraction objective names a declared zone and a bound principal.
+        if objective["extraction"] not in zones or objective["target"] not in _mapping(root.get("principals"), "principals"):
+            raise ScenarioError("objective names an undeclared extraction zone or principal")
+    if "mission" in root:
+        mission = _mapping(root["mission"], "mission")
+        if set(mission) != {"timeout_frames"} or not _non_negative_int(mission["timeout_frames"]) or mission["timeout_frames"] == 0:
+            raise ScenarioError("invalid mission")
     return root
 
 

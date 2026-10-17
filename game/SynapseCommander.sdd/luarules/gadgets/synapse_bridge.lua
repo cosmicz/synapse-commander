@@ -22,6 +22,8 @@ if gadgetHandler:IsSyncedCode() then
   -- and unit name comes from that versioned table, never from this code.
   local SCENARIO_LIMIT, MAX_JOBS = 16384, 8
   local scenario, budgets, commander, factory = nil, nil, nil, nil
+  local scenario_origin_x, scenario_origin_z = nil, nil
+  local extracted, lost, extraction_dwell, mission_outcome = {}, {}, {}, nil
   local jobs, job_seq, job_spawning, embodied, commander_lost = {}, 0, nil, {}, false
   -- Initial world (rah26-5hf). Assets hold evaluator truth; principal-mode
   -- observations derive only from each body and delivered reports.
@@ -594,6 +596,7 @@ if gadgetHandler:IsSyncedCode() then
       return false
     end
     scenario = loaded
+    scenario_origin_x, scenario_origin_z = x, z
     principal_mode, principals = loaded.principals ~= nil, loaded.principals or {}
     principal_order, unit_principal, links, delivered_reports, queued_reports = {}, {}, {}, {}, {}
     if principal_mode then principal_order = sorted_keys(principals) end
@@ -760,6 +763,51 @@ if gadgetHandler:IsSyncedCode() then
     queued_reports = remaining
   end
 
+  local function outcome(frame, result, target)
+    if mission_outcome then return end
+    mission_outcome = result
+    local before, during, got = {}, {}, {}
+    for _, name in ipairs(asset_order) do
+      local a = assets[name]
+      if a.state ~= "active" then before[#before + 1] = name end
+      if lost[name] then during[#during + 1] = name end
+      if extracted[name] then got[#got + 1] = name end
+    end
+    local detail = { result = result, frame = frame, target = target, losses_before_run = before,
+                     losses_during_run = during, extracted = got, bodies_remaining = budgets and budgets.bodies_remaining,
+                     chips_remaining = budgets and budgets.chips }
+    if commander and commander.unit_id then effect("mission_outcome", frame, commander.unit_id, nil, detail, "commander") end
+    out("scenario", { name = "mission_outcome", result = result, frame = frame, target = target,
+                        losses_before_run = before, losses_during_run = during, extracted = got,
+                        bodies_remaining = budgets and budgets.bodies_remaining, chips_remaining = budgets and budgets.chips })
+  end
+
+  local function update_rescue_state(frame)
+    if not (principal_mode and scenario and scenario.objective and scenario.extraction_zones) then return end
+    local target = scenario.objective.target
+    local zone = scenario.extraction_zones[scenario.objective.extraction]
+    local unitID = target and body_for_principal(target)
+    if not target or not zone then return end
+    if not unitID then outcome(frame, "no_target", target); return end
+    if extracted[target] or lost[target] then return end
+    if scenario.mission and frame >= (scenario.mission.timeout_frames or 12000) then outcome(frame, "timeout", target); return end
+    local x, _, z = Spring.GetUnitPosition(unitID)
+    local zx, zz = scenario_origin_x + zone.position[1], scenario_origin_z + zone.position[2]
+    if x and squared_distance(x, z, zx, zz) <= zone.radius * zone.radius then
+      extraction_dwell[target] = (extraction_dwell[target] or 0) + 1
+      if extraction_dwell[target] >= zone.dwell_frames then
+        extracted[target] = true
+        local detail = { target = target, unit_id = unitID, custody = "friendly" }
+        effect("mind_extracted", frame, unitID, nil, detail, target)
+        effect("mind_extracted", frame, unitID, nil, detail, "commander")
+        Spring.DestroyUnit(unitID, false, true)
+        outcome(frame, "extracted", target)
+      end
+    else
+      extraction_dwell[target] = 0
+    end
+  end
+
   -- Principal-mode rejection must not turn an arbitrary numeric id into an
   -- existence oracle.  A principal may name its own body, a body it currently
   -- detects, or (for the commander) a named principal body that is already
@@ -769,7 +817,7 @@ if gadgetHandler:IsSyncedCode() then
     local bodyID = body_for_principal(principal)
     if not bodyID or not Spring.ValidUnitID(bodyID) then return false end
     if unitID == bodyID or detects(bodyID, unitID) then return true end
-    return principal == "commander" and unit_principal[unitID] ~= nil and links[unitID] == true
+    return principal == "commander" and Spring.GetUnitTeam(unitID) == TEAM0 and links[unitID] == true
   end
 
   function gadget:RecvLuaMsg(msg, playerID)
@@ -836,7 +884,23 @@ if gadgetHandler:IsSyncedCode() then
     end
     if intent.type ~= "TASK" then emit_receipt(intent, "rejected", "unsupported_type"); return true end
     local payload = intent.payload
-    if payload.verb ~= "advance" or type(payload.args) ~= "table" or next(payload.args) ~= nil then
+    if type(payload.args) ~= "table" then
+      emit_receipt(intent, "rejected", "verb_not_supported"); return true
+    end
+    local target = waypoint
+    if payload.verb == "advance" then
+      if next(payload.args) ~= nil then emit_receipt(intent, "rejected", "verb_not_supported"); return true end
+    elseif payload.verb == "move_to" and scenario and scenario.extraction_zones then
+      local tx, tz = payload.args.x, payload.args.z
+      if type(tx) ~= "number" or type(tz) ~= "number" or tx % 1 ~= 0 or tz % 1 ~= 0
+        or tx < 0 or tz < 0 or tx > Game.mapSizeX or tz > Game.mapSizeZ then
+        emit_receipt(intent, "rejected", "move_target_invalid"); return true
+      end
+      target = { tx, Spring.GetGroundHeight(tx, tz), tz }
+      if Spring.TestMoveOrder and not Spring.TestMoveOrder(Spring.GetUnitDefID(tonumber(payload.unit or payload.unit_id)), tx, target[2], tz) then
+        emit_receipt(intent, "rejected", "move_target_invalid"); return true
+      end
+    else
       emit_receipt(intent, "rejected", "verb_not_supported"); return true
     end
     local unitID = tonumber(payload.unit or payload.unit_id)
@@ -862,21 +926,35 @@ if gadgetHandler:IsSyncedCode() then
     local problem = freshness_problem(intent, principal_mode and principal or teamID, frame)
     if problem then emit_receipt(intent, "rejected", problem); return true end
     local x, _, z = Spring.GetUnitPosition(unitID)
-    if x and ((x - waypoint[1]) * (x - waypoint[1]) + (z - waypoint[3]) * (z - waypoint[3]) <= 32 * 32) then
+    if x and ((x - target[1]) * (x - target[1]) + (z - target[3]) * (z - target[3]) <= 32 * 32) then
       emit_receipt(intent, "rejected", "already_at_waypoint"); return true
     end
     if pending[unitID] then emit_receipt(intent, "rejected", "unit_busy"); return true end
     if not use_token(principal_mode and principal or teamID, frame) then emit_receipt(intent, "rejected", "rate_limited"); return true end
-    pending[unitID] = { intent_id = id, last_x = x, last_z = z, principal = principal }
-    Spring.GiveOrderToUnit(unitID, CMD.MOVE, waypoint, 0)
+    pending[unitID] = { intent_id = id, last_x = x, last_z = z, principal = principal, target = target, progress_frame = frame,
+                        arrival_radius = payload.verb == "advance" and 16 or 50 }
+    Spring.GiveOrderToUnit(unitID, CMD.MOVE, target, 0)
     emit_receipt(intent, "accepted", nil)
-    effect("order_started", frame, unitID, id, { target = waypoint }, principal_mode and principal or nil)
+    effect("order_started", frame, unitID, id, { target = target }, principal_mode and principal or nil)
     return true
   end
 
   function gadget:GameFrame(frame)
     recompute_links(frame)
     deliver_due_reports(frame)
+    if scenario then
+      for _, name in ipairs(asset_order) do
+        local a = assets[name]
+        if a.health and a.unit_id and Spring.ValidUnitID(a.unit_id) then
+          local health, max_health = Spring.GetUnitHealth(a.unit_id)
+          if health and max_health and health > max_health * a.health then Spring.SetUnitHealth(a.unit_id, max_health * a.health) end
+          local definition = UnitDefs[Spring.GetUnitDefID(a.unit_id)]
+          if Spring.MoveCtrl and Spring.MoveCtrl.SetGroundMoveTypeData and definition and definition.speed then
+            Spring.MoveCtrl.SetGroundMoveTypeData(a.unit_id, "maxSpeed", definition.speed * a.health)
+          end
+        end
+      end
+    end
     if scenario and #jobs > 0 then
       local remaining = {}
       for _, job in ipairs(jobs) do
@@ -897,16 +975,20 @@ if gadgetHandler:IsSyncedCode() then
       if Spring.GetUnitCommandCount(unitID) == 0 then
         effect("order_done", frame, unitID, command.intent_id, { reason = "queue_empty" }, command.principal)
         pending[unitID] = nil
-      elseif x and ((x - waypoint[1]) * (x - waypoint[1]) + (z - waypoint[3]) * (z - waypoint[3]) <= 16 * 16) then
+      elseif x and ((x - command.target[1]) * (x - command.target[1]) + (z - command.target[3]) * (z - command.target[3]) <= command.arrival_radius * command.arrival_radius) then
         -- Reissuing the fixed move while already at W1 may not produce an
         -- engine UnitCmdDone callback. Physical arrival is still terminal.
         effect("order_done", frame, unitID, command.intent_id, { reason = "arrived" }, command.principal)
         pending[unitID] = nil
-      elseif x and ((x - command.last_x) * (x - command.last_x) + (z - command.last_z) * (z - command.last_z) >= 32 * 32) then
-        command.last_x, command.last_z = x, z
+      elseif x and ((x - command.last_x) * (x - command.last_x) + (z - command.last_z) * (z - command.last_z) >= 1 then
+        command.last_x, command.last_z, command.progress_frame = x, z, frame
         effect("unit_moved", frame, unitID, command.intent_id, { pos = { x, z } }, command.principal)
+      elseif frame - command.progress_frame >= 150 then
+        effect("order_done", frame, unitID, command.intent_id, { reason = "no_progress" }, command.principal)
+        pending[unitID] = nil
       end
     end
+    update_rescue_state(frame)
     if frame % OBS_INTERVAL ~= 0 then return end
     if principal_mode then
       schedule_status_and_detections(frame)
@@ -928,9 +1010,20 @@ if gadgetHandler:IsSyncedCode() then
                          body = entity_for(bodyID, "own_body"), entities = entities,
                          reports = listed_reports, truncated = false, omitted = 0,
                          scenario = { id = scenario.id, version = scenario.version, waypoints = { W1 = waypoint } },
-                         permitted_intents = { { type = "TASK", verbs = { "advance" } }, { type = "MESSAGE" } } }
+                         permitted_intents = { { type = "TASK", verbs = { "advance", "move_to" } }, { type = "MESSAGE" } } }
+          if scenario.objective and scenario.extraction_zones then
+            local zone = scenario.extraction_zones[scenario.objective.extraction]
+            if zone then body.scenario.extraction = { id = scenario.objective.extraction,
+                                                       position = { scenario_origin_x + zone.position[1], scenario_origin_z + zone.position[2] },
+                                                       radius = zone.radius } end
+          end
           if principal == "commander" then
             body.budgets = { bodies_remaining = budgets.bodies_remaining, chips = budgets.chips }
+            if scenario.objective then
+              local target = scenario.objective.target
+              body.objective = { type = scenario.objective.type, target = target,
+                                 status = extracted[target] and "extracted" or (lost[target] and "lost" or (mission_outcome == "timeout" and "timeout" or "pending")) }
+            end
             body.factories = { { name = factory.name, unit_id = factory.unit_id or Json.null } }
             body.link_state, body.roster = {}, {}
             for _, unitID in ipairs(Spring.GetTeamUnits(TEAM0) or {}) do
@@ -1043,6 +1136,13 @@ if gadgetHandler:IsSyncedCode() then
   function gadget:UnitDestroyed(unitID, _, teamID)
     local command = pending[unitID]
     local owner = principal_for_unit(unitID)
+    if principal_mode and owner and not extracted[owner] and not lost[owner] then
+      lost[owner] = true
+      local detail = { target = owner, unit_id = unitID }
+      effect("mind_lost", Spring.GetGameFrame(), unitID, command and command.intent_id, detail, owner)
+      if owner ~= "commander" then effect("mind_lost", Spring.GetGameFrame(), unitID, command and command.intent_id, detail, "commander") end
+      if scenario and scenario.objective and scenario.objective.target == owner then outcome(Spring.GetGameFrame(), "lost", owner) end
+    end
     if principal_mode then
       if owner then effect("unit_destroyed", Spring.GetGameFrame(), unitID, command and command.intent_id, nil, owner) end
     elseif can_emit_effect(unitID, teamID) then
