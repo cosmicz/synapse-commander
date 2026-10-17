@@ -349,20 +349,28 @@ def _group_alive(pgid: int) -> bool:
 
 
 def other_engines(own_pgid: int | None = None) -> list[int]:
-    """Pids of spring-headless processes outside our own process group (Linux /proc)."""
-    found = []
+    """Pids of engine runs outside our own process group (Linux /proc).
+
+    An engine run is a process whose argv[0] is a spring-headless binary and
+    which was given a --write-dir, as every launcher here starts it.
+    """
+    return sorted(engine_command_lines(own_pgid))
+
+
+def engine_command_lines(own_pgid: int | None = None) -> dict[int, str]:
+    found = {}
     for entry in Path("/proc").glob("[0-9]*"):
         try:
-            argv0 = (entry / "cmdline").read_bytes().split(b"\0", 1)[0]
-            if not argv0.endswith(b"spring-headless"):
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+            if not argv[0].endswith(b"spring-headless") or b"--write-dir" not in argv:
                 continue
             pid = int(entry.name)
             if own_pgid is not None and os.getpgid(pid) == own_pgid:
                 continue
-        except (OSError, ValueError):
+        except (OSError, ValueError, IndexError):
             continue
-        found.append(pid)
-    return sorted(found)
+        found[pid] = b" ".join(argv).decode("utf-8", "replace")[:300]
+    return found
 
 
 def wait_for_log(path: Path, needles: Sequence[str], *, timeout_s: float,

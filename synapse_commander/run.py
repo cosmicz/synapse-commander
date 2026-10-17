@@ -333,6 +333,11 @@ def run_smoke(config: SmokeConfig, *,
                 if others:
                     seen = verdict.setdefault("other_engines_during_run", [])
                     seen.extend(pid for pid in others if pid not in seen)
+                    if engine_scan is launch.other_engines:
+                        # Private evidence only (the verdict, not the ledger): who it was.
+                        verdict.setdefault("other_engine_command_lines", {}).update(
+                            {str(pid): line for pid, line in launch.engine_command_lines(
+                                getattr(engine, "pid", None)).items()})
                 if engine.poll() is not None:
                     # Fail fast: without an engine the client could only time out.
                     verdict["engine_exited_early"] = engine.poll()
