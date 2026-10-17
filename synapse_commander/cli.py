@@ -56,6 +56,14 @@ def build_parser() -> argparse.ArgumentParser:
                     "No probes are sent. Raw prompts and outputs go to OUT/RUN_ID/decisions.jsonl. "
                     "Exit 0 only on PASS, which requires the ledger to classify the run agent_only.")
     add_run_arguments(agent)
+    provision = commands.add_parser(
+        "run-provision",
+        help="Loop 1 scripted smoke: PRODUCE one unit through the factory, refuse an unfunded one, advance it",
+        description="Runs a scenario table (default rescue_smoke) with the scripted provisioning client: one "
+                    "funded PRODUCE, the factory job and its unit observed with the installed controller, a "
+                    "second PRODUCE of the spent chip refused with no effect, then a TASK advance of the produced "
+                    "unit. Exit 0 only on PASS. A scripted fixture: not autonomous.")
+    add_run_arguments(provision)
     agent.add_argument("--model", default="claude-sonnet-5", help="model pinned for the CLI route and the manifest")
     agent.add_argument("--call-budget", type=int, default=20, help="maximum model calls")
     agent.add_argument("--call-timeout", type=float, default=60.0, help="seconds per model call")
@@ -65,8 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command in ("run-smoke", "run-agent"):
+    if args.command in ("run-smoke", "run-agent", "run-provision"):
         extra = {}
+        if args.command == "run-provision":
+            extra = dict(mode="provision")
+            args.scenario = args.scenario or "rescue_smoke"
         if args.command == "run-agent":
             extra = dict(mode="agent", model=args.model, call_budget=args.call_budget,
                          call_timeout_s=args.call_timeout, agent_deadline_s=args.deadline)

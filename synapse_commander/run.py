@@ -28,6 +28,7 @@ from .agents.scripted import (
     ScriptedSmoke,
     planar_distance,
 )
+from .agents.provision import ProvisionSmoke
 from .agents.commander import SYSTEM_PROMPT, AgentCommander, ClaudeCliRoute, displacement_after_receipt
 from .gateway import LoopbackGateway
 from .scenarios import ScenarioError, load_scenario
@@ -324,9 +325,12 @@ def run_smoke(config: SmokeConfig, *,
     "agent" with the agent commander, whose decisions come from a live model.
     """
     run_id = launch.check_run_id(config.run_id)
-    if config.mode not in ("scripted", "agent"):
+    if config.mode not in ("scripted", "agent", "provision"):
         raise launch.LaunchError(f"unknown mode {config.mode!r}")
     agent = config.mode == "agent"
+    provision = config.mode == "provision"
+    if provision and config.scenario is None:
+        raise launch.LaunchError("provision mode needs a scenario table (--scenario)")
     if not config.rig_commit:
         raise launch.LaunchError("rig commit is required for the manifest")
     app_commit, app_dirty = app or app_identity()
@@ -366,7 +370,7 @@ def run_smoke(config: SmokeConfig, *,
         config_hashes[f"scenario_table/{config.scenario}"] = sha256_text(json.dumps(table, sort_keys=True))
     package = Path(__file__).resolve().parent
     for module in ("mailbox.py", "gateway.py", "protocol.py", "recording.py", "run.py", "launch.py",
-                   "agents/scripted.py", "agents/commander.py"):
+                   "agents/scripted.py", "agents/commander.py", "agents/provision.py"):
         path = package / module
         if path.exists():
             config_hashes[f"synapse_commander/{module}"] = launch.sha256_file(path)
@@ -474,6 +478,8 @@ def run_smoke(config: SmokeConfig, *,
             driver: Any = AgentCommander(client, route, config.model, sink=ordered, on_decision=keep_decision,
                                          call_budget=config.call_budget, wall_deadline_s=config.agent_deadline_s,
                                          poll_s=config.client_poll_s)
+        elif provision:
+            driver = ProvisionSmoke(client, wall_timeout_s=config.client_timeout_s, poll_s=config.client_poll_s)
         else:
             driver = ScriptedSmoke(client, wall_timeout_s=config.client_timeout_s, poll_s=config.client_poll_s)
         try:
@@ -481,10 +487,12 @@ def run_smoke(config: SmokeConfig, *,
         except Exception as exc:  # keep the partial transcript as evidence
             error = f"client: {type(exc).__name__}: {exc}"
             trace = driver.trace
-        if agent and trace.get("accepted_advance"):
-            # The commander stops once it sees the unit at W1; give the engine's
-            # order_done a bounded moment to arrive in the ledger.
-            intent_id = str(trace["accepted_advance"]["envelope"]["intent_id"])
+        final_advance = (trace.get("accepted_advance", {}).get("envelope") if agent
+                         else trace.get("advance_envelope") if provision and trace.get("advance_http") == 202 else None)
+        if final_advance:
+            # The client stops once the unit is moving or at W1; give the
+            # engine's order_done a bounded moment to arrive in the ledger.
+            intent_id = str(final_advance["intent_id"])
             deadline = time.monotonic() + 20
             while intent_id not in ordered.done_intents and time.monotonic() < deadline:
                 time.sleep(0.25)
@@ -509,7 +517,8 @@ def run_smoke(config: SmokeConfig, *,
             except Exception as exc:
                 verdict.setdefault("pump_errors", []).append(repr(exc))
         if recorder is not None:
-            checks = (evaluate_agent if agent else evaluate)(trace, ordered, verdict)
+            checks = (evaluate_agent if agent else evaluate_provision if provision else evaluate)(
+                trace, ordered, verdict)
             outcome = {"pre_ledger_checks": "PASS" if checks and all(c["ok"] for c in checks.values())
                        and not error else "FAIL", "failed": sorted(n for n, c in checks.items() if not c["ok"]),
                        "error": error, "classification": run_label(agent, presentation)}
@@ -525,7 +534,7 @@ def run_smoke(config: SmokeConfig, *,
                 (config.lock_dir / "owner").read_text())
     verdict["wall_end_utc"] = utc_now()
     verdict["error"] = error
-    _finish(verdict, trace, ordered, ledger_path, layout, agent=agent)
+    _finish(verdict, trace, ordered, ledger_path, layout, agent=agent, provision=provision)
     return verdict
 
 
@@ -757,6 +766,106 @@ def ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -> dict[
     return checks
 
 
+def evaluate_provision(trace: dict[str, Any], ordered: OrderedLedger | None,
+                       verdict: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Loop 1 checks from the HTTP transcript; ledger checks follow in _finish."""
+    checks: dict[str, dict[str, Any]] = {}
+
+    def check(name: str, ok: bool, **detail: Any) -> None:
+        checks[name] = {"ok": bool(ok), **detail}
+
+    check("hello_seen", ordered is not None and ordered.hello is not None,
+          hello=None if ordered is None else ordered.hello)
+    first = trace.get("first_observation") or {}
+    check("scenario_observed", bool(first.get("commander")) and trace.get("budgets_before") is not None,
+          commander=first.get("commander"), budgets=trace.get("budgets_before"),
+          scenario=(first.get("scenario") or {}).get("id"))
+    receipt = trace.get("produce_receipt") or {}
+    check("produce_accepted", trace.get("produce_http") == 202 and receipt.get("accepted") is True,
+          choice=trace.get("produce_choice"), receipt=receipt)
+    before, after = trace.get("budgets_before") or {}, trace.get("budgets_after") or {}
+    chip = (trace.get("produce_choice") or {}).get("controller")
+    check("budgets_decremented",
+          bool(before and after) and after.get("bodies_remaining") == before.get("bodies_remaining", 0) - 1
+          and (after.get("chips") or {}).get(chip) == (before.get("chips") or {}).get(chip, 0) - 1,
+          before=before, after=after, chip=chip)
+    unit = trace.get("produced_unit") or {}
+    check("produced_unit_observed_with_controller", unit.get("controller") == chip and unit.get("id") is not None,
+          unit=unit)
+    response = trace.get("unfunded_response") or {}
+    reason = response.get("reason") or response.get("error")
+    check("unfunded_produce_rejected",
+          trace.get("unfunded_http") == 409 and reason in ("chip_unavailable", "budget_exhausted")
+          and response.get("accepted") is not True,
+          http=trace.get("unfunded_http"), reason=reason)
+    check("budgets_unchanged_after_rejection", trace.get("budgets_after_unfunded") == after,
+          after=after, after_rejection=trace.get("budgets_after_unfunded"))
+    adv = trace.get("advance_receipt") or {}
+    check("produced_unit_advance_accepted", trace.get("advance_http") == 202 and adv.get("accepted") is True,
+          receipt=adv)
+    moved = trace.get("moved_observation")
+    distance = trace.get("moved_distance")
+    within = (moved is not None and distance is not None and adv.get("frame") is not None
+              and distance > MIN_DISPLACEMENT and int(moved["frame"]) - int(adv["frame"]) <= ADVANCE_LIMIT_FRAMES)
+    check("displacement_observed_within_300_frames", within, distance=distance, receipt_frame=adv.get("frame"),
+          observation_frame=None if moved is None else moved["frame"])
+    check("receipt_before_displacement", within and int(adv["frame"]) < int(moved["frame"]))
+    _host_checks(verdict, check)
+    return checks
+
+
+def provision_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Factory job, budget and advance effects in causal ledger order."""
+    checks: dict[str, dict[str, Any]] = {}
+    produce_id = (trace.get("produce_envelope") or {}).get("intent_id")
+    unfunded_id = (trace.get("unfunded_envelope") or {}).get("intent_id")
+    advance_id = (trace.get("advance_envelope") or {}).get("intent_id")
+    unit_id = (trace.get("produced_unit") or {}).get("id")
+    chip = (trace.get("produce_choice") or {}).get("controller")
+
+    def first(kind: str, **match: Any) -> dict[str, Any] | None:
+        for record in records:
+            if record["kind"] == kind and all(record["payload"].get(k) == v for k, v in match.items()):
+                return record
+        return None
+
+    def effect(name: str, intent_id: Any) -> dict[str, Any] | None:
+        return first("EFFECT", type=name, intent_id=intent_id)
+
+    bound = first("EFFECT", type="commander_bound")
+    checks["commander_bound_effect"] = {"ok": bound is not None,
+                                        "unit_id": None if bound is None else bound["payload"].get("unit_id")}
+    created = effect("unit_created", produce_id)
+    detail = {} if created is None else created["payload"].get("detail") or {}
+    done = effect("factory_job_done", produce_id)
+    checks["unit_created_carries_controller"] = {
+        "ok": created is not None and detail.get("controller") == chip and created["payload"].get("unit_id") == unit_id
+        and done is not None and (done["payload"].get("detail") or {}).get("unit_id") == unit_id
+        and (done["payload"].get("detail") or {}).get("job_id") == detail.get("job_id"),
+        "detail": detail, "unit_id": unit_id}
+    chain = [first("INTENT_SUBMITTED", intent_id=produce_id), first("INTENT_RECEIPT", intent_id=produce_id),
+             effect("factory_job_started", produce_id), created, done,
+             first("INTENT_SUBMITTED", intent_id=advance_id), first("INTENT_RECEIPT", intent_id=advance_id),
+             effect("order_started", advance_id)]
+    seqs = [None if r is None else r["seq"] for r in chain]
+    names = ["produce_submitted", "produce_receipt", "factory_job_started", "unit_created", "factory_job_done",
+             "advance_submitted", "advance_receipt", "order_started"]
+    receipt = chain[1]
+    cites = bool(receipt and chain[2] and receipt["event_id"] in chain[2]["causes"])
+    checks["ledger_causal_order"] = {"ok": None not in seqs and seqs == sorted(seqs) and cites,
+                                     "seqs": dict(zip(names, seqs)), "job_started_cites_receipt": cites}
+    leaked = [r["seq"] for r in records if r["kind"] == "EFFECT" and r["payload"].get("intent_id") == unfunded_id]
+    checks["unfunded_produce_no_effect"] = {"ok": unfunded_id is not None and not leaked, "effect_seqs": leaked}
+    order_done = effect("order_done", advance_id)
+    receipt_frame = (trace.get("advance_receipt") or {}).get("frame")
+    done_frame = None if order_done is None else order_done["payload"].get("engine_frame")
+    checks["order_done_effect"] = {
+        "ok": order_done is not None and receipt_frame is not None and done_frame is not None
+        and 0 <= int(done_frame) - int(receipt_frame) <= ORDER_DONE_LIMIT_FRAMES,
+        "engine_frame": done_frame, "receipt_frame": receipt_frame}
+    return checks
+
+
 def _probe_id(trace: dict[str, Any], name: str) -> str | None:
     for probe in trace.get("probes", []):
         if probe.get("name") == name:
@@ -765,8 +874,8 @@ def _probe_id(trace: dict[str, Any], name: str) -> str | None:
 
 
 def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedger | None,
-            ledger_path: Path, layout: launch.RunLayout, *, agent: bool = False) -> None:
-    checks = (evaluate_agent if agent else evaluate)(trace, ordered, verdict)
+            ledger_path: Path, layout: launch.RunLayout, *, agent: bool = False, provision: bool = False) -> None:
+    checks = (evaluate_agent if agent else evaluate_provision if provision else evaluate)(trace, ordered, verdict)
     verification = verify_ledger(ledger_path) if ledger_path.exists() else None
     if verification is not None:
         checks["ledger_verified"] = {"ok": verification.ok, "status": verification.status,
@@ -778,6 +887,11 @@ def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedg
         records = verification.records if verification.ok else _ledger_records(ledger_path)
         if agent:
             checks.update(agent_ledger_checks(records, trace, verification))
+        elif provision:
+            checks.update(provision_ledger_checks(records, trace))
+            checks["not_autonomous"] = {"ok": verification.autonomous is False
+                                        and verification.classification in ("scripted_replay", "scripted_fixture"),
+                                        "classification": verification.classification}
         else:
             checks.update(ledger_checks(records, trace))
             checks["not_autonomous"] = {"ok": verification.autonomous is False

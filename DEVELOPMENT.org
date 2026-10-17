@@ -205,6 +205,28 @@ body or chip count is zero: inventory and queue legality stay authoritative in
 the engine, which reports =budget_exhausted= or =chip_unavailable=. Loop 0's
 fixed =TASK advance= boundary and W1 observation remain unchanged.
 
+* Loop 1 provisioning run
+=python3 -m synapse_commander run-provision= takes the =run-smoke= arguments and
+runs a scenario table (default =rescue_smoke=) with the scripted client in
+=agents/provision.py=, through the same gateway and recorder. It waits for the
+bound commander, budgets and the =PRODUCE= permission; submits one =PRODUCE=
+of the first declared chassis with the first controller whose chip count is
+positive; waits for the spend in =budgets= and for an owned unit carrying that
+controller; submits the same =PRODUCE= again, now unfunded; and advances the
+produced unit to =W1=.
+
+=PASS= needs: hello; scenario observed; the =PRODUCE= accepted; bodies and the
+chosen chip each down by one; the produced unit observed with its controller;
+the second =PRODUCE= rejected =chip_unavailable= or =budget_exhausted=, with no
+effect and unchanged budgets; =commander_bound=; =unit_created= carrying the
+controller and the job's id, and =factory_job_done= naming the same unit;
+=PRODUCE= submission, receipt, =factory_job_started=, =unit_created=,
+=factory_job_done=, then the advance's submission, receipt and =order_started=
+in ledger order; the advance accepted with displacement within 300 frames and
+=order_done= within 600; the ledger verified and not autonomous; exclusivity
+and bounded teardown. Limits: scripted fixture, one production, headless unless
+=--engine-binary spring=; scenario values are provisional.
+
 * Initial upstream runtime evidence — October 17, 2026
 Recoil 2026.07.04 ARM64 Linux executes in a VM. Stock BAR at
 =f6f07eaf1fbc09eae536444ff3b2755d81e5440b= loaded Supreme Isthmus v2.1 and
