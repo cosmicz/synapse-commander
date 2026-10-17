@@ -59,12 +59,14 @@ def _validate(table: Any, scenario_name: str) -> dict[str, Any]:
         raise ScenarioError("scenario table has invalid identifier")
     for name, item in chassis.items():
         item = _mapping(item, f"chassis.{name}")
-        if set(item) != {"def", "build_frames", "commission_frames"} or not _identifier(item.get("def")) or not _non_negative_int(item.get("build_frames")) or not _non_negative_int(item.get("commission_frames")):
+        if not {"def", "build_frames", "commission_frames"} <= set(item) <= {"def", "build_frames", "commission_frames", "capabilities"} or not _identifier(item.get("def")) or not _non_negative_int(item.get("build_frames")) or not _non_negative_int(item.get("commission_frames")):
             raise ScenarioError("invalid chassis definition")
     if any(not _non_negative_int(amount) for amount in chips.values()):
         raise ScenarioError("invalid chip inventory")
-    if set(commander) != {"chip"} or commander.get("chip") not in chips:
+    if not {"chip"} <= set(commander) <= {"chip", "position", "capabilities"} or commander.get("chip") not in chips:
         raise ScenarioError("invalid commander")
+    if "position" in commander:
+        _coordinates(commander["position"], "commander position", 2)
     if "W1" not in waypoints or len(waypoints) > 8:
         raise ScenarioError("missing public waypoint")
     for point in waypoints.values():

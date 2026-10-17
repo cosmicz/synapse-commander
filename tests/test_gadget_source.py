@@ -16,7 +16,7 @@ class GadgetSourceContractTests(unittest.TestCase):
 
     def task_rate_check(self) -> int:
         """Index of the TASK branch's rate check (PRODUCE has its own, earlier)."""
-        return self.source.index("if not use_token(teamID, frame)", self.source.index('if intent.type ~= "TASK"'))
+        return self.source.index("if not use_token(principal_mode and principal or teamID, frame)", self.source.index('if intent.type ~= "TASK"'))
 
     def test_stale_ids_survive_past_the_stale_threshold(self) -> None:
         self.assertIn("MAX_OBSERVATIONS = 0, 15, 128", self.source)
@@ -40,7 +40,7 @@ class GadgetSourceContractTests(unittest.TestCase):
 
     def test_boundary_records_and_observation_history_are_chronological(self) -> None:
         self.assertIn("MAX_LINE + #PREFIX", self.source)
-        self.assertIn("local order = observation_order[teamID] or {}", self.source)
+        self.assertIn("local order = observation_order[scope] or {}", self.source)
         self.assertIn("table.remove(order, 1)", self.source)
 
     def test_pending_order_never_spends_a_rate_token(self) -> None:
@@ -66,7 +66,7 @@ class GadgetSourceContractTests(unittest.TestCase):
 
     def test_already_arrived_rejects_before_rate_and_empty_queue_finishes(self) -> None:
         self.assertIn('emit_receipt(intent, "rejected", "already_at_waypoint")', self.source)
-        self.assertIn('detail = { reason = "queue_empty" }', self.source)
+        self.assertIn('effect("order_done", frame, unitID, command.intent_id, { reason = "queue_empty" }', self.source)
         self.assertLess(
             self.source.index('emit_receipt(intent, "rejected", "already_at_waypoint")'),
             self.task_rate_check(),
@@ -93,7 +93,7 @@ class FactoryProvisioningSourceTests(unittest.TestCase):
     def test_produce_rejections_follow_the_agreed_order(self) -> None:
         self.order(
             '"invalid_payload"', '"unknown_factory"', '"unknown_chassis"', '"unknown_controller"',
-            '"invalid_parameters"', "freshness_problem(intent, teamID, frame)", '"factory_queue_full"',
+            '"invalid_parameters"', "freshness_problem(intent, principal_mode and intent.principal or teamID, frame)", '"factory_queue_full"',
             '"budget_exhausted"', '"chip_unavailable"', '"rate_limited"',
         )
 
@@ -151,7 +151,7 @@ class FactoryProvisioningSourceTests(unittest.TestCase):
         self.assertLessEqual(set(table["factory"]), {"name", "def", "offset"})
         self.assertIn(table["commander"]["chip"], table["chips"])
         for chassis in table["chassis"].values():
-            self.assertEqual(set(chassis), {"def", "build_frames", "commission_frames"})
+            self.assertTrue({"def", "build_frames", "commission_frames"} <= set(chassis))
         self.assertLessEqual(len(SCENARIO.read_bytes()), 16384)
         self.assertTrue(re.fullmatch(r"[\w.-]{1,64}", table["version"]))
 
@@ -162,21 +162,19 @@ def function_body(source: str, signature: str) -> str:
 
 
 class InitialWorldSourceTests(unittest.TestCase):
-    """rah26-5hf: predeployed assets, aged distress report, hidden truth."""
+    """rah26-5hf/mmn: evaluator truth and principal-local observations."""
 
     def setUp(self) -> None:
         self.source = GADGET.read_text(encoding="utf-8")
         start = self.source.index("function gadget:GameFrame")
-        self.observation = self.source[self.source.index('local id = "obs-0-" .. frame', start):self.source.index('out("observation", body)', start)]
+        self.observation = self.source[self.source.index("if principal_mode then", start):self.source.index("return\n    end", start)]
 
     def test_hidden_truth_never_enters_the_observation(self) -> None:
         for secret in ("cause_hidden", "a.state", "a.contact", "a.position", "seed"):
             self.assertNotIn(secret, self.observation)
-        # The roster reports identity and contact; status comes from contact or an observed loss.
-        self.assertIn('status = live and "in_contact"', self.observation)
-        self.assertIn('(a.known_lost and "lost" or "no_contact")', self.observation)
-        self.assertIn("unit_id = live and a.unit_id or nil", self.observation)
-        self.assertIn("age_frames = frame - r.observed_frame", self.observation)
+        self.assertIn('observation_id = "obs-" .. principal .. "-" .. frame', self.observation)
+        self.assertIn('entity_for(bodyID, "own_body")', self.source)
+        self.assertIn('entity_for(unitID, "sensor")', self.source)
 
     def test_truth_is_recorded_only_in_the_evaluator_record(self) -> None:
         record = function_body(self.source, "local function world_init_record")
@@ -186,15 +184,12 @@ class InitialWorldSourceTests(unittest.TestCase):
         self.assertIn('out("scenario", world_init_record(frame))', self.source)
         self.assertEqual(self.source.count("cause_hidden"), 3)  # validated once, copied into world_init; never observed
 
-    def test_out_of_contact_units_are_never_reported_or_commandable(self) -> None:
-        visible = function_body(self.source, "local function visible_source")
-        self.assertTrue(visible.split("\n")[1].strip().startswith("if hidden[unitID] then return nil end"))
-        self.assertIn("or hidden[unitID] then", self.source)
-        callin = self.source[self.source.index("function gadget:UnitCreated"):]
-        self.assertIn("if spawning_hidden then hidden[unitID] = true; return end", callin)
-        spawn = function_body(self.source, "local function spawn_asset")
-        self.assertIn("Spring.SetUnitSensorRadius(unitID, sensor, 0)", spawn)
-        self.assertIn('HIDDEN_SENSORS = { "los", "airLos", "radar", "sonar", "seismic" }', self.source)
+    def test_principal_views_use_geometry_not_team_los_or_sensor_mutation(self) -> None:
+        self.assertIn("Spring.TraceRayGroundBetweenPositions", self.source)
+        self.assertIn("Spring.GetGroundHeight(x, z) > eye", self.source)
+        self.assertNotIn("Spring.GetUnitLosState", self.source)
+        self.assertNotIn("Spring.SetUnitSensorRadius", self.source)
+        self.assertNotIn("HIDDEN_SENSORS", self.source)
 
     def test_every_predeployed_asset_debits_the_production_budgets(self) -> None:
         spawn = function_body(self.source, "local function spawn_asset")
@@ -255,6 +250,57 @@ class BaselineFixtureTests(unittest.TestCase):
         for asset in self.table["predeployed"]:
             if asset["state"] == "destroyed":
                 self.assertFalse(asset["contact"])
+
+
+class PrincipalViewSourceTests(unittest.TestCase):
+    """mmn: principal-local sensing, authority, links and message delivery."""
+
+    def setUp(self) -> None:
+        self.source = GADGET.read_text(encoding="utf-8")
+        self.table = json.loads(BASELINE.read_text(encoding="utf-8"))
+
+    def test_baseline_declares_the_opt_in_principal_and_comms_tables(self) -> None:
+        self.assertEqual(set(self.table["principals"]), {"commander", "M1"})
+        self.assertEqual(self.table["principals"]["M1"]["chip"], "reasoner_small_v1")
+        self.assertEqual(self.table["comms"]["latency_frames"], 30)
+        self.assertIn("relay_support_v1", self.table["comms"]["relay_chassis"])
+        self.assertEqual(self.table["commander"]["position"], [0, 240])
+
+    def test_geometry_sensing_is_synced_and_damage_scales_range(self) -> None:
+        self.assertIn("Spring.TraceRayGroundBetweenPositions", self.source)
+        self.assertIn("if ok then return hit == nil end", self.source)
+        self.assertIn("math.ceil(distance / 16)", self.source)
+        self.assertIn("fraction / 0.5", self.source)
+        self.assertNotIn("Spring.GetUnitLosState", self.source)
+        self.assertNotIn("Spring.SetUnitSensorRadius", self.source)
+
+    def test_observations_and_effects_are_scoped_to_a_principal(self) -> None:
+        self.assertIn('observation_id = "obs-" .. principal .. "-" .. frame', self.source)
+        self.assertIn("body = entity_for(bodyID, \"own_body\")", self.source)
+        self.assertIn("body.principal = principal", self.source)
+        self.assertIn("if principal_mode and not principal then return end", self.source)
+        self.assertIn("principals = principal_bodies", self.source)
+
+    def test_authority_and_observation_rejections_precede_orders(self) -> None:
+        task = self.source[self.source.index('if intent.type ~= "TASK"'):self.source.index("Spring.GiveOrderToUnit")]
+        for reason in ('"unknown_principal"', '"not_authorized"', '"no_link"', '"incapable"', '"unknown_observation"'):
+            self.assertIn(reason, self.source)
+        self.assertLess(task.index('"not_authorized"'), task.index("Spring.GetUnitPosition"))
+        self.assertIn("principal_mode and principal or teamID", task)
+
+    def test_messages_are_accepted_then_link_gated_at_delivery(self) -> None:
+        branch = self.source[self.source.index('intent.type == "MESSAGE"'):self.source.index('if intent.type ~= "TASK"')]
+        self.assertIn('emit_receipt(intent, "accepted", nil)', branch)
+        self.assertIn('effect("message_sent"', branch)
+        delivery = self.source[self.source.index("local function deliver_due_reports"):self.source.index("function gadget:RecvLuaMsg")]
+        self.assertIn('effect("message_delivered"', delivery)
+        self.assertIn('effect("message_dropped"', delivery)
+        self.assertIn('reason = "no_link"', delivery)
+
+    def test_commander_is_placed_after_factory_creation(self) -> None:
+        self.assertIn("Spring.SetUnitPosition", self.source)
+        self.assertIn('effect("commander_placed"', self.source)
+        self.assertIn("link_check = link_check", self.source)
 
 
 if __name__ == "__main__":

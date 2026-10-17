@@ -7,11 +7,18 @@
   "bodies": 6,
   "chips": {"reasoner_large_v1": 1, "reasoner_small_v1": 1, "escort_fixed_v1": 3},
   "chassis": {
-    "scout_v1": {"def": "armflea", "build_frames": 90, "commission_frames": 30},
-    "carrier_v1": {"def": "armck", "build_frames": 120, "commission_frames": 30},
-    "relay_support_v1": {"def": "armmark", "build_frames": 105, "commission_frames": 30}
+    "scout_v1": {"def": "armflea", "build_frames": 90, "commission_frames": 30, "capabilities": ["move", "sense"]},
+    "carrier_v1": {"def": "armck", "build_frames": 120, "commission_frames": 30, "capabilities": ["move", "assist"]},
+    "relay_support_v1": {"def": "armmark", "build_frames": 105, "commission_frames": 30, "capabilities": ["move", "relay", "sense"]}
   },
-  "commander": {"chip": "reasoner_large_v1"},
+  "commander": {"chip": "reasoner_large_v1", "position": [0, 240], "capabilities": ["move", "sense", "assist"]},
+  "principals": {
+    "commander": {"chip": "reasoner_large_v1"},
+    "M1": {"chip": "reasoner_small_v1"}
+  },
+  "reasoner_chips": ["reasoner_large_v1", "reasoner_small_v1"],
+  "sensors": {"armflea": 900, "armck": 900, "armmark": 900},
+  "comms": {"range": 1400, "latency_frames": 30, "relay_chassis": ["relay_support_v1"]},
   "predeployed": [
     {"name": "S0", "def": "armflea", "controller": "escort_fixed_v1", "position": [300, -200], "state": "active", "contact": true},
     {"name": "M1", "def": "armck", "controller": "reasoner_small_v1", "position": [900, -3400], "state": "active", "contact": false, "health": 0.4},

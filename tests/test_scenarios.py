@@ -22,6 +22,10 @@ class ScenarioTableTests(unittest.TestCase):
         table["distress"] = {"hidden": True}
         self.assertEqual(_validate(table, DEFAULT_SCENARIO)["id"], DEFAULT_SCENARIO)
 
+    def test_engine_only_commander_placement_is_checked_but_publicly_compatible(self):
+        table = load_scenario("rescue_baseline")
+        self.assertEqual(table["commander"]["position"], [0, 240])
+
 
 if __name__ == "__main__":
     unittest.main()
