@@ -1251,10 +1251,12 @@ class PrincipalStreams(LedgerCase):
             rec.validate_manifest(manifest(principals=["M1"], principal_sources={"M1": "agent_only"}))
         rec.validate_manifest(manifest(**TWO, required_decisions=[{"label": "x", "principal": "M1"}]))
 
-    def agent_run(self, sources, decisions):
+    def agent_run(self, sources, decisions, intervention=None):
         r = self.recorder(principals=["commander", "M1"], principal_sources=sources, model_id=MODEL,
                           required_decisions=decisions)
         r.run_start(0)
+        if intervention:
+            r.record("OPERATOR_INTERVENTION", sim_frame=0, origin="operator", payload=intervention)
         for frame, principal in enumerate(("commander", "M1")):
             o = self.obs(r, principal, f"obs-{principal}-0", frame=frame)
             if sources[principal] == "agent":
@@ -1303,6 +1305,19 @@ class PrincipalStreams(LedgerCase):
         result = verify_ledger(self.path)
         self.assertEqual(result.principal_classifications["M1"], "agent_partial")
         self.assertIn("principal M1 declared scripted but its evidence classifies as agent_partial", result.evidence_limits)
+
+    def test_an_operator_instruction_makes_agent_principals_assisted(self):
+        # A spoken or typed high-level instruction is an intervention, even when
+        # the agent then emits every intent with complete live inference.
+        decisions = [{"label": "d-M1", "principal": "M1"}, {"label": "d-commander", "principal": "commander"}]
+        result = self.agent_run({"commander": "agent", "M1": "agent"}, decisions,
+                                intervention={"action": "instruction", "principal": "commander", "channel": "voice"})
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(result.classification, "assisted")
+        self.assertEqual(result.principal_classifications, {"M1": "assisted", "commander": "assisted"})
+        self.assertFalse(result.autonomous)
+        self.assertIn("operator intervention after start: not autonomous", result.evidence_limits)
+        self.assertIn("principal commander declared agent but its evidence classifies as assisted", result.evidence_limits)
 
     def test_a_declared_human_principal_is_labelled_human_only(self):
         rec.validate_manifest(manifest(principals=["commander", "M1"], principal_sources={"commander": "human", "M1": "scripted"}))
