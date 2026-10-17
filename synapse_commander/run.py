@@ -24,7 +24,6 @@ from .agents.scripted import (
     ADVANCE_LIMIT_FRAMES,
     MIN_DISPLACEMENT,
     STILL_DISTANCE,
-    ClientError,
     GatewayClient,
     ScriptedSmoke,
     planar_distance,
@@ -327,6 +326,11 @@ def run_smoke(config: SmokeConfig, *,
 
         def pump_loop() -> None:
             while not pump_stop.wait(0.2):
+                if engine.poll() is not None:
+                    # Fail fast: without an engine the client could only time out.
+                    verdict["engine_exited_early"] = engine.poll()
+                    server.shutdown()
+                    return
                 try:
                     ordered.pump()
                 except Exception as exc:  # recorded in the verdict, stops the pump
@@ -338,8 +342,8 @@ def run_smoke(config: SmokeConfig, *,
         smoke = ScriptedSmoke(client, wall_timeout_s=config.client_timeout_s, poll_s=config.client_poll_s)
         try:
             trace = smoke.run()
-        except ClientError as exc:
-            error = f"client: {exc}"
+        except Exception as exc:  # keep the partial transcript as evidence
+            error = f"client: {type(exc).__name__}: {exc}"
             trace = smoke.trace
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"

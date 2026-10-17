@@ -27,7 +27,8 @@ FPS_FAKE = 300  # simulated frames per wall second, so a stale observation arriv
 
 class FakeEngine:
     def __init__(self, run_id: str, *, accept_stale: bool = False, move: bool = True,
-                 gaia: bool = True) -> None:
+                 gaia: bool = True, die_after_s: float | None = None) -> None:
+        self.die_after_s = die_after_s
         self.run_id = run_id
         self.accept_stale = accept_stale
         self.move = move
@@ -50,7 +51,13 @@ class FakeEngine:
     def start(self) -> None:
         self.t0 = time.monotonic()
 
+    def _dead(self) -> bool:
+        return (self.die_after_s is not None and self.t0 is not None
+                and time.monotonic() - self.t0 > self.die_after_s)
+
     def poll(self) -> int | None:
+        if self._dead():
+            return 134
         return 0 if self.stopped else None
 
     def stop(self) -> dict[str, object]:
@@ -63,7 +70,7 @@ class FakeEngine:
         self.events.append({"seq": len(self.events) + 1, "frame": max(self.frame, 0), "kind": kind, "body": body})
 
     def _advance(self) -> None:
-        if self.t0 is None or self.stopped:
+        if self.t0 is None or self.stopped or self._dead():
             return
         target = int((time.monotonic() - self.t0) * FPS_FAKE)
         while self.frame < target:
@@ -217,6 +224,15 @@ class LoopOrchestrationTests(unittest.TestCase):
         verdict, _engine = self.run_fake("fake-nogaia", gaia=False)
         self.assertFalse(verdict["checks"]["probe_foreign_unit"]["ok"])
         self.assertEqual(verdict["verdict"], "FAIL")
+
+    def test_engine_death_fails_fast_with_partial_trace(self) -> None:
+        begin = time.monotonic()
+        verdict, _engine = self.run_fake("fake-dies", die_after_s=1.0)
+        self.assertEqual(verdict["verdict"], "FAIL")
+        self.assertEqual(verdict["engine_exited_early"], 134)
+        self.assertIsNotNone(verdict["error"])
+        self.assertLess(time.monotonic() - begin, 15)
+        self.assertTrue(verdict["checks"]["advance_accepted"]["ok"])  # it got that far
 
     def test_rig_commit_required(self) -> None:
         config = SmokeConfig(engine_dir=self.out, data_dir=self.out, out_dir=self.out, run_id="x", rig_commit=None)
