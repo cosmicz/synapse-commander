@@ -220,7 +220,7 @@ def _bounded_factory_observation(value: Any, scenario: Mapping[str, Any]) -> tup
     output: list[dict[str, Any]] = []
     job_omitted = 0
     for factory in factories[:MAX_FACTORIES]:
-        if set(factory) != {"name", "unit_id", "jobs"}:
+        if set(factory) not in ({"name", "unit_id"}, {"name", "unit_id", "jobs"}):
             raise ProtocolError("invalid_observation", "factory has unsupported fields")
         name = _public_identifier(factory.get("name"), "factory name")
         if name != scenario["factory"]["name"]:
@@ -230,7 +230,10 @@ def _bounded_factory_observation(value: Any, scenario: Mapping[str, Any]) -> tup
         # later observation into a gateway failure.
         raw_unit_id = factory.get("unit_id")
         unit_id = None if raw_unit_id is None else _public_count(raw_unit_id, "factory unit_id")
-        jobs = factory.get("jobs")
+        # A principal view may expose the factory identity without granting its
+        # private queue.  Its public projection is an explicitly empty queue;
+        # the richer Loop 1 view still has to supply every bounded job field.
+        jobs = factory.get("jobs", [])
         if not isinstance(jobs, list) or any(not isinstance(job, Mapping) for job in jobs):
             raise ProtocolError("invalid_observation", "factory jobs must be a list")
         def job_key(job: Mapping[str, Any]) -> tuple[int, bytes]:
@@ -418,6 +421,19 @@ def _bounded_principal_body(value: Mapping[str, Any], result: dict[str, Any],
         raise ProtocolError("invalid_observation", "invalid principal own body")
     result["body"] = projected[0]
     _bounded_principal_reports(value, result, scenario_table)
+    if "link_state" in value:
+        links = value["link_state"]
+        if not isinstance(links, list) or len(links) > MAX_ENTITIES:
+            raise ProtocolError("invalid_observation", "invalid link state")
+        public_links = []
+        for link in links:
+            if not isinstance(link, Mapping) or set(link) != {"unit_id", "linked"}:
+                raise ProtocolError("invalid_observation", "invalid link state entry")
+            if not isinstance(link.get("linked"), bool):
+                raise ProtocolError("invalid_observation", "invalid link state entry")
+            public_links.append({"unit_id": _public_count(link.get("unit_id"), "link unit_id"),
+                                 "linked": link["linked"]})
+        result["link_state"] = sorted(public_links, key=lambda item: item["unit_id"])
 
 
 def _bounded_expedition(value: Mapping[str, Any], result: dict[str, Any], scenario_table: Mapping[str, Any] | None) -> None:
@@ -552,6 +568,13 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
     if principal is None:
         _bounded_expedition(value, result, scenario_table)
     else:
+        # Commander roster is a separately declared public inventory view;
+        # leave richer delivered reports to the principal-report projection.
+        if "roster" in value:
+            expedition = dict(value)
+            expedition["reports"] = [report for report in value.get("reports", [])
+                                      if isinstance(report, Mapping) and report.get("kind") == "distress"]
+            _bounded_expedition(expedition, result, scenario_table)
         _bounded_principal_body(value, result, scenario_table)
     permitted = value.get("permitted_intents", [])
     if not isinstance(permitted, list) or len(permitted) > 16:

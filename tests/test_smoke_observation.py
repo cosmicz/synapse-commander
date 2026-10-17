@@ -218,6 +218,12 @@ class SmokeObservationTests(unittest.TestCase):
         observed = bounded_observation(source, scenario_table=load_scenario())
         self.assertIsNone(observed["factories"][0]["unit_id"])
 
+    def test_principal_factory_identity_may_omit_its_private_job_queue(self):
+        source = provisioning_observation()
+        source["factories"] = [{"name": "F0", "unit_id": 7}]
+        observed = bounded_observation(source, scenario_table=load_scenario())
+        self.assertEqual(observed["factories"], [{"name": "F0", "unit_id": 7, "jobs": []}])
+
     def test_jobs_are_ordered_by_start_frame(self):
         source = provisioning_observation()
         first = dict(source["factories"][0]["jobs"][0], job_id="later", started_frame=9)

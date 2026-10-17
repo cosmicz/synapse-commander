@@ -151,6 +151,7 @@ class GatewayTests(unittest.TestCase):
                                                    "private": "not forwarded"},
             reports=[{"kind": "message", "from": "commander", "text": "hold position",
                       "observed_frame": 70, "delivered_frame": 100, "age_frames": 30}],
+            link_state=[{"unit_id": 7, "linked": True}, {"unit_id": 5, "linked": False}],
             permitted_intents=[{"type": "TASK", "verbs": ["advance"]}, {"type": "MESSAGE"}]))
         gateway = LoopbackGateway(transport, principal="legacy", team="blue", scenario="rescue_smoke",
                                   sessions={"m": "M1", "c": "commander"})
@@ -159,6 +160,7 @@ class GatewayTests(unittest.TestCase):
                                            "sensor_range": 900})
         self.assertEqual(result["reports"], [{"kind": "message", "from": "commander", "text": "hold position",
                                                 "observed_frame": 70, "delivered_frame": 100, "age_frames": 30}])
+        self.assertEqual(result["link_state"], [{"unit_id": 5, "linked": False}, {"unit_id": 7, "linked": True}])
         self.assertIn({"type": "MESSAGE"}, result["permitted_intents"])
 
     def test_principal_tokens_are_private_run_artifacts(self) -> None:
