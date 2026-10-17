@@ -109,7 +109,7 @@ no effect or acceptance in the ledger; no movement after the probes; ledger
 verified and classified as not autonomous; no other engine process on the
 host during the run; bounded teardown. The probes are an
 unsupported verb, =PRODUCE=, a raw-engine payload, an unknown observation, an
-expired intent, a foreign (Gaia) unit, a caller-supplied identity, and a stale
+expired intent, an expiry more than 900 frames ahead, a foreign (Gaia) unit, a caller-supplied identity, and a stale
 observation over 900 frames old. The HTTP path cannot express a wrong team:
 the gateway injects principal and team, which the identity probe checks.
 

@@ -168,6 +168,8 @@ class FakeEngine:
                 reason = "stale_observation"
             elif envelope.expires_at_frame < frame:
                 reason = "expired"
+            elif envelope.expires_at_frame > frame + 900:
+                reason = "expiry_out_of_range"
             elif str(payload.get("unit")) != str(self.unit["id"]):
                 reason = "not_owned"
             self.seen.add(envelope.intent_id)
@@ -211,6 +213,7 @@ class LoopOrchestrationTests(unittest.TestCase):
                      "ledger_verified", "probes_no_effect_records", "no_movement_after_probes",
                      "probe_foreign_unit", "probe_stale_observation", "probe_expired", "probe_produce_unsupported",
                      "probe_raw_engine_payload", "probe_unsupported_verb", "probe_unknown_observation",
+                     "probe_far_future_expiry",
                      "identity_injected_by_gateway", "teardown_bounded", "not_autonomous",
                      "no_movement_after_foreign_probes", "exclusive_runtime"):
             self.assertTrue(checks[name]["ok"], (name, checks[name]))

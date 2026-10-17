@@ -23,6 +23,7 @@ STILL_DISTANCE = 8.0
 STALE_AFTER_FRAMES = 900
 SPAWN_OFFSET_X = 400.0
 FOREIGN_WAIT_FRAMES = 90
+MAX_EXPIRY_AHEAD = 900
 
 
 class ClientError(RuntimeError):
@@ -271,6 +272,9 @@ class ScriptedSmoke:
             Probe("expired", "expired", (400, 409),
                   self.envelope("expired", current, "TASK", {"unit": own, "verb": "advance", "args": {}},
                                 expires_in=-30)),
+            Probe("far_future_expiry", "expiry_out_of_range", (400, 409),
+                  self.envelope("farexpiry", current, "TASK", {"unit": own, "verb": "advance", "args": {}},
+                                expires_in=MAX_EXPIRY_AHEAD + 300)),
         ]
         for probe in probes:
             probe.http_status, probe.response = self.client.submit(probe.envelope)
