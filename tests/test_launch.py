@@ -48,6 +48,16 @@ class StartScriptTests(unittest.TestCase):
         self.assertNotIn("runtestsheadless", script)
         self.assertEqual(script.count("{"), script.count("}"))
 
+    def test_join_is_opt_in_and_otherwise_loopback_only(self) -> None:
+        default = launch.start_script(run_id="r")
+        self.assertIn("HostIP=127.0.0.1;", default)
+        self.assertNotIn("AllowAdditionalPlayers", default)
+        joinable = launch.start_script(run_id="r", host_port=launch.JOIN_PORT, allow_join=True)
+        self.assertIn("HostIP=0.0.0.0;", joinable)
+        self.assertIn("HostPort=8452;", joinable)
+        self.assertIn("AllowAdditionalPlayers=1;", joinable)
+        self.assertEqual(joinable.count("{"), joinable.count("}"))
+
     def test_scenario_selection_is_a_modoption_and_absent_by_default(self) -> None:
         self.assertNotIn("synapse_scenario", launch.start_script(run_id="r"))
         script = launch.start_script(run_id="r", scenario="rescue_smoke")

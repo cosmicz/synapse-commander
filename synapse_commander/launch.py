@@ -32,6 +32,7 @@ APP_ARCHIVE_DIR = "SynapseCommander.sdd"
 APP_GAME_TYPE = "Synapse Commander 0"
 # The same pinned engine directory ships both; the rendered client needs a display.
 HEADLESS_BINARY = "spring-headless"
+JOIN_PORT = 8452  # the default game port a spectator client connects to
 ENGINE_BINARIES = (HEADLESS_BINARY, "spring")
 # Environment the engine inherits that decides how (and whether) it renders;
 # recorded in the private verdict. The launcher never sets any of these itself.
@@ -169,6 +170,7 @@ def start_script(
     seed: int = 1,
     player_name: str = "SynapseCommander",
     host_port: int = 8452,
+    allow_join: bool = False,
     scenario: str | None = None,
 ) -> str:
     """One player on team 0, no cheats or debug commands, no test runner.
@@ -189,6 +191,10 @@ def start_script(
             raise LaunchError("start script value contains a structural character")
     # No scenario keeps Loop 0 exactly as before; a named one selects the
     # archive's scenarios/<name>.json in the gadget.
+    # Loopback only unless a late spectator client must be able to join over the network;
+    # a spectator joins with its own client and never commands (orders go through the gateway).
+    host_ip = "0.0.0.0" if allow_join else "127.0.0.1"
+    join_line = "\n\tAllowAdditionalPlayers=1;" if allow_join else ""
     scenario_line = "" if scenario is None else f"\n\t\tsynapse_scenario={scenario};"
     return f"""[GAME]
 {{
@@ -199,8 +205,8 @@ def start_script(
 \tRecordDemo=0;
 \tMyPlayerName={player_name};
 \tIsHost=1;
-\tHostIP=127.0.0.1;
-\tHostPort={int(host_port)};
+\tHostIP={host_ip};
+\tHostPort={int(host_port)};{join_line}
 \tFixedRNGSeed={int(seed)};
 \t[MODOPTIONS]
 \t{{

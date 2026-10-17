@@ -302,6 +302,7 @@ class SmokeConfig:
     play_stdout: Any = None
     engine_binary: str = launch.HEADLESS_BINARY  # or "spring", the rendered client
     scenario: str | None = None       # a ScenarioTable/v1 name in the archive; None is Loop 0
+    allow_join: bool = False          # host on all interfaces, port 8452, for a late spectator client
     springsettings: Path | None = None    # replaces the empty per-run settings (window size for capture)
     extra_widgets_dir: Path | None = None  # *.lua copied into the run's LuaUI/Widgets (capture widget)
     model: str = "claude-sonnet-5"    # agent mode: model pinned for the CLI route
@@ -435,8 +436,9 @@ def run_smoke(config: SmokeConfig, *,
             raise launch.LaunchError("view mode needs a table declaring commander and M1 principals")
         view_principals = ["commander", "M1"]
     seed = scenario_seed(table)
-    script = launch.start_script(run_id=run_id, host_port=launch.free_udp_port(), scenario=config.scenario,
-                                 seed=seed)
+    script = launch.start_script(run_id=run_id, scenario=config.scenario, seed=seed,
+                                 host_port=launch.JOIN_PORT if config.allow_join else launch.free_udp_port(),
+                                 allow_join=config.allow_join)
     settings = launch.engine_settings()
     layout.write_config(script, settings)
     render_files = install_render_files(layout, config.springsettings, config.extra_widgets_dir)

@@ -44,6 +44,9 @@ def add_run_arguments(command: argparse.ArgumentParser) -> None:
                               "engine as synapse_scenario; unsupported by run-smoke")
     command.add_argument("--run-id", default=None, help="run id [A-Za-z0-9_-]{1,64} (default: generated)")
     command.add_argument("--hello-timeout", type=float, default=180.0, help="seconds to wait for the engine hello")
+    command.add_argument("--allow-join", action="store_true",
+                         help="host the game on all interfaces (port 8452) so a spectator client can join late; "
+                              "default loopback only. Spectators never command; orders use the gateway")
     command.add_argument("--allow-dirty", action="store_true",
                          help="permit a modified app checkout (recorded; not for evidence runs)")
 
@@ -137,7 +140,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                              engine_binary=args.engine_binary or os.environ.get("ENGINE_BINARY") or HEADLESS_BINARY,
                              springsettings=args.springsettings or env_path("SPRINGSETTINGS"),
                              extra_widgets_dir=args.extra_widgets_dir or env_path("EXTRA_WIDGETS_DIR"),
-                             scenario=args.scenario, **extra)
+                             scenario=args.scenario, allow_join=args.allow_join, **extra)
         try:
             verdict = run_smoke(config)
         except launch.LaunchError as exc:
