@@ -1,13 +1,21 @@
+import json
 from pathlib import Path
+import re
 import unittest
 
 
-GADGET = Path(__file__).parents[1] / "game" / "SynapseCommander.sdd" / "luarules" / "gadgets" / "synapse_bridge.lua"
+GAME = Path(__file__).parents[1] / "game" / "SynapseCommander.sdd"
+GADGET = GAME / "luarules" / "gadgets" / "synapse_bridge.lua"
+SCENARIO = GAME / "scenarios" / "rescue_smoke.json"
 
 
 class GadgetSourceContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.source = GADGET.read_text(encoding="utf-8")
+
+    def task_rate_check(self) -> int:
+        """Index of the TASK branch's rate check (PRODUCE has its own, earlier)."""
+        return self.source.index("if not use_token(teamID, frame)", self.source.index('if intent.type ~= "TASK"'))
 
     def test_stale_ids_survive_past_the_stale_threshold(self) -> None:
         self.assertIn("MAX_OBSERVATIONS = 0, 15, 128", self.source)
@@ -38,7 +46,7 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn('emit_receipt(intent, "rejected", "unit_busy")', self.source)
         self.assertLess(
             self.source.index('emit_receipt(intent, "rejected", "unit_busy")'),
-            self.source.index("if not use_token(teamID, frame)"),
+            self.task_rate_check(),
         )
 
     def test_synced_reducer_requires_the_public_envelope_schema(self) -> None:
@@ -60,8 +68,91 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn('detail = { reason = "queue_empty" }', self.source)
         self.assertLess(
             self.source.index('emit_receipt(intent, "rejected", "already_at_waypoint")'),
-            self.source.index("if not use_token(teamID, frame)"),
+            self.task_rate_check(),
         )
+
+
+class FactoryProvisioningSourceTests(unittest.TestCase):
+    """Loop 1 (rah26-8zp) contract for the synced reducer.
+
+    No Lua interpreter is available on the development host, so these pin
+    the source structure; a native run verifies behaviour.
+    """
+
+    def setUp(self) -> None:
+        self.source = GADGET.read_text(encoding="utf-8")
+        start = self.source.index("local function reduce_produce")
+        self.produce = self.source[start:self.source.index("\n  end\n", start)]
+
+    def order(self, *needles: str, within: str | None = None) -> None:
+        text = self.produce if within is None else within
+        positions = [text.index(needle) for needle in needles]
+        self.assertEqual(positions, sorted(positions), needles)
+
+    def test_produce_rejections_follow_the_agreed_order(self) -> None:
+        self.order(
+            '"invalid_payload"', '"unknown_factory"', '"unknown_chassis"', '"unknown_controller"',
+            '"invalid_parameters"', "freshness_problem(intent, teamID, frame)", '"factory_queue_full"',
+            '"budget_exhausted"', '"chip_unavailable"', '"rate_limited"',
+        )
+
+    def test_produce_spends_only_after_every_check_and_before_acceptance(self) -> None:
+        self.order('"rate_limited"', "budgets.bodies_remaining = budgets.bodies_remaining - 1",
+                   "budgets.chips[payload.controller] = budgets.chips[payload.controller] - 1",
+                   'emit_receipt(intent, "accepted", nil)')
+        self.assertIn("#jobs >= MAX_JOBS", self.produce)
+        self.assertIn("MAX_JOBS = 16384, 8", self.source)
+
+    def test_principal_and_embodiment_gate_every_scenario_intent(self) -> None:
+        self.order('"wrong_team"', '"principal_unembodied"', 'intent.type == "PRODUCE"',
+                   'if intent.type ~= "TASK"', '"not_owned"', '"not_embodied"', within=self.source)
+
+    def test_produce_is_unsupported_without_a_scenario(self) -> None:
+        self.assertIn('if scenario and intent.type == "PRODUCE" then return reduce_produce', self.source)
+
+    def test_commander_binding_spends_a_body_and_its_chip(self) -> None:
+        start = self.source.index("local function bind_commander")
+        bind = self.source[start:self.source.index("\n  end\n", start)]
+        self.assertIn("customParams.iscommander", bind)
+        self.order('"commander_unbudgeted"', "budgets.bodies_remaining = budgets.bodies_remaining - 1",
+                   "budgets.chips[chip] = budgets.chips[chip] - 1", 'effect("commander_bound"', within=bind)
+
+    def test_job_effects_require_an_actual_unit(self) -> None:
+        start = self.source.index("local function complete_job")
+        complete = self.source[start:self.source.index("\n  end\n", start)]
+        self.order("Spring.CreateUnit(", "if not unitID then", 'effect("factory_job_failed"', "return",
+                   'effect("unit_created"', 'effect("factory_job_done"', within=complete)
+        self.assertIn("controller = job.controller", complete)
+
+    def test_job_units_have_one_unit_created_effect(self) -> None:
+        self.order("job_spawning = job", "Spring.CreateUnit(", "job_spawning = nil", within=self.source)
+        callin = self.source[self.source.index("function gadget:UnitCreated"):]
+        self.order("if job_spawning then return end", '"unit_created"', within=callin)
+
+    def test_factory_scenario_spawns_no_loop0_fixture(self) -> None:
+        start = self.source.index("local function start_factory_scenario")
+        body = self.source[start:self.source.index("\n  end\n", start)]
+        self.assertNotIn('"armck"', body)
+        self.assertIn('scenario_failed = true', body)
+        game_start = self.source[self.source.index("function gadget:GameStart"):]
+        self.order("start_factory_scenario(opts.synapse_scenario", "else", 'Spring.CreateUnit("armck"', within=game_start)
+
+    def test_exhausted_choices_stay_permitted(self) -> None:
+        self.assertIn("chassis = sorted_keys(scenario.chassis), controllers = sorted_keys(scenario.chips)", self.source)
+
+    def test_gadget_reads_only_fields_the_shared_table_declares(self) -> None:
+        table = json.loads(SCENARIO.read_text(encoding="utf-8"))
+        self.assertEqual(table["schema"], "ScenarioTable/v1")
+        self.assertIn('t.schema ~= "ScenarioTable/v1"', self.source)
+        for field in ("factory", "bodies", "chips", "commander", "chassis", "waypoints"):
+            self.assertIn(field, table)
+            self.assertRegex(self.source, rf"\bt\.{field}\b")
+        self.assertLessEqual(set(table["factory"]), {"name", "def", "offset"})
+        self.assertIn(table["commander"]["chip"], table["chips"])
+        for chassis in table["chassis"].values():
+            self.assertEqual(set(chassis), {"def", "build_frames", "commission_frames"})
+        self.assertLessEqual(len(SCENARIO.read_bytes()), 16384)
+        self.assertTrue(re.fullmatch(r"[\w.-]{1,64}", table["version"]))
 
 
 if __name__ == "__main__":

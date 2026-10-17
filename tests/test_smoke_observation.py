@@ -6,6 +6,7 @@ import unittest
 
 from synapse_commander.gateway import LoopbackGateway
 from synapse_commander.protocol import ProtocolError, bounded_observation
+from synapse_commander.scenarios import load_scenario
 from synapse_commander.transport import MemoryTransport
 
 
@@ -89,7 +90,7 @@ class SmokeObservationTests(unittest.TestCase):
             bounded_observation(source)
 
     def test_provisioning_data_is_typed_bounded_and_keeps_depleted_choices_visible(self):
-        observed = bounded_observation(provisioning_observation())
+        observed = bounded_observation(provisioning_observation(), scenario_table=load_scenario())
         self.assertEqual(observed["scenario"]["id"], "rescue_smoke")
         self.assertEqual(observed["scenario"]["version"], "1-provisional")
         self.assertEqual(observed["commander"], {"unit_id": 42, "chip": "reasoner_large_v1"})
@@ -106,11 +107,11 @@ class SmokeObservationTests(unittest.TestCase):
         source = provisioning_observation()
         source["scenario"].pop("version")
         with self.assertRaisesRegex(ProtocolError, "declared scenario"):
-            bounded_observation(source)
+            bounded_observation(source, scenario_table=load_scenario())
         source = provisioning_observation()
         source["factories"][0]["name"] = "hidden_factory"
         with self.assertRaisesRegex(ProtocolError, "unknown factory"):
-            bounded_observation(source)
+            bounded_observation(source, scenario_table=load_scenario())
 
     def test_factory_job_list_is_clipped_and_counted(self):
         source = provisioning_observation()
@@ -118,7 +119,7 @@ class SmokeObservationTests(unittest.TestCase):
             {"job_id": f"job-{number}", "intent_id": f"intent-{number}", "chassis": "scout_v1", "controller": "escort_fixed_v1", "started_frame": number, "done_frame": number + 1}
             for number in range(9)
         ]
-        observed = bounded_observation(source)
+        observed = bounded_observation(source, scenario_table=load_scenario())
         self.assertEqual(len(observed["factories"][0]["jobs"]), 8)
         self.assertEqual(observed["omitted"]["factory_jobs"], 1)
         self.assertTrue(observed["truncated"])
@@ -126,10 +127,10 @@ class SmokeObservationTests(unittest.TestCase):
     def test_factory_job_allows_an_unfinished_null_done_frame(self):
         source = provisioning_observation()
         source["factories"][0]["jobs"][0]["done_frame"] = None
-        self.assertIsNone(bounded_observation(source)["factories"][0]["jobs"][0]["done_frame"])
+        self.assertIsNone(bounded_observation(source, scenario_table=load_scenario())["factories"][0]["jobs"][0]["done_frame"])
 
     def test_foreign_entity_controller_is_not_exposed(self):
         source = provisioning_observation()
         source["entities"].append({"id": 99, "pos": [1, 0, 1], "source": "los", "controller": "reasoner_large_v1"})
-        foreign = next(item for item in bounded_observation(source)["entities"] if item["id"] == 99)
+        foreign = next(item for item in bounded_observation(source, scenario_table=load_scenario())["entities"] if item["id"] == 99)
         self.assertNotIn("controller", foreign)

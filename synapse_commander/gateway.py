@@ -96,7 +96,7 @@ class LoopbackGateway:
 
     def observation(self) -> dict[str, Any]:
         with self._ledger_lock:
-            observation = bounded_observation(self.transport.observation_for(self.team))
+            observation = bounded_observation(self.transport.observation_for(self.team), scenario_table=self._scenario)
             self._record_observation(observation)
             return observation
 

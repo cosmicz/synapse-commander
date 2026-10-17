@@ -232,7 +232,7 @@ def _bounded_factory_observation(value: Any, scenario: Mapping[str, Any]) -> tup
     return output, max(0, len(factories) - len(output)), job_omitted
 
 
-def _bounded_provisioning(value: Mapping[str, Any], result: dict[str, Any]) -> None:
+def _bounded_provisioning(value: Mapping[str, Any], result: dict[str, Any], scenario_table: Mapping[str, Any] | None) -> None:
     """Add Loop 1 data only when it matches the public scenario declaration."""
     source_scenario = value.get("scenario", {})
     if not isinstance(source_scenario, Mapping):
@@ -241,10 +241,8 @@ def _bounded_provisioning(value: Mapping[str, Any], result: dict[str, Any]) -> N
     selected = "id" in source_scenario or "version" in source_scenario or bool(provisioning_fields & set(value))
     if not selected:
         return
-    try:
-        scenario_table = load_scenario()
-    except ValueError as error:
-        raise ProtocolError("scenario_unavailable") from error
+    if scenario_table is None:
+        raise ProtocolError("invalid_observation", "provisioning requires a selected scenario")
     declared = source_scenario.get("id") == scenario_table["id"] and source_scenario.get("version") == scenario_table["version"]
     if not declared:
         raise ProtocolError("invalid_observation", "provisioning observation lacks declared scenario")
@@ -279,10 +277,10 @@ def _bounded_provisioning(value: Mapping[str, Any], result: dict[str, Any]) -> N
         result["truncated"] = result["truncated"] or factory_omitted > 0 or job_omitted > 0
 
 
-def _bounded_entities(value: list[Any]) -> list[Any]:
+def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None) -> list[Any]:
     """Preserve the Loop 0 entity view while filtering the new identity field."""
     public: list[Any] = []
-    controllers = supported_controllers()
+    controllers = frozenset() if scenario_table is None else frozenset(scenario_table["chips"])
     for entity in value:
         if not isinstance(entity, Mapping):
             public.append(entity)
@@ -297,7 +295,7 @@ def _bounded_entities(value: list[Any]) -> list[Any]:
     return public
 
 
-def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
+def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Normalize a port result into the small, bounded public smoke schema."""
     if not isinstance(value, Mapping):
         raise ProtocolError("invalid_observation", "transport returned no observation object")
@@ -317,7 +315,7 @@ def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
     ordered_entities = sorted(entities, key=compact_json)
     ordered_receipts = sorted(receipts, key=event_key)
     ordered_effects = sorted(effects, key=event_key)
-    clipped_entities = _bounded_entities(ordered_entities[:MAX_ENTITIES])
+    clipped_entities = _bounded_entities(ordered_entities[:MAX_ENTITIES], scenario_table)
     clipped_receipts = ordered_receipts[-MAX_RECENT_EVENTS:]
     clipped_effects = ordered_effects[-MAX_RECENT_EVENTS:]
     result: dict[str, Any] = {
@@ -356,7 +354,7 @@ def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
         if not valid:
             raise ProtocolError("invalid_observation", "W1 must contain three finite coordinates")
         result["scenario"] = {"waypoints": {"W1": list(goal)}}
-    _bounded_provisioning(value, result)
+    _bounded_provisioning(value, result, scenario_table)
     permitted = value.get("permitted_intents", [])
     if not isinstance(permitted, list) or len(permitted) > 16:
         raise ProtocolError("invalid_observation", "invalid permitted intents")
@@ -376,10 +374,9 @@ def bounded_observation(value: Mapping[str, Any]) -> dict[str, Any]:
             controllers = intent.get("controllers", [])
             if not (isinstance(factories, list) and len(factories) <= 4 and isinstance(chassis, list) and len(chassis) <= 8 and isinstance(controllers, list) and len(controllers) <= 8):
                 raise ProtocolError("invalid_observation", "invalid PRODUCE permission")
-            try:
-                table = load_scenario()
-            except ValueError as error:
-                raise ProtocolError("scenario_unavailable") from error
+            if scenario_table is None:
+                raise ProtocolError("invalid_observation", "PRODUCE permission requires a selected scenario")
+            table = scenario_table
             if not all(isinstance(item, str) for item in [*factories, *chassis, *controllers]):
                 raise ProtocolError("invalid_observation", "invalid PRODUCE permission")
             public_factories = sorted({item for item in factories if item == table["factory"]["name"]})
