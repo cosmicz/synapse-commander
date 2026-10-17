@@ -207,6 +207,7 @@ class SmokeConfig:
     allow_dirty: bool = False
     hello_timeout_s: float = 120.0
     client_timeout_s: float = 120.0
+    client_poll_s: float = 0.25
     lock_wait_s: float = 1200.0
 
 
@@ -334,7 +335,7 @@ def run_smoke(config: SmokeConfig, *,
         threading.Thread(target=pump_loop, name="ledger-pump", daemon=True).start()
 
         client = GatewayClient(f"http://127.0.0.1:{server.server_port}")
-        smoke = ScriptedSmoke(client, wall_timeout_s=config.client_timeout_s)
+        smoke = ScriptedSmoke(client, wall_timeout_s=config.client_timeout_s, poll_s=config.client_poll_s)
         try:
             trace = smoke.run()
         except ClientError as exc:
@@ -424,8 +425,9 @@ def evaluate(trace: dict[str, Any], ordered: OrderedLedger | None, verdict: dict
         response = probe.get("response") or {}
         code = response.get("reason") or response.get("error")
         check(f"probe_{probe['name']}",
-              probe.get("http_status") == probe["expected_http"] and code == probe["expected_code"]
+              probe.get("http_status") in probe["expected_http"] and code == probe["expected_code"]
               and response.get("accepted") is not True,
+              layer="gateway" if probe.get("http_status") == 400 else "engine",
               expected=[probe["expected_http"], probe["expected_code"]], got=[probe.get("http_status"), code])
     for probe in skipped:
         check(f"probe_{probe['name']}", False, skipped=probe["skipped"])

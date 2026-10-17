@@ -80,14 +80,14 @@ class Probe:
 
     name: str
     expected_code: str
-    expected_http: int
+    expected_http: tuple[int, ...]  # 400 when the gateway rejects it, 409 when the engine does
     envelope: dict[str, Any]
     http_status: int | None = None
     response: dict[str, Any] = field(default_factory=dict)
 
     def wire(self) -> dict[str, Any]:
         return {"name": self.name, "intent_id": self.envelope.get("intent_id"),
-                "expected_code": self.expected_code, "expected_http": self.expected_http,
+                "expected_code": self.expected_code, "expected_http": list(self.expected_http),
                 "http_status": self.http_status, "response": self.response}
 
 
@@ -201,28 +201,28 @@ class ScriptedSmoke:
         foreign = _foreign_units(current)
         self.trace["foreign_units"] = foreign
         probes = [
-            Probe("unsupported_verb", "verb_not_supported", 409,
+            Probe("unsupported_verb", "verb_not_supported", (400, 409),
                   self.envelope("verb", current, "TASK", {"unit": own, "verb": "move", "args": {}})),
-            Probe("produce_unsupported", "unsupported_type", 409,
+            Probe("produce_unsupported", "unsupported_type", (400, 409),
                   self.envelope("produce", current, "PRODUCE",
                                 {"factory": "F0", "chassis": "hauler", "controller": "haul_v1", "parameters": {}})),
-            Probe("raw_engine_payload", "invalid_payload", 400,
+            Probe("raw_engine_payload", "invalid_payload", (400,),
                   self.envelope("raw", current, "TASK",
                                 {"unit": own, "verb": "advance", "args": {"lua": "Spring.Echo('x')"}})),
-            Probe("unknown_observation", "unknown_observation", 409,
+            Probe("unknown_observation", "unknown_observation", (400, 409),
                   self.envelope("unknownobs", current, "TASK", {"unit": own, "verb": "advance", "args": {}},
                                 based_on_observation_id="obs-0-999999999")),
-            Probe("expired", "expired", 409,
+            Probe("expired", "expired", (400, 409),
                   self.envelope("expired", current, "TASK", {"unit": own, "verb": "advance", "args": {}},
                                 expires_in=-30)),
         ]
         if foreign:
             target = str(foreign[0]["id"])
-            probes.append(Probe("foreign_unit", "not_owned", 409,
+            probes.append(Probe("foreign_unit", "not_owned", (400, 409),
                                 self.envelope("foreign", current, "TASK",
                                               {"unit": target, "verb": "advance", "args": {}})))
             # The caller-supplied identity is ignored: the gateway injects its own.
-            probes.append(Probe("identity_override", "not_owned", 409,
+            probes.append(Probe("identity_override", "not_owned", (400, 409),
                                 self.envelope("identity", current, "TASK",
                                               {"unit": target, "verb": "advance", "args": {}},
                                               principal="intruder", team="1")))
@@ -234,7 +234,7 @@ class ScriptedSmoke:
         # Stale: the first observation once it is older than the contract's bound.
         stale_ready = self.wait_observation(lambda o: int(o["frame"]) > int(first["frame"]) + STALE_AFTER_FRAMES + 15,
                                             "the first observation going stale", timeout_s=self.wall_timeout_s)
-        stale = Probe("stale_observation", "stale_observation", 409,
+        stale = Probe("stale_observation", "stale_observation", (400, 409),
                       self.envelope("stale", first, "TASK", {"unit": own, "verb": "advance", "args": {}},
                                     expires_at_frame=int(stale_ready["frame"]) + 600))
         stale.http_status, stale.response = self.client.submit(stale.envelope)
