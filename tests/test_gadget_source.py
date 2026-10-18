@@ -142,6 +142,7 @@ class GadgetSourceContractTests(unittest.TestCase):
         update = function_body(self.source, "local function update_entrapment_state")
         self.assertIn('effect_to_target_viewers("parts_delivered"', update)
         self.assertIn('effect_to_target_viewers("mobility_restored"', update)
+        self.assertIn('state.unit_id, { target = state.target })', update)
         self.assertIn("carrying_parts[selected] = nil", update)
         self.assertIn("apply_speed(state.unit_id", update)
 

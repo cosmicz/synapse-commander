@@ -1007,7 +1007,7 @@ if gadgetHandler:IsSyncedCode() then
     local by = entity_names[selected] or ("unit-" .. selected)
     local detail = { target = state.target, by = by, unit_id = state.unit_id }
     effect_to_target_viewers("parts_delivered", frame, state.target, state.unit_id, detail)
-    effect_to_target_viewers("mobility_restored", frame, state.target, state.unit_id, detail)
+    effect_to_target_viewers("mobility_restored", frame, state.target, state.unit_id, { target = state.target })
   end
 
   local function update_exposure_state(frame)
