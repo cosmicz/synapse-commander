@@ -361,13 +361,7 @@ if gadgetHandler:IsSyncedCode() then
       unitID = tonumber(unitID)
       if unitID and Spring.ValidUnitID(unitID) then units[#units + 1] = unitID end
     end
-    -- Avoid the BAR gadget environment's patched table.sort path here.  This
-    -- small bounded insertion sort preserves deterministic numeric ordering.
-    for i = 2, #units do
-      local item, j = units[i], i - 1
-      while j >= 1 and units[j] > item do units[j + 1] = units[j]; j = j - 1 end
-      units[j + 1] = item
-    end
+    table.sort(units)
     for _, unitID in ipairs(units) do
       if is_hq_node(unitID) then reachable[unitID] = true; queue[#queue + 1] = unitID end
     end

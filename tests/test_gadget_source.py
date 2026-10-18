@@ -208,11 +208,10 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn('relative_entity_for(bodyID, unitID', observation)
         self.assertIn('local prohibited = isolated', observation)
 
-    def test_link_reducer_normalizes_ids_without_engine_table_sort(self) -> None:
+    def test_link_reducer_normalizes_ids_before_canonical_ordering(self) -> None:
         reducer = function_body(self.source, "local function recompute_links")
         self.assertIn("unitID = tonumber(unitID)", reducer)
-        self.assertIn("bounded insertion sort", reducer)
-        self.assertNotIn("table.sort(units)", reducer)
+        self.assertIn("table.sort(units)", reducer)
 
 
 class FactoryProvisioningSourceTests(unittest.TestCase):
