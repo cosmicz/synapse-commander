@@ -28,7 +28,7 @@ if gadgetHandler:IsSyncedCode() then
   -- Initial world (rah26-5hf). Assets hold evaluator truth; principal-mode
   -- observations derive only from each body and delivered reports.
   local assets, asset_order, hidden, reports = {}, {}, {}, {}
-  local carrying_parts, entrapment_state, parts_consumed = {}, nil, 0
+  local carrying_parts, entrapment_state, exposure_state, parts_consumed = {}, nil, nil, 0
   local spawning_hidden = false
   -- Per-principal state is enabled only by a declared principals table.
   -- In that mode observations are calculated from geometry below, never from
@@ -99,7 +99,7 @@ if gadgetHandler:IsSyncedCode() then
     -- Optional initial-world fields.  The table is the fully chosen world for
     -- its (id, version, seed): the gadget draws no randomness of its own.
     if t.seed ~= nil and not count(t.seed) then return nil, "invalid_seed" end
-    local names, bodies_needed, chips_needed = {}, 1, { [t.commander.chip] = 1 }
+    local names, active_names, bodies_needed, chips_needed = {}, {}, 1, { [t.commander.chip] = 1 }
     if t.predeployed ~= nil then
       if type(t.predeployed) ~= "table" or #t.predeployed > 8 then return nil, "invalid_predeployed" end
       for _, a in ipairs(t.predeployed) do
@@ -112,6 +112,7 @@ if gadgetHandler:IsSyncedCode() then
           return nil, "invalid_predeployed"
         end
         names[a.name] = true
+        if a.state == "active" then active_names[a.name] = true end
         bodies_needed = bodies_needed + 1
         if a.controller then chips_needed[a.controller] = (chips_needed[a.controller] or 0) + 1 end
       end
@@ -140,6 +141,12 @@ if gadgetHandler:IsSyncedCode() then
         if type(chassis) ~= "string" or listed[chassis] or not t.chassis[chassis] or not t.chassis[chassis].carries_parts then return nil, "invalid_entrapment" end
         listed[chassis] = true
       end
+    end
+    local exposure = t.exposure
+    if exposure ~= nil then
+      if type(exposure) ~= "table" or not active_names[exposure.asset]
+        or type(exposure.decay_per_minute) ~= "number" or exposure.decay_per_minute <= 0 or exposure.decay_per_minute > 1
+        or type(exposure.floor) ~= "number" or exposure.floor <= 0 or exposure.floor > 1 then return nil, "invalid_exposure" end
     end
     -- Principal mode is deliberately opt-in for backwards-compatible Loop 1
     -- tables.  Every listed non-commander principal names a deployed asset;
@@ -273,6 +280,16 @@ if gadgetHandler:IsSyncedCode() then
     return nil, nil
   end
 
+  local function health_factor_for_asset(asset)
+    if exposure_state and exposure_state.unit_id == asset.unit_id then return exposure_state.cap end
+    return asset.health or 1
+  end
+
+  local function held_for_unit(unitID)
+    return (entrapment_state and not entrapment_state.delivered and entrapment_state.unit_id == unitID)
+      or (exposure_state and exposure_state.immobilised and exposure_state.unit_id == unitID)
+  end
+
   local function principal_for_unit(unitID)
     if unit_principal[unitID] then return unit_principal[unitID] end
     if principal_mode and Spring.GetUnitTeam(unitID) == TEAM0 then return "commander" end
@@ -345,6 +362,11 @@ if gadgetHandler:IsSyncedCode() then
       if carrying_parts[unitID] then body.carrying_parts = true end
       if entrapment_state and not entrapment_state.delivered and entrapment_state.unit_id == unitID then
         body.immobilised, body.reason = true, "needs_parts"
+      elseif exposure_state and exposure_state.immobilised and exposure_state.unit_id == unitID then
+        body.immobilised, body.reason = true, "exposure"
+      end
+      if exposure_state and exposure_state.unit_id == unitID then
+        body.exposure = { decay_per_minute = exposure_state.config.decay_per_minute, health_now = exposure_state.cap }
       end
     end
     return body
@@ -624,8 +646,6 @@ if gadgetHandler:IsSyncedCode() then
     if a.controller then embodied[unitID] = a.controller end
     entity_names[unitID] = a.name
     if principal_mode and principals[a.name] then unit_principal[unitID], principal_body_ids[unitID] = a.name, true end
-    local carried = allocate_parts(chassis_for_unit(unitID))
-    if carried then carrying_parts[unitID] = true end
     if a.health then
       local _, max_health = Spring.GetUnitHealth(unitID)
       if max_health then Spring.SetUnitHealth(unitID, max_health * a.health) end
@@ -711,7 +731,7 @@ if gadgetHandler:IsSyncedCode() then
     scenario = loaded
     scenario_origin_x, scenario_origin_z = x, z
     principal_mode, principals = loaded.principals ~= nil, loaded.principals or {}
-    principal_order, unit_principal, links, delivered_reports, queued_reports = {}, {}, {}, {}, {}
+    principal_order, unit_principal, links, delivered_reports, queued_reports, local_status = {}, {}, {}, {}, {}, {}
     if principal_mode then principal_order = sorted_keys(principals) end
     -- Table positions are offsets from the map centre ([dx, dz] for the
     -- factory, [dx, ignored, dz] for waypoints); heights come from the ground.
@@ -762,6 +782,14 @@ if gadgetHandler:IsSyncedCode() then
         effect("immobilised", frame, target.unit_id, nil,
                { target = scenario.entrapment.asset, unit_id = target.unit_id, reason = "needs_parts" },
                scenario.entrapment.asset)
+      end
+    end
+    exposure_state = nil
+    if scenario.exposure then
+      local target = assets[scenario.exposure.asset]
+      if target and target.unit_id then
+        exposure_state = { config = scenario.exposure, target = scenario.exposure.asset, unit_id = target.unit_id,
+                           cap = target.health or 1, critical = false, immobilised = false }
       end
     end
     recompute_links(frame)
@@ -888,6 +916,9 @@ if gadgetHandler:IsSyncedCode() then
       elseif links[report.from] then
         local body = report.body
         body.delivered_frame, body.age_frames = frame, frame - body.observed_frame
+        if report.to == "commander" and body.kind == "status" and body.body then
+          local_status[body.from] = body.body.health
+        end
         remember_report(report.to, body)
       else
         effect("report_dropped", frame, report.from, nil, { reason = "no_link", from = report.body.from }, report.to)
@@ -950,7 +981,8 @@ if gadgetHandler:IsSyncedCode() then
     for _, unitID in ipairs(Spring.GetTeamUnits(TEAM0) or {}) do
       local chassis, allowed = chassis_for_unit(unitID), false
       for _, id in ipairs(state.config.parts_carrier_chassis) do if chassis == id then allowed = true; break end end
-      if allowed and embodied[unitID] and carrying_parts[unitID] and has_capability(unitID, state.config.assist_capability) then
+      if unitID ~= state.unit_id and allowed and embodied[unitID] and carrying_parts[unitID]
+        and has_capability(unitID, state.config.assist_capability) then
         eligible[#eligible + 1] = unitID
       else
         state.frames[unitID] = nil
@@ -976,6 +1008,23 @@ if gadgetHandler:IsSyncedCode() then
     local detail = { target = state.target, by = by, unit_id = state.unit_id }
     effect_to_target_viewers("parts_delivered", frame, state.target, state.unit_id, detail)
     effect_to_target_viewers("mobility_restored", frame, state.target, state.unit_id, detail)
+  end
+
+  local function update_exposure_state(frame)
+    local state = exposure_state
+    if not state or not Spring.ValidUnitID(state.unit_id) then return end
+    if frame % OBS_INTERVAL ~= 0 then return end
+    local asset = assets[state.target]
+    if not asset or extracted[state.target] or lost[state.target] then return end
+    state.cap = math.max(state.config.floor, state.cap - state.config.decay_per_minute * OBS_INTERVAL / (60 * 30))
+    if not state.critical and state.cap < 0.25 then
+      state.critical = true
+      effect_to_target_viewers("exposure_critical", frame, state.target, state.unit_id, { target = state.target, unit_id = state.unit_id })
+    end
+    if state.cap <= state.config.floor then
+      state.immobilised = true
+      stop_unit(state.unit_id)
+    end
   end
 
   -- Principal-mode rejection must not turn an arbitrary numeric id into an
@@ -1092,7 +1141,8 @@ if gadgetHandler:IsSyncedCode() then
       if not owner and not links[unitID] then emit_receipt(intent, "rejected", "no_link"); return true end
       if not has_capability(unitID, "move") then emit_receipt(intent, "rejected", "incapable"); return true end
     end
-    if entrapment_state and not entrapment_state.delivered and entrapment_state.unit_id == unitID then
+    if (entrapment_state and not entrapment_state.delivered and entrapment_state.unit_id == unitID)
+      or (exposure_state and exposure_state.immobilised and exposure_state.unit_id == unitID) then
       stop_unit(unitID)
       emit_receipt(intent, "rejected", "immobilised"); return true
     end
@@ -1116,15 +1166,16 @@ if gadgetHandler:IsSyncedCode() then
   function gadget:GameFrame(frame)
     recompute_links(frame)
     deliver_due_reports(frame)
+    update_exposure_state(frame)
     if scenario then
       for _, name in ipairs(asset_order) do
         local a = assets[name]
         if a.health and a.state == "active" and not extracted[name] and not lost[name]
           and a.unit_id and Spring.ValidUnitID(a.unit_id) then
           local health, max_health = Spring.GetUnitHealth(a.unit_id)
-          if health and max_health and health > max_health * a.health then Spring.SetUnitHealth(a.unit_id, max_health * a.health) end
-          local held = entrapment_state and not entrapment_state.delivered and entrapment_state.unit_id == a.unit_id
-          a.applied_max_speed = apply_speed(a.unit_id, a.health, held)
+          local health_factor = health_factor_for_asset(a)
+          if health and max_health and health > max_health * health_factor then Spring.SetUnitHealth(a.unit_id, max_health * health_factor) end
+          a.applied_max_speed = apply_speed(a.unit_id, health_factor, held_for_unit(a.unit_id))
         end
       end
     end
@@ -1223,6 +1274,7 @@ if gadgetHandler:IsSyncedCode() then
               local entry = { name = name, def = a.def, controller = a.controller or Json.null,
                               status = status, unit_id = status == "in_contact" and a.unit_id or nil }
               if status == "in_contact" then entry.carrying_parts = carrying_parts[a.unit_id] == true end
+              if local_status[name] ~= nil then entry.health = local_status[name] end
               body.roster[#body.roster + 1] = entry
             end
             local asset_units, units = {}, Spring.GetTeamUnits(TEAM0) or {}

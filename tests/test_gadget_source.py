@@ -159,6 +159,23 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn("entry.carrying_parts = carrying_parts[a.unit_id] == true", observation)
         self.assertIn("entry.carrying_parts = carrying_parts[unitID] == true", observation)
 
+    def test_only_produced_carriers_take_stock_parts(self) -> None:
+        produce = function_body(self.source, "local function reduce_produce")
+        spawn = function_body(self.source, "local function spawn_asset")
+        self.assertIn("carrying_parts = allocate_parts(payload.chassis)", produce)
+        self.assertNotIn("allocate_parts(", spawn)
+        assist = function_body(self.source, "local function update_entrapment_state")
+        self.assertIn("unitID ~= state.unit_id", assist)
+
+    def test_exposure_decays_deterministically_and_immobilises_at_floor(self) -> None:
+        self.assertIn('return nil, "invalid_exposure"', self.source)
+        update = function_body(self.source, "local function update_exposure_state")
+        self.assertIn("frame % OBS_INTERVAL ~= 0", update)
+        self.assertIn("math.max(state.config.floor", update)
+        self.assertIn('effect_to_target_viewers("exposure_critical"', update)
+        self.assertIn("state.immobilised = true", update)
+        self.assertIn('body.immobilised, body.reason = true, "exposure"', self.source)
+
 
 class FactoryProvisioningSourceTests(unittest.TestCase):
     """Loop 1 (rah26-8zp) contract for the synced reducer.
