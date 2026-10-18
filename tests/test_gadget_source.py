@@ -481,3 +481,21 @@ class PrincipalViewSourceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GadgetMissingUnitGuards(unittest.TestCase):
+    """live-11/live-12: lookups and move_to never hand a missing unit to the engine."""
+
+    def setUp(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        self.source = (root / "game/SynapseCommander.sdd/luarules/gadgets/synapse_bridge.lua").read_text()
+
+    def test_chassis_lookup_rejects_missing_or_invalid_ids(self):
+        self.assertIn('type(unitID) ~= "number" or not Spring.ValidUnitID(unitID) then return nil end', self.source)
+        self.assertIn("local definition = defID and UnitDefs[defID]", self.source)
+
+    def test_move_to_refuses_vanished_body_before_test_move_order(self):
+        self.assertIn("local moverDef = moverID and Spring.ValidUnitID(moverID) and Spring.GetUnitDefID(moverID) or nil", self.source)
+        refusal = self.source.index('emit_receipt(intent, "rejected", "unknown_unit"); return true', self.source.index("local moverDef"))
+        self.assertLess(refusal, self.source.index("Spring.TestMoveOrder(moverDef"))

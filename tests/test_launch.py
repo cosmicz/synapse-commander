@@ -351,3 +351,31 @@ class LockTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConcurrentPinSmokeExemption(unittest.TestCase):
+    def test_smoke_engine_is_recorded_but_not_counted(self):
+        import os, subprocess, sys, tempfile, time as _time
+        name = "spring-headless"
+        with tempfile.TemporaryDirectory() as tmp:
+            import shutil
+            exe = os.path.join(tmp, name)
+            shutil.copy2(sys.executable, exe)
+            smoke_dir = os.path.join(tmp, "private", "evidence", "smoke", "cand-1")
+            live_dir = os.path.join(tmp, "private", "evidence", "rescue", "live-1")
+            smoke = subprocess.Popen([exe, "-c", "import time; time.sleep(30)", "--write-dir", smoke_dir])
+            live = subprocess.Popen([exe, "-c", "import time; time.sleep(30)", "--write-dir", live_dir])
+            try:
+                _time.sleep(0.3)
+                found = launch.engine_processes(binary=name)
+                self.assertTrue(found[smoke.pid]["concurrent_pin_smoke"])
+                self.assertFalse(found[live.pid]["concurrent_pin_smoke"])
+                self.assertEqual(found[smoke.pid]["write_dir"], smoke_dir)
+                counted = launch.other_engines(binary=name)
+                self.assertNotIn(smoke.pid, counted)
+                self.assertIn(live.pid, counted)
+                self.assertIn(smoke.pid, launch.other_engines(binary=name, ignore_pin_smoke=False))
+            finally:
+                for proc in (smoke, live):
+                    proc.kill(); proc.wait()
+

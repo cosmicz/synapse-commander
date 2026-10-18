@@ -413,8 +413,12 @@ def render_environment(environ: Mapping[str, str] | None = None) -> dict[str, st
     return {key: environ[key] for key in sorted(environ) if key.startswith(RENDER_ENV_PREFIXES)}
 
 
+SMOKE_WRITE_DIR_MARKER = "/private/evidence/smoke/"
+
+
 def other_engines(own_pgid: int | None = None, *,
-                  binary: str | tuple[str, ...] = ENGINE_BINARIES) -> list[int]:
+                  binary: str | tuple[str, ...] = ENGINE_BINARIES,
+                  ignore_pin_smoke: bool = True) -> list[int]:
     """Pids of engine processes outside our own process group (Linux /proc).
 
     A process is an engine when its executable (/proc/PID/exe) is a file named
@@ -422,7 +426,13 @@ def other_engines(own_pgid: int | None = None, *,
     program merely named so is not. Only when the executable cannot be read
     does the process name (argv[0]) decide, and the record says so.
     """
-    return sorted(engine_processes(own_pgid, binary=binary))
+    found = engine_processes(own_pgid, binary=binary)
+    if ignore_pin_smoke:
+        # A bounded hello-smoke of a candidate build writes under private/evidence/smoke/
+        # and never hosts the live game; it is recorded (engine_processes marks it
+        # concurrent_pin_smoke) but does not count against exclusive_runtime.
+        found = {pid: info for pid, info in found.items() if not info.get("concurrent_pin_smoke")}
+    return sorted(found)
 
 
 def engine_processes(own_pgid: int | None = None, *,
@@ -447,7 +457,13 @@ def engine_processes(own_pgid: int | None = None, *,
                 continue
         except (OSError, ValueError):
             continue
-        found[pid] = {"cmdline": b" ".join(argv).decode("utf-8", "replace")[:300], "identified_by": identified_by}
+        write_dir = None
+        for index, arg in enumerate(argv[:-1]):
+            if arg == b"--write-dir":
+                write_dir = argv[index + 1].decode("utf-8", "replace")
+        found[pid] = {"cmdline": b" ".join(argv).decode("utf-8", "replace")[:300], "identified_by": identified_by,
+                      "write_dir": write_dir,
+                      "concurrent_pin_smoke": bool(write_dir and SMOKE_WRITE_DIR_MARKER in write_dir + "/")}
     return found
 
 

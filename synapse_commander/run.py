@@ -617,6 +617,13 @@ def run_smoke(config: SmokeConfig, *,
         def pump_loop() -> None:
             while not pump_stop.wait(0.2):
                 others = engine_scan(getattr(engine, "pid", None))
+                if engine_scan is launch.other_engines:
+                    # A concurrent hello-smoke of a candidate build is allowed beside the
+                    # live game; it is recorded here, never counted as a rival engine.
+                    for pid, info in launch.engine_processes(getattr(engine, "pid", None)).items():
+                        if info.get("concurrent_pin_smoke"):
+                            verdict.setdefault("concurrent_pin_smoke", {}).setdefault(
+                                str(pid), {"write_dir": info.get("write_dir"), "first_seen": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")})
                 if others:
                     seen = verdict.setdefault("other_engines_during_run", [])
                     seen.extend(pid for pid in others if pid not in seen)
