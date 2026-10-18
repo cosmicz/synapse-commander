@@ -203,6 +203,7 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn('effect_to_target_viewers("comms_restored"', self.source)
         self.assertIn('if scenario.entrapment and scenario.entrapment.beacon_fix then', self.source)
         self.assertIn('distress.fix = reports[1] and reports[1].fix', self.source)
+        self.assertIn('bearing_deg = math.floor(bearing + 0.5) % 360', self.source)
         self.assertIn('reference = "east_south_clockwise"', self.source)
         self.assertIn('beacon_truth = entrapment_state and entrapment_state.beacon_truth', self.source)
         self.assertIn('if entrapment_state and entrapment_state.beacon_only', self.source)

@@ -897,7 +897,7 @@ if gadgetHandler:IsSyncedCode() then
           local cx, _, cz = Spring.GetUnitPosition(commander.unit_id)
           if cx then
             local truth, offset, bearing = beacon_bearing(cx, cz, tx, tz, fix.error_deg, scenario.seed, d.asset)
-            report.fix = { kind = "bearing", from = "commander", bearing_deg = bearing,
+            report.fix = { kind = "bearing", from = "commander", bearing_deg = math.floor(bearing + 0.5) % 360,
                            reference = "east_south_clockwise" }
             if entrapment_state then
               entrapment_state.beacon_truth = { true_bearing_deg = truth, applied_error_deg = offset }
