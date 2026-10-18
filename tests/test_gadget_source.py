@@ -155,10 +155,16 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn("speed_factors", record)
 
     def test_lua_reserved_table_keys_use_bracket_syntax(self) -> None:
-        # `until` is a Lua keyword; ScenarioTable JSON keys must not become
-        # dotted Lua access, which native LuaRules rejects before GameStart.
-        self.assertNotIn(".until", self.source)
+        # ScenarioTable JSON keys must not become dotted Lua access for any
+        # Lua keyword: LuaRules rejects those before GameStart.
+        reserved = "and|break|do|else|elseif|end|false|for|function|goto|if|in|local|nil|not|or|repeat|return|then|true|until|while"
+        self.assertIsNone(re.search(rf"\\.(?:{reserved})\\b", self.source))
         self.assertIn('entrapment["until"]', self.source)
+
+    def test_hidden_cause_tokens_allow_the_declared_parts_composition(self) -> None:
+        self.assertIn("local function cause_identifier", self.source)
+        self.assertIn("not cause_identifier(d.cause_hidden)", self.source)
+        self.assertIn("terrain_entrapment+parts", (GAME / "scenarios" / "rescue_v2.json").read_text(encoding="utf-8"))
 
     def test_parts_observations_have_the_gateway_required_shapes(self) -> None:
         observation = self.source[self.source.index("if principal_mode then", self.source.index("function gadget:GameFrame")):]

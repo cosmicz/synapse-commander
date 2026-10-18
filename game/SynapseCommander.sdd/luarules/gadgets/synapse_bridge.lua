@@ -45,6 +45,12 @@ if gadgetHandler:IsSyncedCode() then
     return type(value) == "string" and #value > 0 and #value <= 64 and value:match("^[%w_.-]+$") ~= nil
   end
 
+  -- Evaluator-only cause tokens may compose bounded vocabulary terms, e.g.
+  -- terrain_entrapment+parts. They never enter a principal observation.
+  local function cause_identifier(value)
+    return type(value) == "string" and #value > 0 and #value <= 64 and value:match("^[%w_.+%-]+$") ~= nil
+  end
+
   local function count(value)
     return type(value) == "number" and value >= 0 and value % 1 == 0
   end
@@ -125,7 +131,7 @@ if gadgetHandler:IsSyncedCode() then
     local d = t.distress
     if d ~= nil then
       if type(d) ~= "table" or not names[d.asset] or type(d.last_known) ~= "table" or not offset_pair(d.last_known.position)
-        or not count(d.last_known.age_frames) or not identifier(d.symptom) or not identifier(d.cause_hidden) then
+        or not count(d.last_known.age_frames) or not identifier(d.symptom) or not cause_identifier(d.cause_hidden) then
         return nil, "invalid_distress"
       end
     end
