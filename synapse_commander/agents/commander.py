@@ -62,6 +62,7 @@ class ModelReply:
     raw: str
     error: str | None = None
     usage: dict[str, Any] | None = None   # provider-reported tokens and cost, when the route has them
+    model_provenance: str = "provider_reported"
 
 
 class ModelRoute(Protocol):
@@ -276,12 +277,14 @@ class AgentCommander:
                 "call": calls, "route": self.route.name, "observation_id": observation["observation_id"],
                 "observation_frame": observation["frame"], "latency_ms": reply.latency_ms,
                 "model_ids": reply.model_ids, "prompt_sha256": sha256_text(prompt),
+                "model_provenance": reply.model_provenance,
                 "output_sha256": sha256_text(reply.raw), "action": decision.action,
                 "rejected": decision.rejected, "reason": decision.reason,
             }
             live = reply.error is None and self.model_id in reply.model_ids
             inference_payload = {"inference_id": f"inference-{calls:03d}", "live": live,
                                  "model_id": self.model_id if live else ",".join(reply.model_ids) or None,
+                                 "model_provenance": reply.model_provenance,
                                  **{k: record[k] for k in ("call", "route", "latency_ms", "prompt_sha256",
                                                            "output_sha256", "action", "rejected")}}
             if reply.usage:

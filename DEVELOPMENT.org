@@ -202,13 +202,17 @@ implied by the fake-route tests.
 separate Codex CLI adapter (default =gpt-6.1-sol=). It is invoked with an
 explicit model and no fallback in a fresh empty directory and temporary
 =HOME=; existing CLI authentication is referenced through =CODEX_HOME= and is
-never copied or read by the app. User configuration, rules, MCP, web search,
-and every available command/browser/app/plugin/image/sleep tool feature are
-disabled in its argv. The bounded prompt is stdin only; stdout/stderr are
-capped and the timeout terminates the CLI process group. The route accepts
-exactly one final agent-message JSON event; every tool or execution event is
-a route error. Codex 0.163's JSON stream does not carry a per-turn model
-field, so the recorded model is the explicit no-fallback =--model= identifier.
+never copied or read by the app. An ephemeral =model_instructions_file=
+replaces Codex's built-in coding instructions with the game system prompt;
+=project_doc_max_bytes=0= prevents project instruction discovery. User
+configuration, rules, MCP, web search, and every available
+command/browser/app/plugin/image/sleep tool feature are disabled in its argv.
+The bounded observation prompt is stdin only; stdout/stderr are capped and the
+timeout terminates the CLI process group. The route accepts exactly one final
+agent-message JSON event; every tool or execution event is a route error.
+Codex 0.163's JSON stream does not carry a per-turn model field, so inference
+records mark its explicit =--model= identifier as
+=model_provenance: configured_no_fallback= rather than provider-reported.
 
 =run-rescue --mode agents --route openrouter= gives every mind an OpenRouter
 route (default model =nvidia/nemotron-3-nano-30b-a3b=, reasoning on,

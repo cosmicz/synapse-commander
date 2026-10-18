@@ -41,22 +41,30 @@ class CodexCliRouteTests(unittest.TestCase):
             seen.update(argv=argv, prompt=prompt, **kwargs)
             self.assertEqual(list(Path(kwargs["cwd"]).iterdir()), [])
             self.assertEqual(list(Path(kwargs["environment"]["HOME"]).iterdir()), [])
+            instruction_config = argv[argv.index("--config", argv.index("mcp_servers={}")) + 1]
+            instruction_path = Path(json.loads(instruction_config.partition("=")[2]))
+            seen["instructions"] = instruction_path.read_text()
+            seen["instruction_mode"] = instruction_path.stat().st_mode & 0o777
             return CliCompleted(0, successful_events())
 
         reply = self.route(runner).call("local observation")
         self.assertIsNone(reply.error)
         self.assertEqual(reply.text, '{"action":"wait"}')
         self.assertEqual(reply.model_ids, ["gpt-requested"], "the route has an explicit no-fallback model")
+        self.assertEqual(reply.model_provenance, "configured_no_fallback")
         argv = seen["argv"]
         self.assertEqual(argv[:9], ["codex", "--ask-for-approval", "never", "exec", "--ignore-user-config", "--ignore-rules",
                                     "--ephemeral", "--json", "--skip-git-repo-check"])
         self.assertIn("-", argv)
         self.assertNotIn("local observation", argv)
         self.assertIn(b"local observation", seen["prompt"])
-        self.assertIn(b"Game system prompt", seen["prompt"])
+        self.assertNotIn(b"Game system prompt", seen["prompt"])
         self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
         self.assertIn('web_search="disabled"', argv)
         self.assertIn("mcp_servers={}", argv)
+        self.assertIn("project_doc_max_bytes=0", argv)
+        self.assertEqual(seen["instructions"], "Game system prompt")
+        self.assertEqual(seen["instruction_mode"], 0o600)
         for feature in DISABLED_FEATURES:
             self.assertIn(f"features.{feature}=false", argv)
         self.assertEqual(seen["environment"], {"HOME": seen["environment"]["HOME"], "CODEX_HOME": "/auth-home",
@@ -96,7 +104,7 @@ class CodexCliRouteTests(unittest.TestCase):
         reply = self.route(timeout, timeout_s=3).call("p")
         self.assertEqual(reply.error, "timeout after 3.0s")
         self.assertEqual(calls, [1])
-        reply = self.route(timeout).call("x" * MAX_PROMPT_BYTES)
+        reply = self.route(timeout).call("x" * (MAX_PROMPT_BYTES + 1))
         self.assertEqual(reply.error, "route unavailable")
         self.assertEqual(calls, [1], "invalid input must not launch a child")
 

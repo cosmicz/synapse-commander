@@ -226,10 +226,12 @@ class CodexCliRoute:
         self.model, self.system_prompt, self.timeout_s = model, system_prompt, float(timeout_s)
         self.executable, self._environment, self._runner = executable, (os.environ if environment is None else environment), runner
 
-    def argv(self) -> list[str]:
+    def argv(self, instructions_path: Path) -> list[str]:
         argv = [self.executable, "--ask-for-approval", "never", "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--json",
                 "--skip-git-repo-check", "--sandbox", "read-only",
-                "--config", 'web_search="disabled"', "--config", "mcp_servers={}"]
+                "--config", 'web_search="disabled"', "--config", "mcp_servers={}",
+                "--config", f"model_instructions_file={json.dumps(str(instructions_path))}",
+                "--config", "project_doc_max_bytes=0"]
         for feature in DISABLED_FEATURES:
             argv.extend(("--config", f"features.{feature}=false"))
         return [*argv, "--model", self.model, "-"]
@@ -254,9 +256,7 @@ class CodexCliRoute:
     def _stdin_prompt(self, prompt: str) -> bytes:
         if not isinstance(prompt, str):
             raise ValueError("invalid prompt")
-        combined = ("System instructions (higher priority than the game observation):\n" + self.system_prompt
-                    + "\n\nBounded game observation and decision request:\n" + prompt)
-        encoded = combined.encode("utf-8")
+        encoded = prompt.encode("utf-8")
         if len(encoded) > MAX_PROMPT_BYTES:
             raise ValueError("invalid prompt")
         return encoded
@@ -270,7 +270,10 @@ class CodexCliRoute:
                 cwd, home = root_path / "cwd", root_path / "home"
                 cwd.mkdir()
                 home.mkdir()
-                done = self._runner(self.argv(), stdin, cwd=str(cwd), environment=self._environment_for(home),
+                instructions = root_path / "model_instructions.md"
+                instructions.write_text(self.system_prompt, encoding="utf-8")
+                instructions.chmod(0o600)
+                done = self._runner(self.argv(instructions), stdin, cwd=str(cwd), environment=self._environment_for(home),
                                     timeout_s=self.timeout_s, output_limit=MAX_OUTPUT_BYTES)
         except (OSError, UnicodeError, ValueError):
             return ModelReply("", [], _ms_since(begin), "", error="route unavailable")
@@ -288,8 +291,8 @@ class CodexCliRoute:
             return ModelReply("", [], latency, raw, error=str(exc))
         # The 0.163 JSONL lifecycle does not include a model field.  The route
         # supplies an explicit --model and has no fallback path, so that exact
-        # configured identifier is the model provenance carried to the ledger.
-        return ModelReply(text, [self.model], latency, raw)
+        # configured identifier is disclosed as configured, not provider-reported.
+        return ModelReply(text, [self.model], latency, raw, model_provenance="configured_no_fallback")
 
 
 __all__ = ["CodexCliRoute", "CliCompleted", "DISABLED_FEATURES", "MAX_OUTPUT_BYTES", "MAX_PROMPT_BYTES", "parse_events"]

@@ -191,6 +191,7 @@ class LiveMind:
                 label = self.task_label if envelope['type'] == 'TASK' else ('delegate' if envelope['type'] == 'MESSAGE' else 'create_agent')
             payload = {'principal': self.principal, 'inference_id': f'mind-{self.principal}-{call}',
                        'live': live, 'model_id': self.route.model, 'latency_ms': reply.latency_ms,
+                       'model_provenance': reply.model_provenance,
                        'prompt_sha256': sha256_text(prompt), 'output_sha256': sha256_text(reply.raw),
                        'action': 'discarded' if canceled else decision.action,
                        'route': self.route.name}
