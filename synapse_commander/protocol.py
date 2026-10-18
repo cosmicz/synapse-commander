@@ -266,7 +266,7 @@ def _bounded_beacon_fix(value: Any, scenario_table: Mapping[str, Any] | None) ->
                 or value.get("from") != "commander"):
             raise ProtocolError("invalid_observation", "invalid bearing fix")
         return {"kind": "bearing", "from": "commander",
-                "bearing_deg": _bounded_relative(value.get("bearing_deg"), "bearing_deg", minimum=-360, maximum=360)}
+                "bearing_deg": _bounded_relative(value.get("bearing_deg"), "bearing_deg", minimum=0, maximum=359)}
     if declared.get("kind") == "quadrant":
         if (set(value) != {"kind", "cell_x", "cell_z", "cell_elmos"}
                 or value.get("kind") != "quadrant" or value.get("cell_elmos") != declared.get("cell_elmos")):
@@ -530,7 +530,7 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
                 if source != "sensor":
                     raise ProtocolError("invalid_observation", "beacon view has a non-sensor entity")
                 projected["distance"] = _bounded_relative(projected.get("distance"), "entity distance", minimum=0, maximum=MAX_BUDGET)
-                projected["bearing_deg"] = _bounded_relative(projected.get("bearing_deg"), "entity bearing_deg", minimum=-360, maximum=360)
+                projected["bearing_deg"] = _bounded_relative(projected.get("bearing_deg"), "entity bearing_deg", minimum=0, maximum=359)
         else:
             projected.pop("distance", None)
             projected.pop("bearing_deg", None)
