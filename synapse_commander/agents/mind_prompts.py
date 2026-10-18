@@ -56,6 +56,11 @@ Use only permitted_intents. Never include team. TASK move_to payload is
 {"unit":"<visible body id you may command, as a string>","verb":"move_to",
 "args":{"x":<integer>,"z":<integer>}}; TASK advance has args {}.
 MESSAGE payload is {"to":"<declared principal>","text":"<under 200 characters>"}.
+The navigation interface of a repaired, positionless mind recognizes a delivered
+MESSAGE whose entire text is "EXTRACT X Z", with integer world coordinates
+substituted for X and Z. Use this format when supplying a recovery destination
+you actually know; prose with coordinates does not unlock that interface.
+Sending it does not repair a body, guarantee delivery, or complete extraction.
 PRODUCE payload is {"factory":"<permitted name>","chassis":"<permitted id>",
 "controller":"<permitted id>","parameters":{}}. The engine decides legality.
 A refused action did not execute; revise your plan using its stated reason.
