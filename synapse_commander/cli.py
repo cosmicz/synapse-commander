@@ -100,12 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
     rescue.add_argument("--mode", dest="rescue_mode", choices=("scripted", "play", "bonded", "agents"), default="scripted",
                         help="bonded: a person's orders reach a live model commander through a loopback control "
                              "surface (token in the run directory); M1 runs the shared policy")
-    rescue.add_argument("--route", choices=("claude", "openrouter"), default="claude",
-                        help="bonded/agents: model route for the minds; claude is the authenticated CLI, openrouter "
-                             "is one HTTPS chat call per decision with OPENROUTER_API_KEY (no fallback)")
+    rescue.add_argument("--route", choices=("claude", "codex", "openrouter"), default="claude",
+                        help="bonded/agents: model route for the minds; claude and codex are isolated authenticated "
+                             "CLIs, openrouter is one HTTPS chat call per decision with OPENROUTER_API_KEY (no fallback)")
     rescue.add_argument("--model", default=None,
-                        help="bonded/agents: model for the route (claude-sonnet-5 for claude, "
-                             "nvidia/nemotron-3-nano-30b-a3b for openrouter)")
+                        help="bonded/agents: model for the route (claude-sonnet-5, gpt-6.1-sol, or "
+                             "nvidia/nemotron-3-nano-30b-a3b by route)")
     rescue.add_argument("--call-budget", type=int, default=20, help="bonded: maximum model calls")
     rescue.add_argument("--call-timeout", type=float, default=60.0, help="bonded: seconds per model call")
     rescue.add_argument("--deadline", type=float, default=400.0, help="bonded/agents: wall seconds for the run")
@@ -121,7 +121,9 @@ def build_parser() -> argparse.ArgumentParser:
                     "body and sends a bounded message through the gateway.  The ledger verifier checks "
                     "the separate streams.  Scripted fixture, not autonomous gameplay.")
     add_run_arguments(view)
-    agent.add_argument("--model", default="claude-sonnet-5", help="model pinned for the CLI route and the manifest")
+    agent.add_argument("--route", choices=("claude", "codex"), default="claude",
+                       help="authenticated isolated CLI route for the commander")
+    agent.add_argument("--model", default=None, help="model pinned for the selected CLI route and the manifest")
     agent.add_argument("--call-budget", type=int, default=20, help="maximum model calls")
     agent.add_argument("--call-timeout", type=float, default=60.0, help="seconds per model call")
     agent.add_argument("--deadline", type=float, default=600.0, help="wall seconds for the commander loop")
@@ -151,7 +153,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             extra = dict(mode="view")
             args.scenario = args.scenario or "view_smoke"
         if args.command == "run-agent":
-            extra = dict(mode="agent", model=args.model, call_budget=args.call_budget,
+            extra = dict(mode="agent", route=args.route, model=args.model or ROUTE_DEFAULT_MODELS[args.route], call_budget=args.call_budget,
                          call_timeout_s=args.call_timeout, agent_deadline_s=args.deadline)
         config = SmokeConfig(engine_dir=args.engine_dir, data_dir=args.data_dir, game_dir=args.game_dir,
                              out_dir=args.out, lock_dir=args.lock_dir, rig_commit=args.rig_commit,

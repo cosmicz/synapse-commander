@@ -321,8 +321,8 @@ class SmokeConfig:
     allow_join: bool = False          # host on all interfaces, port 8452, for a late spectator client
     springsettings: Path | None = None    # replaces the empty per-run settings (window size for capture)
     extra_widgets_dir: Path | None = None  # *.lua copied into the run's LuaUI/Widgets (capture widget)
-    model: str = "claude-sonnet-5"    # agent mode: model pinned for the CLI route
-    route: str = "claude"             # rescue agents/bonded: claude (CLI) or openrouter (HTTPS, OPENROUTER_API_KEY)
+    model: str = "claude-sonnet-5"    # model pinned for the selected live route
+    route: str = "claude"             # claude, codex (isolated CLIs), or openrouter (HTTPS)
     call_budget: int = 20
     call_timeout_s: float = 60.0
     agent_deadline_s: float = 600.0
@@ -432,7 +432,7 @@ def run_smoke(config: SmokeConfig, *,
         raise launch.LaunchError("rig commit is required for the manifest")
     if config.route not in ROUTE_NAMES:
         raise launch.LaunchError(f"model route is one of {sorted(ROUTE_NAMES)}")
-    if config.route != "claude" and model_route is None and (bonded or agents_mode) \
+    if config.route == "openrouter" and model_route is None and (bonded or agents_mode) \
             and not os.environ.get("OPENROUTER_API_KEY"):
         # Checked before the engine starts; the key itself is read only by the route, per call.
         raise launch.LaunchError("route openrouter needs OPENROUTER_API_KEY in the environment")
@@ -636,7 +636,9 @@ def run_smoke(config: SmokeConfig, *,
                 with decisions_path.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
-            route = model_route or ClaudeCliRoute(config.model, timeout_s=config.call_timeout_s)
+            route = model_route or live_route(
+                config, SYSTEM_PROMPT,
+                lambda: ClaudeCliRoute(config.model, timeout_s=config.call_timeout_s))
             driver: Any = AgentCommander(client, route, config.model, sink=ordered, on_decision=keep_decision,
                                          call_budget=config.call_budget, wall_deadline_s=config.agent_deadline_s,
                                          poll_s=config.client_poll_s)
@@ -1323,8 +1325,9 @@ def rescue_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -
     return checks
 
 
-ROUTE_NAMES = {"claude": "claude-cli", "openrouter": "openrouter"}
-ROUTE_DEFAULT_MODELS = {"claude": "claude-sonnet-5", "openrouter": "nvidia/nemotron-3-nano-30b-a3b"}
+ROUTE_NAMES = {"claude": "claude-cli", "codex": "codex-cli", "openrouter": "openrouter"}
+ROUTE_DEFAULT_MODELS = {"claude": "claude-sonnet-5", "codex": "gpt-6.1-sol",
+                        "openrouter": "nvidia/nemotron-3-nano-30b-a3b"}
 
 
 def live_route(config: SmokeConfig, system_prompt: str, claude: Callable[[], Any]) -> Any:
@@ -1334,6 +1337,9 @@ def live_route(config: SmokeConfig, system_prompt: str, claude: Callable[[], Any
     if config.route == "openrouter":
         from .agents.model_routes import OpenRouterRoute
         return OpenRouterRoute(config.model, system_prompt=system_prompt, timeout_s=config.call_timeout_s)
+    if config.route == "codex":
+        from .agents.codex_cli import CodexCliRoute
+        return CodexCliRoute(config.model, system_prompt=system_prompt, timeout_s=config.call_timeout_s)
     raise launch.LaunchError(f"unknown model route {config.route!r}")
 
 

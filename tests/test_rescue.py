@@ -357,6 +357,17 @@ class RouteSelectionTests(unittest.TestCase):
                          ("openrouter", "nvidia/nemotron-3-nano-30b-a3b", "mind prompt", 4096))
         self.assertEqual(live_route(self.config(out), "p", lambda: "claude-route"), "claude-route")
 
+    def test_codex_route_is_selected_explicitly_with_its_prompt(self):
+        from synapse_commander.agents.codex_cli import CodexCliRoute
+        from synapse_commander.run import live_route
+        out = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(out))
+        route = live_route(self.config(out, route="codex", model="gpt-6.1-sol"), "mind prompt",
+                           lambda: self.fail("no fallback to the Claude route"))
+        self.assertIsInstance(route, CodexCliRoute)
+        self.assertEqual((route.name, route.model, route.system_prompt),
+                         ("codex-cli", "gpt-6.1-sol", "mind prompt"))
+
     def test_openrouter_without_a_key_stops_before_the_engine_starts(self):
         from unittest import mock
         out = Path(tempfile.mkdtemp())
@@ -376,6 +387,8 @@ class RouteSelectionTests(unittest.TestCase):
         base = ["run-rescue", "--engine-dir", "e", "--data-dir", "d", "--out", "o", "--rig-commit", "r"]
         args = build_parser().parse_args(base + ["--mode", "agents", "--route", "openrouter"])
         self.assertEqual((args.route, args.model), ("openrouter", None))
+        args = build_parser().parse_args(base + ["--mode", "agents", "--route", "codex"])
+        self.assertEqual((args.route, args.model), ("codex", None))
         self.assertEqual(build_parser().parse_args(base).route, "claude")
 
 
