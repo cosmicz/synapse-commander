@@ -46,7 +46,8 @@ def provisioning_observation():
 class SmokeObservationTests(unittest.TestCase):
     def test_v2_parts_state_is_typed_and_commander_only(self):
         table = deepcopy(load_scenario("rescue_baseline"))
-        table["entrapment"] = {"asset": "M1", "until": "parts_delivered"}
+        table["entrapment"] = {"asset": "M1", "until": "parts_delivered",
+                               "parts_carrier_chassis": ["carrier_v1"]}
         source = provisioning_observation()
         body = {"id": 42, "pos": [100, 0, 100], "source": "own_body",
                 "controller": "reasoner_large_v1", "immobilised": True,
@@ -54,7 +55,7 @@ class SmokeObservationTests(unittest.TestCase):
                 "speed_factor": 0.6,
                 "private": "not forwarded"}
         carrier = {"id": 43, "pos": [101, 0, 100], "source": "own_unit",
-                   "carrying_parts": True, "speed_factor": 0.6,
+                   "def": "armck", "carrying_parts": True, "speed_factor": 0.6,
                    "immobilised": True, "reason": "needs_parts"}
         sensed = {"id": 44, "pos": [102, 0, 100], "source": "sensor",
                   "carrying_parts": True, "speed_factor": 0.6,
@@ -65,7 +66,7 @@ class SmokeObservationTests(unittest.TestCase):
                          "waypoints": {"W1": [500, 0, 100]}},
             "resources": {"parts": 1},
             "roster": [{"name": "S0", "def": "armflea", "controller": "escort_fixed_v1",
-                        "status": "in_contact", "unit_id": 71, "carrying_parts": True}],
+                        "status": "in_contact", "unit_id": 71, "carrying_parts": False}],
             "recent_effects": [
                 {"effect": "parts_delivered", "frame": 150, "unit_id": 42,
                  "detail": {"target": "M1", "by": "S0", "unit_id": 42}},
@@ -85,7 +86,7 @@ class SmokeObservationTests(unittest.TestCase):
         sensed_view = next(item for item in observed["entities"] if item["id"] == 44)
         self.assertNotIn("carrying_parts", sensed_view)
         self.assertNotIn("speed_factor", sensed_view)
-        self.assertTrue(observed["roster"][0]["carrying_parts"])
+        self.assertFalse(observed["roster"][0]["carrying_parts"])
         self.assertEqual([item["effect"] for item in observed["recent_effects"]],
                          ["parts_delivered", "mobility_restored"])
         self.assertNotIn("private", observed["body"])
@@ -98,7 +99,8 @@ class SmokeObservationTests(unittest.TestCase):
 
     def test_v2_parts_projection_rejects_untyped_state(self):
         table = deepcopy(load_scenario("rescue_baseline"))
-        table["entrapment"] = {"asset": "M1", "until": "parts_delivered"}
+        table["entrapment"] = {"asset": "M1", "until": "parts_delivered",
+                               "parts_carrier_chassis": ["carrier_v1"]}
         source = provisioning_observation()
         body = {"id": 42, "pos": [100, 0, 100], "source": "own_body",
                 "immobilised": "yes", "reason": "needs_parts"}
@@ -118,6 +120,10 @@ class SmokeObservationTests(unittest.TestCase):
                                      "detail": {"target": "M1", "by": "S0", "unit_id": 42,
                                                 "cause_hidden": "secret"}}]
         with self.assertRaisesRegex(ProtocolError, "parts delivery effect"):
+            bounded_observation(source, scenario_table=table, principal="commander")
+        source["recent_effects"] = []
+        source["body"]["carrying_parts"] = True
+        with self.assertRaisesRegex(ProtocolError, "principal body cannot carry"):
             bounded_observation(source, scenario_table=table, principal="commander")
 
     def test_mission_briefing_is_public_but_world_truth_and_source_overrides_are_not(self):

@@ -452,6 +452,8 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
                     raise ProtocolError("invalid_observation", "invalid immobilised reason")
             if "carrying_parts" in projected and not isinstance(projected["carrying_parts"], bool):
                 raise ProtocolError("invalid_observation", "entity carrying_parts must be boolean")
+            if projected.get("carrying_parts") is True:
+                raise ProtocolError("invalid_observation", "principal body cannot carry mission parts")
         else:
             for field in ("immobilised", "reason"):
                 projected.pop(field, None)
@@ -459,6 +461,11 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
                 projected.pop("carrying_parts", None)
             elif "carrying_parts" in projected and not isinstance(projected["carrying_parts"], bool):
                 raise ProtocolError("invalid_observation", "entity carrying_parts must be boolean")
+            elif projected.get("carrying_parts") is True:
+                carriers = scenario_table["entrapment"].get("parts_carrier_chassis", [])
+                carrier_defs = {scenario_table["chassis"][name].get("def") for name in carriers}
+                if projected.get("def") not in carrier_defs:
+                    raise ProtocolError("invalid_observation", "only the declared carrier may carry mission parts")
         if "controller" in projected:
             if scenario_table is None or projected.get("source") not in {"own_unit", "own_body"}:
                 projected.pop("controller")
@@ -609,6 +616,8 @@ def _bounded_expedition(value: Mapping[str, Any], result: dict[str, Any], scenar
             if parts_entrapment:
                 if not isinstance(item.get("carrying_parts"), bool):
                     raise ProtocolError("invalid_observation", "roster carrying_parts must be boolean")
+                if item["carrying_parts"]:
+                    raise ProtocolError("invalid_observation", "predeployed roster body cannot carry mission parts")
                 public["carrying_parts"] = item["carrying_parts"]
         public_roster.append(public)
     reports = value.get("reports", [])
