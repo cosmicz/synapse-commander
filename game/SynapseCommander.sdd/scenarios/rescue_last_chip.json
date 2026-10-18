@@ -1,0 +1,178 @@
+{
+  "schema": "ScenarioTable/v1",
+  "id": "rescue_last_chip",
+  "version": "1",
+  "seed": 1017,
+  "factory": {
+    "name": "F0",
+    "def": "armlab",
+    "offset": [
+      -512,
+      896
+    ]
+  },
+  "bodies": 5,
+  "chips": {
+    "reasoner_large_v1": 1,
+    "reasoner_small_v1": 2,
+    "escort_fixed_v1": 2
+  },
+  "chassis": {
+    "scout_v1": {
+      "def": "armflea",
+      "build_frames": 90,
+      "commission_frames": 30,
+      "capabilities": [
+        "move",
+        "sense"
+      ]
+    },
+    "carrier_v1": {
+      "def": "armck",
+      "build_frames": 120,
+      "commission_frames": 30,
+      "capabilities": [
+        "move",
+        "assist"
+      ]
+    },
+    "relay_support_v1": {
+      "def": "armmark",
+      "build_frames": 105,
+      "commission_frames": 30,
+      "capabilities": [
+        "move",
+        "relay",
+        "sense"
+      ]
+    }
+  },
+  "commander": {
+    "chip": "reasoner_large_v1",
+    "position": [
+      0,
+      240
+    ],
+    "capabilities": [
+      "move",
+      "sense",
+      "assist"
+    ]
+  },
+  "principals": {
+    "commander": {
+      "chip": "reasoner_large_v1"
+    },
+    "M1": {
+      "chip": "reasoner_small_v1"
+    }
+  },
+  "reasoner_chips": [
+    "reasoner_large_v1",
+    "reasoner_small_v1"
+  ],
+  "sensors": {
+    "armflea": 900,
+    "armck": 900,
+    "armmark": 900
+  },
+  "comms": {
+    "range": 1400,
+    "latency_frames": 30,
+    "relay_chassis": [
+      "relay_support_v1"
+    ]
+  },
+  "predeployed": [
+    {
+      "name": "S0",
+      "def": "armflea",
+      "controller": "escort_fixed_v1",
+      "position": [
+        -332,
+        576
+      ],
+      "state": "active",
+      "contact": true
+    },
+    {
+      "name": "M1",
+      "def": "armck",
+      "controller": "reasoner_small_v1",
+      "position": [
+        -1536,
+        2176
+      ],
+      "state": "active",
+      "contact": false,
+      "health": 0.4
+    },
+    {
+      "name": "H0",
+      "def": "armck",
+      "controller": "escort_fixed_v1",
+      "position": [
+        -1792,
+        2048
+      ],
+      "state": "destroyed",
+      "contact": false
+    }
+  ],
+  "distress": {
+    "asset": "M1",
+    "last_known": {
+      "position": [
+        -1312,
+        2176
+      ],
+      "age_frames": 900
+    },
+    "symptom": "no_heartbeat",
+    "cause_hidden": "radio_failure"
+  },
+  "recovery_responses": [
+    "relay",
+    "rendezvous",
+    "extract"
+  ],
+  "waypoints": {
+    "W1": [
+      -512,
+      0,
+      1536
+    ],
+    "W2": [
+      -512,
+      0,
+      2176
+    ],
+    "W3": [
+      -1536,
+      0,
+      2176
+    ]
+  },
+  "extraction_zones": {
+    "extraction_v1": {
+      "position": [
+        -752,
+        896
+      ],
+      "radius": 160,
+      "dwell_frames": 150
+    }
+  },
+  "mission": {
+    "timeout_frames": 12000
+  },
+  "objective": {
+    "type": "rescue_return",
+    "target": "M1",
+    "extraction": "extraction_v1"
+  },
+  "briefing": {
+    "title": "The Last Chip",
+    "text": "Only one uncommitted body and one reasoning chip remain. Choose the manufactured body carefully, delegate the rescue, restore radio contact with M1, and bring M1 to extraction before frame 12000. No replacement deployment is affordable. The distress cause and current target condition are unknown."
+  }
+}

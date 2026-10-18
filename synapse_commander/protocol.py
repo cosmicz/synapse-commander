@@ -291,6 +291,19 @@ def _bounded_provisioning(value: Mapping[str, Any], result: dict[str, Any], scen
         raise ProtocolError("invalid_observation", "provisioning observation lacks declared scenario")
     result.setdefault("scenario", {})["id"] = scenario_table["id"]
     result["scenario"]["version"] = scenario_table["version"]
+    # Static public mission rules come from the selected, validated table.
+    # Never copy the whole table: initial asset state and distress cause are private.
+    if "briefing" in scenario_table:
+        result["scenario"]["briefing"] = {
+            key: scenario_table["briefing"][key] for key in ("title", "text")
+        }
+    if "mission" in scenario_table:
+        mission = {"timeout_frames": scenario_table["mission"]["timeout_frames"]}
+        mission["frames_remaining"] = max(0, mission["timeout_frames"] - result["frame"])
+        zone = scenario_table.get("extraction_zones", {}).get(scenario_table["objective"]["extraction"])
+        if zone is not None:
+            mission["extraction_dwell_frames"] = zone["dwell_frames"]
+        result["scenario"]["mission"] = mission
     commander = value.get("commander")
     if commander is not None:
         if not isinstance(commander, Mapping) or set(commander) != {"unit_id", "chip"}:

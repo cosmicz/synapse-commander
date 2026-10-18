@@ -6,6 +6,35 @@ from synapse_commander.scenarios import DEFAULT_SCENARIO, SCENARIO_SCHEMA, Scena
 
 
 class ScenarioTableTests(unittest.TestCase):
+    def test_demo_variants_preserve_surveyed_geometry_and_fund_one_child(self):
+        baseline = load_scenario("rescue_baseline")
+        for name, spare_bodies, spare_fixed, deadline in (
+            ("rescue_last_chip", 1, 0, 12000), ("rescue_short_window", 2, 1, 9000),
+        ):
+            with self.subTest(name=name):
+                table = load_scenario(name)
+                # Lost assets consumed their body/chip too; only the residual funds production.
+                used = {chip: 0 for chip in table["chips"]}
+                used[table["commander"]["chip"]] += 1
+                for asset in table["predeployed"]:
+                    used[asset["controller"]] += 1
+                self.assertEqual(table["bodies"] - 1 - len(table["predeployed"]), spare_bodies)
+                self.assertEqual({chip: count - used[chip] for chip, count in table["chips"].items()},
+                                 {"reasoner_large_v1": 0, "reasoner_small_v1": 1, "escort_fixed_v1": spare_fixed})
+                self.assertEqual(table["mission"]["timeout_frames"], deadline)
+                for key in ("factory", "commander", "predeployed", "distress", "waypoints", "comms",
+                            "extraction_zones", "principals", "reasoner_chips", "sensors", "chassis"):
+                    self.assertEqual(table[key], baseline[key], key)
+
+    def test_public_briefing_has_a_bounded_exact_shape(self):
+        for briefing in (None, {}, {"title": "ok", "text": "ok", "cause": "secret"},
+                         {"title": "x" * 81, "text": "ok"}, {"title": "ok", "text": "x" * 601},
+                         {"title": "", "text": "ok"}, {"title": "ok", "text": "bad\x00"}):
+            table = copy.deepcopy(load_scenario("rescue_last_chip"))
+            table["briefing"] = briefing
+            with self.subTest(briefing=briefing):
+                self.assertRaises(ScenarioError, _validate, table, table["id"])
+
     def test_rescue_smoke_table_is_versioned_and_has_real_engine_definitions(self):
         table = load_scenario()
         self.assertEqual((table["schema"], table["id"], table["version"]), (SCENARIO_SCHEMA, DEFAULT_SCENARIO, "1-provisional"))

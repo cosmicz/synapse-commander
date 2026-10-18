@@ -90,6 +90,14 @@ def _validate(table: Any, scenario_name: str) -> dict[str, Any]:
         mission = _mapping(root["mission"], "mission")
         if set(mission) != {"timeout_frames"} or not _non_negative_int(mission["timeout_frames"]) or mission["timeout_frames"] == 0:
             raise ScenarioError("invalid mission")
+    if "briefing" in root:
+        briefing = _mapping(root["briefing"], "briefing")
+        if set(briefing) != {"title", "text"} or any(
+            not isinstance(briefing.get(key), str) or not briefing[key].isprintable()
+            or not 1 <= len(briefing[key]) <= limit
+            for key, limit in (("title", 80), ("text", 600))
+        ):
+            raise ScenarioError("invalid public briefing")
     return root
 
 

@@ -43,6 +43,33 @@ def provisioning_observation():
 
 
 class SmokeObservationTests(unittest.TestCase):
+    def test_mission_briefing_is_public_but_world_truth_and_source_overrides_are_not(self):
+        for principal in ("commander", "job-1", "M1"):
+            with self.subTest(principal=principal):
+                table = load_scenario("rescue_short_window")
+                source = engine_observation()
+                body = {"id": 42, "pos": [100, 0, 100], "source": "own_body"}
+                source.update(principal=principal, body=body, entities=[body], scenario={
+                    "id": table["id"], "version": table["version"],
+                    "briefing": {"title": "forged", "text": "hidden marker"},
+                    "mission": {"timeout_frames": 1, "private": "hidden marker"},
+                    "predeployed": table["predeployed"], "distress": table["distress"],
+                })
+                observed = bounded_observation(source, scenario_table=table, principal=principal)
+                self.assertEqual(observed["scenario"], {
+                    "id": table["id"], "version": table["version"], "briefing": table["briefing"],
+                    "mission": {"timeout_frames": 9000, "frames_remaining": 8985, "extraction_dwell_frames": 150},
+                })
+                self.assertNotIn("hidden marker", json.dumps(observed))
+                self.assertNotIn(table["distress"]["cause_hidden"], json.dumps(observed))
+                source["frame"] = 9100
+                after_deadline = bounded_observation(source, scenario_table=table, principal=principal)
+                self.assertEqual(after_deadline["scenario"]["mission"]["frames_remaining"], 0)
+                self.assertEqual(after_deadline["scenario"]["mission"]["timeout_frames"], 9000)
+                source["scenario"]["version"] = "different"
+                with self.assertRaises(ProtocolError):
+                    bounded_observation(source, scenario_table=table, principal=principal)
+
     def test_principal_distress_accepts_engine_delivery_metadata_without_forwarding_it(self):
         source = engine_observation()
         body = {"id": 42, "pos": [100, 0, 100], "source": "own_body"}

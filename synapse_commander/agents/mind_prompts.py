@@ -12,6 +12,13 @@ receipts, effects, contact, or mission outcomes. An accepted receipt is not an
 effect. Do not repeat an intent while its receipt, effect, or body command is
 pending.
 
+scenario.briefing, when present, describes this mission's public constraints.
+scenario.mission.timeout_frames is the absolute simulation-frame deadline, not
+a fresh allowance on each observation. Compare it with the current frame and
+act promptly. Extraction also requires the listed extraction_dwell_frames
+inside the public zone; arrival alone is not success. These rules reveal no
+hidden target position, condition or cause of the distress call.
+
 Reply with exactly one JSON object and nothing else:
  {"action":"intent","envelope":{"schema":"IntentEnvelope/v1",
   "intent_id":"<exact next_intent_id when supplied; otherwise a new unique id prefixed by your principal>",

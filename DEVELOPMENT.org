@@ -219,6 +219,42 @@ required =advance_to_W1= decision. Limits: one unit, fixed waypoint, headless,
 not visual; agent-only autonomy on this smoke task says nothing about play
 quality on a real mission.
 
+* Live rescue variations
+Select these with =run-rescue --mode agents --scenario NAME= and the same
+engine, gateway, provider and recording arguments as the baseline rescue.
+Each uses three separate live minds: commander, the manufactured =job-1=,
+and the stranded =M1=. The model chooses production, delegation, relay movement
+and the target's return through the existing typed interface.
+
+| Scenario | Version | Spare bodies | Spare reasoning chips | Spare fixed chips | Extraction deadline |
+|----------+---------+--------------+-----------------------+-------------------+---------------------|
+| =rescue_baseline= | =6-provisional= | 2 | 1 | 1 | 400 simulated seconds |
+| =rescue_last_chip= | =1= | 1 | 1 | 0 | 400 simulated seconds |
+| =rescue_short_window= | =1= | 2 | 1 | 1 | 300 simulated seconds |
+
+The Last Chip leaves only one manufacturing opportunity. Spending it on a
+body that cannot extend the radio link leaves no replacement deployment.
+Closing Window puts the same rescue under a shorter deadline; model latency,
+delegation delay and travel all consume that window. A late return is a
+timeout even if the mind is still alive. Every variant requires five simulated
+seconds inside extraction before success. These are deliberately small
+variations on the same surveyed corridor, target and extraction positions.
+
+The gateway exposes only the selected table's bounded public =briefing= and
+=scenario.mission= rules, after matching its identity to the engine view.
+=timeout_frames= is an absolute simulation-frame limit (30 frames/second);
+=frames_remaining= counts down from the observed engine frame, and
+=extraction_dwell_frames= is the required dwell. They are available to every
+mind and the text play interface. The target's hidden position, current
+condition and cause remain outside this projection. The baseline table is
+unchanged. These variants add no repair, towing, wildlife or jamming mechanics.
+
+Table/projection tests establish loading, inventory accounting, geometry
+preservation and filtering. Only a native live run establishes playability or
+its outcome. Retain each run's scenario id/version/hash, model route,
+inference and intent records, intervention records and engine outcome; do not
+replace a failed live attempt with a scripted success.
+
 * Stranded-mind local policy
 =agents/m1_policy.py= provides a scripted target policy for shared use by
 rescue rehearsal and interactive drivers. It has no I/O, model calls or access

@@ -61,6 +61,15 @@ def render_observation(observation: dict[str, Any]) -> str:
     """A compact text view of one principal's bounded observation."""
     lines = [f"[{observation.get('principal', '?')}] frame {observation.get('frame')} "
              f"(t={int(observation.get('frame', 0)) / FPS:.1f}s) {observation.get('observation_id')}"]
+    scenario = observation.get("scenario") or {}
+    briefing = scenario.get("briefing") or {}
+    if briefing:
+        lines.append(f"  {briefing['title']} [{scenario.get('id')} v{scenario.get('version')}]: {briefing['text']}")
+    mission = scenario.get("mission") or {}
+    if "timeout_frames" in mission:
+        remaining = max(0, mission["timeout_frames"] - int(observation.get("frame", 0)))
+        lines.append(f"  extraction window: {remaining / FPS:.1f}s remaining; "
+                     f"deadline frame {mission['timeout_frames']}")
     body = observation.get("body") or {}
     if body:
         pos = body.get("pos") or [0, 0, 0]
