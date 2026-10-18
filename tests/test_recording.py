@@ -1323,6 +1323,30 @@ class PrincipalStreams(PrincipalLedgerCase):
         self.assertIn("operator intervention after start: not autonomous", result.evidence_limits)
         self.assertIn("principal commander declared agent but its evidence classifies as assisted", result.evidence_limits)
 
+    def test_a_delegation_decision_needs_its_named_recipient(self):
+        # nav-rec 18:25 (live-07): "delegate" was met by any commander MESSAGE, even one to M1.
+        for to, expected in (("M1", "agent_only"), ("job-1", "agent_partial")):
+            with self.subTest(to=to):
+                self.path.unlink(missing_ok=True)
+                r = self.recorder(principals=["commander", "M1"], principal_sources={"commander": "agent", "M1": "agent"},
+                                  model_id=MODEL, required_decisions=[
+                                      {"label": "delegate", "principal": "commander", "type": "MESSAGE", "to": to},
+                                      {"label": "d-M1", "principal": "M1"}])
+                r.run_start(0)
+                for frame, principal in enumerate(("commander", "M1")):
+                    o = self.obs(r, principal, f"obs-{principal}-0", frame=frame)
+                    cause = self.inference(r, principal, f"inf-{principal}", o, frame=frame)
+                    extra = {"type": "MESSAGE", "payload": {"to": "M1", "text": "EXTRACT"}} if principal == "commander" else {}
+                    sub = self.intent(r, principal, f"i-{principal}", f"obs-{principal}-0", [cause], origin="agent",
+                                      decision="delegate" if principal == "commander" else "d-M1", frame=frame, **extra)
+                    self.receipt(r, principal, f"i-{principal}", sub, frame=frame)
+                r.run_end(2, {})
+                result = verify_ledger(self.path)
+                self.assertTrue(result.ok, result.errors)
+                self.assertEqual(result.principal_classifications["commander"], expected)
+        with self.assertRaises(LedgerError):
+            rec.validate_manifest(manifest(**TWO, required_decisions=[{"label": "x", "principal": "M1", "to": 7}]))
+
     def test_a_declared_human_principal_is_labelled_human_only(self):
         rec.validate_manifest(manifest(principals=["commander", "M1"], principal_sources={"commander": "human", "M1": "scripted"}))
         result = self.agent_run({"commander": "human", "M1": "scripted"}, [])

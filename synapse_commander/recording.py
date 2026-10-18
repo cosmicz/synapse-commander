@@ -278,6 +278,8 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
             raise LedgerError("invalid_manifest", "after_scenario_event must be a string")
         if decision.get("type") is not None and not isinstance(decision["type"], str):
             raise LedgerError("invalid_manifest", "required decision type must be a string")
+        if decision.get("to") is not None and not isinstance(decision["to"], str):
+            raise LedgerError("invalid_manifest", "required decision recipient must be a string")
         owner = decision.get("principal")
         if sources is not None and len(sources) > 1 and not _one_of(owner, sources):
             raise LedgerError("invalid_manifest", "with several principals every required decision names its principal")
@@ -943,6 +945,14 @@ def _principal_summary(name: str, records: list[dict[str, Any]], intents: list[d
     }
 
 
+def _recipient(payload: Mapping[str, Any]) -> Any:
+    """The addressee of a MESSAGE intent, from its payload or its submitted envelope."""
+    for body in (payload.get("payload"), (payload.get("envelope") or {}).get("payload")):
+        if isinstance(body, Mapping) and "to" in body:
+            return body["to"]
+    return None
+
+
 def _required_decisions_met(required: list[dict[str, Any]], records: list[dict[str, Any]],
                             intents: list[dict[str, Any]], receipts: Mapping[str, dict[str, Any]],
                             chains: Mapping[str, list[dict[str, Any]]]) -> bool:
@@ -962,6 +972,9 @@ def _required_decisions_met(required: list[dict[str, Any]], records: list[dict[s
             if payload.get("decision") != decision["label"]:
                 continue
             if decision.get("type") is not None and payload["type"] != decision["type"]:
+                continue
+            # A delegation names its recipient: a message to anyone else is not it.
+            if decision.get("to") is not None and _recipient(payload) != decision["to"]:
                 continue
             chain = chains.get(intent["event_id"], [])
             if after_seq is not None:
