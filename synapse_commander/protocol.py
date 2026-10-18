@@ -256,17 +256,24 @@ def _bounded_relative(value: Any, field: str, *, minimum: int, maximum: int) -> 
     return value
 
 
+def _bounded_bearing(value: Any, field: str) -> int:
+    """Round the gadget's finite angle to its frozen public degree wire."""
+    if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value < 360:
+        raise ProtocolError("invalid_observation", f"{field} must be a bearing in 0..359")
+    return int(math.floor(value + .5)) % 360
+
+
 def _bounded_beacon_fix(value: Any, scenario_table: Mapping[str, Any] | None) -> dict[str, Any]:
     entrapment = {} if scenario_table is None else scenario_table.get("entrapment", {})
     declared = entrapment.get("beacon_fix") if isinstance(entrapment, Mapping) else None
     if not isinstance(declared, Mapping) or not isinstance(value, Mapping):
         raise ProtocolError("invalid_observation", "invalid beacon fix")
     if declared.get("kind") == "bearing":
-        if (set(value) != {"kind", "from", "bearing_deg"} or value.get("kind") != "bearing"
-                or value.get("from") != "commander"):
+        if (set(value) != {"kind", "from", "bearing_deg", "reference"} or value.get("kind") != "bearing"
+                or value.get("from") != "commander" or value.get("reference") != "east_south_clockwise"):
             raise ProtocolError("invalid_observation", "invalid bearing fix")
-        return {"kind": "bearing", "from": "commander",
-                "bearing_deg": _bounded_relative(value.get("bearing_deg"), "bearing_deg", minimum=0, maximum=359)}
+        return {"kind": "bearing", "from": "commander", "reference": "east_south_clockwise",
+                "bearing_deg": _bounded_bearing(value.get("bearing_deg"), "bearing_deg")}
     if declared.get("kind") == "quadrant":
         if (set(value) != {"kind", "cell_x", "cell_z", "cell_elmos"}
                 or value.get("kind") != "quadrant" or value.get("cell_elmos") != declared.get("cell_elmos")):

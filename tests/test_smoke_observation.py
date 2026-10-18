@@ -544,7 +544,7 @@ class SmokeObservationTests(unittest.TestCase):
         with self.assertRaisesRegex(ProtocolError, "beacon distress"):
             bounded_observation(source, scenario_table=table, principal="commander")
 
-    def test_bearing_fix_retains_its_declared_receiver_and_requires_integer_angle(self):
+    def test_bearing_fix_keeps_its_declared_reference_and_rounds_gadget_angle(self):
         table = deepcopy(load_scenario("rescue_baseline"))
         table["entrapment"] = {
             "asset": "M1", "until": "parts_delivered", "assist_capability": "assist",
@@ -557,14 +557,17 @@ class SmokeObservationTests(unittest.TestCase):
         source.update(principal="commander", body=body, entities=[body], resources={"parts": 1},
                       scenario={"id": table["id"], "version": table["version"]}, reports=[{
                           "kind": "distress", "asset": "M1",
-                          "fix": {"kind": "bearing", "from": "commander", "bearing_deg": 345},
+                          "fix": {"kind": "bearing", "from": "commander", "reference": "east_south_clockwise", "bearing_deg": 344.6},
                           "observed_frame": 1, "age_frames": 9, "symptom": table["distress"]["symptom"],
                       }])
         observed = bounded_observation(source, scenario_table=table, principal="commander")
-        self.assertEqual(observed["reports"][0]["fix"], {"kind": "bearing", "from": "commander", "bearing_deg": 345})
+        self.assertEqual(observed["reports"][0]["fix"], {"kind": "bearing", "from": "commander", "reference": "east_south_clockwise", "bearing_deg": 345})
         source["reports"][0]["fix"]["bearing_deg"] = 1.5
-        with self.assertRaisesRegex(ProtocolError, "bearing_deg"):
-            bounded_observation(source, scenario_table=table, principal="commander")
+        self.assertEqual(bounded_observation(source, scenario_table=table, principal="commander")["reports"][0]["fix"]["bearing_deg"], 2)
         source["reports"][0]["fix"]["bearing_deg"] = 360
         with self.assertRaisesRegex(ProtocolError, "bearing_deg"):
+            bounded_observation(source, scenario_table=table, principal="commander")
+        source["reports"][0]["fix"]["bearing_deg"] = 3
+        source["reports"][0]["fix"]["reference"] = "north_clockwise"
+        with self.assertRaisesRegex(ProtocolError, "bearing fix"):
             bounded_observation(source, scenario_table=table, principal="commander")
