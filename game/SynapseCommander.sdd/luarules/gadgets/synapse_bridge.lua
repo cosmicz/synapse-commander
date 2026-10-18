@@ -1242,13 +1242,21 @@ if gadgetHandler:IsSyncedCode() then
                          observation_id = "obs-" .. principal .. "-" .. frame, team = TEAM0, frame = frame,
                          body = entity_for(bodyID, "own_body"), entities = entities,
                          reports = listed_reports, truncated = false, omitted = 0,
-                         scenario = { id = scenario.id, version = scenario.version, waypoints = next(waypoints_world) and waypoints_world or { W1 = waypoint } },
+                         scenario = { id = scenario.id, version = scenario.version },
                          permitted_intents = { { type = "TASK", verbs = { "advance", "move_to" } }, { type = "MESSAGE" } } }
-          if scenario.objective and scenario.extraction_zones then
-            local zone = scenario.extraction_zones[scenario.objective.extraction]
-            if zone then body.scenario.extraction = { id = scenario.objective.extraction,
-                                                       position = { scenario_origin_x + zone.position[1], scenario_origin_z + zone.position[2] },
-                                                       radius = zone.radius } end
+          -- Rescue-party knowledge only: the commander and the minds it produced
+          -- (job-N) know the planned waypoints and the extraction zone; a stranded
+          -- principal is cut off and learns the extraction point only from a
+          -- delivered MESSAGE (18:20 ruling after live-05, where M1 walked home
+          -- from its own view without any contact).
+          if principal == "commander" or principal:sub(1, 4) == "job-" then
+            body.scenario.waypoints = next(waypoints_world) and waypoints_world or { W1 = waypoint }
+            if scenario.objective and scenario.extraction_zones then
+              local zone = scenario.extraction_zones[scenario.objective.extraction]
+              if zone then body.scenario.extraction = { id = scenario.objective.extraction,
+                                                         position = { scenario_origin_x + zone.position[1], scenario_origin_z + zone.position[2] },
+                                                         radius = zone.radius } end
+            end
           end
           if principal == "commander" then
             body.budgets = { bodies_remaining = budgets.bodies_remaining, chips = budgets.chips }
