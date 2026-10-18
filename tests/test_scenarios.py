@@ -105,6 +105,51 @@ class ScenarioTableTests(unittest.TestCase):
                 self.assertNotIn("extraction_zones", table)
                 self.assertEqual(table["objective"]["target"], "rescue_target_v1")
 
+    def test_rescue_v2_declares_slow_bodies_parts_and_entrapment(self):
+        # kbk Design 9 f: baseline geometry plus speed factors, one part and a parts-delivery entrapment.
+        table = load_scenario("rescue_v2")
+        self.assertEqual((table["id"], table["version"]), ("rescue_v2", "1"))
+        self.assertEqual({n: c.get("speed_factor") for n, c in table["chassis"].items()},
+                         {"scout_v1": 0.8, "carrier_v1": 0.6, "relay_support_v1": 0.6})
+        self.assertEqual(table["commander"]["speed_factor"], 0.6)
+        m1 = next(a for a in table["predeployed"] if a["name"] == "M1")
+        self.assertEqual((m1["speed_factor"], m1["health"], m1["position"]), (0.5, 0.4, [-1536, 2176]))
+        self.assertIs(table["chassis"]["carrier_v1"]["carries_parts"], True)
+        self.assertEqual(table["resources"], {"parts": 1})
+        self.assertEqual(table["entrapment"], {"asset": "M1", "until": "parts_delivered", "assist_capability": "assist",
+                                               "assist_range": 96, "assist_frames": 150,
+                                               "parts_carrier_chassis": ["carrier_v1", "relay_support_v1"]})
+        self.assertEqual(table["mission"], {"timeout_frames": 15000})
+        self.assertEqual(table["chips"], load_scenario("rescue_baseline")["chips"])
+        self.assertEqual(table["distress"]["cause_hidden"], "terrain_entrapment+parts")
+
+    def test_mission_v2_fields_fail_closed(self):
+        def broken(change):
+            table = copy.deepcopy(load_scenario("rescue_v2"))
+            change(table)
+            return table
+        trap = lambda t: t["entrapment"]
+        for name, change in {
+            "slow chassis": lambda t: t["chassis"]["scout_v1"].__setitem__("speed_factor", 0.01),
+            "fast chassis": lambda t: t["chassis"]["scout_v1"].__setitem__("speed_factor", 1.5),
+            "boolean speed": lambda t: t["chassis"]["scout_v1"].__setitem__("speed_factor", True),
+            "commander speed": lambda t: t["commander"].__setitem__("speed_factor", 0),
+            "asset speed": lambda t: t["predeployed"][1].__setitem__("speed_factor", float("nan")),
+            "carries parts not bool": lambda t: t["chassis"]["carrier_v1"].__setitem__("carries_parts", 1),
+            "negative parts": lambda t: t.__setitem__("resources", {"parts": -1}),
+            "unknown resource": lambda t: t.__setitem__("resources", {"parts": 1, "gold": 2}),
+            "towing reserved": lambda t: trap(t).__setitem__("until", "towed"),
+            "unknown asset": lambda t: trap(t).__setitem__("asset", "M9"),
+            "destroyed asset": lambda t: trap(t).__setitem__("asset", "H0"),
+            "zero range": lambda t: trap(t).__setitem__("assist_range", 0),
+            "zero frames": lambda t: trap(t).__setitem__("assist_frames", 0),
+            "undeclared carrier": lambda t: trap(t).__setitem__("parts_carrier_chassis", ["truck_v1"]),
+            "no carriers": lambda t: trap(t).__setitem__("parts_carrier_chassis", []),
+            "extra entrapment key": lambda t: trap(t).__setitem__("towed_by", "S0"),
+        }.items():
+            with self.subTest(name):
+                self.assertRaises(ScenarioError, _validate, broken(change), "rescue_v2")
+
 
 if __name__ == "__main__":
     unittest.main()

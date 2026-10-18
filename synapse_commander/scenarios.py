@@ -39,6 +39,38 @@ def _coordinates(value: Any, field: str, length: int) -> None:
         raise ScenarioError(f"{field} must contain finite numeric coordinates")
 
 
+def _speed_factor(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and 0.05 <= value <= 1.0
+
+
+ENTRAPMENT_UNTIL = ("parts_delivered",)  # "towed" is reserved for mission v2.1 and refused until implemented
+
+
+def _validate_mission_v2(root: Mapping[str, Any], chassis: Mapping[str, Any]) -> None:
+    """Mission v2 (kbk Design 9): speed factors, parts stock and parts-delivery entrapment, all optional."""
+    for asset in root.get("predeployed") or []:
+        if isinstance(asset, Mapping) and "speed_factor" in asset and not _speed_factor(asset["speed_factor"]):
+            raise ScenarioError("invalid predeployed speed factor")
+    if "resources" in root:
+        resources = _mapping(root["resources"], "resources")
+        if not set(resources) <= {"parts"} or not _non_negative_int(resources.get("parts", 0)):
+            raise ScenarioError("invalid resources")
+    if "entrapment" not in root:
+        return
+    entrapment = _mapping(root["entrapment"], "entrapment")
+    names = {a.get("name"): a for a in root.get("predeployed") or [] if isinstance(a, Mapping)}
+    carriers = entrapment.get("parts_carrier_chassis")
+    radius, frames = entrapment.get("assist_range"), entrapment.get("assist_frames")
+    if set(entrapment) != {"asset", "until", "assist_capability", "assist_range", "assist_frames", "parts_carrier_chassis"} \
+            or entrapment["until"] not in ENTRAPMENT_UNTIL \
+            or entrapment["asset"] not in names or names[entrapment["asset"]].get("state") != "active" \
+            or not _identifier(entrapment["assist_capability"]) \
+            or type(radius) not in (int, float) or not math.isfinite(radius) or radius <= 0 \
+            or not _non_negative_int(frames) or frames == 0 \
+            or not isinstance(carriers, list) or not carriers or any(c not in chassis for c in carriers) or len(set(carriers)) != len(carriers):
+        raise ScenarioError("invalid entrapment")
+
+
 def _validate(table: Any, scenario_name: str) -> dict[str, Any]:
     root = _mapping(table, "scenario")
     required = {"schema", "id", "version", "factory", "bodies", "chips", "commander", "chassis", "waypoints", "objective"}
@@ -59,11 +91,14 @@ def _validate(table: Any, scenario_name: str) -> dict[str, Any]:
         raise ScenarioError("scenario table has invalid identifier")
     for name, item in chassis.items():
         item = _mapping(item, f"chassis.{name}")
-        if not {"def", "build_frames", "commission_frames"} <= set(item) <= {"def", "build_frames", "commission_frames", "capabilities"} or not _identifier(item.get("def")) or not _non_negative_int(item.get("build_frames")) or not _non_negative_int(item.get("commission_frames")):
+        if not {"def", "build_frames", "commission_frames"} <= set(item) <= {"def", "build_frames", "commission_frames", "capabilities", "speed_factor", "carries_parts"} or not _identifier(item.get("def")) or not _non_negative_int(item.get("build_frames")) or not _non_negative_int(item.get("commission_frames")):
+            raise ScenarioError("invalid chassis definition")
+        if ("speed_factor" in item and not _speed_factor(item["speed_factor"])) or ("carries_parts" in item and not isinstance(item["carries_parts"], bool)):
             raise ScenarioError("invalid chassis definition")
     if any(not _non_negative_int(amount) for amount in chips.values()):
         raise ScenarioError("invalid chip inventory")
-    if not {"chip"} <= set(commander) <= {"chip", "position", "capabilities"} or commander.get("chip") not in chips:
+    if not {"chip"} <= set(commander) <= {"chip", "position", "capabilities", "speed_factor"} or commander.get("chip") not in chips \
+            or ("speed_factor" in commander and not _speed_factor(commander["speed_factor"])):
         raise ScenarioError("invalid commander")
     if "position" in commander:
         _coordinates(commander["position"], "commander position", 2)
@@ -90,6 +125,7 @@ def _validate(table: Any, scenario_name: str) -> dict[str, Any]:
         mission = _mapping(root["mission"], "mission")
         if set(mission) != {"timeout_frames"} or not _non_negative_int(mission["timeout_frames"]) or mission["timeout_frames"] == 0:
             raise ScenarioError("invalid mission")
+    _validate_mission_v2(root, chassis)
     if "briefing" in root:
         briefing = _mapping(root["briefing"], "briefing")
         if set(briefing) != {"title", "text"} or any(
