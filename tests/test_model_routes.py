@@ -43,7 +43,7 @@ class OpenAICompatibleRouteTests(unittest.TestCase):
         self.assertEqual(seen["authorization"], "Bearer test-only-secret")
         self.assertEqual(seen["body"], {
             "model": "openai/gpt-oss-120b", "stream": False, "max_tokens": 4096,
-            "reasoning": {"enabled": True, "max_tokens": 1500, "effort": "low", "exclude": True},
+            "reasoning": {"enabled": True, "max_tokens": 1500},
             "messages": [{"role": "system", "content": "bonded prompt"},
                          {"role": "user", "content": "current bounded observation"}],
         })

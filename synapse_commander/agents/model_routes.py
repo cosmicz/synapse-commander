@@ -29,7 +29,8 @@ DEFAULT_MAX_TOKENS = 512
 OPENROUTER_MAX_TOKENS = 4096
 # A reasoning budget keeps room for the answer: replayed commander prompts that
 # failed at 1200 answered 3 of 3 with this budget under the 4096 cap.
-OPENROUTER_REASONING = {"enabled": True, "max_tokens": 1500, "effort": "low", "exclude": True}
+# OpenRouter answers HTTP 400 when effort and max_tokens are both set (live, 17:0x).
+OPENROUTER_REASONING = {"enabled": True, "max_tokens": 1500}
 RESERVED_BODY_KEYS = frozenset({"model", "messages", "stream", "max_tokens"})
 USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "cost")
 
