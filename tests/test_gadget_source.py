@@ -203,10 +203,18 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn('effect_to_target_viewers("comms_restored"', self.source)
         self.assertIn('if scenario.entrapment and scenario.entrapment.beacon_fix then', self.source)
         self.assertIn('distress.fix = reports[1] and reports[1].fix', self.source)
+        self.assertIn('reference = "north_clockwise"', self.source)
+        self.assertIn('beacon_truth = entrapment_state and entrapment_state.beacon_truth', self.source)
+        self.assertIn('if entrapment_state and entrapment_state.beacon_only', self.source)
         observation = self.source[self.source.index("if principal_mode then", self.source.index("function gadget:GameFrame")):]
         self.assertIn('if isolated and own_body then own_body.pos = nil end', observation)
         self.assertIn('relative_entity_for(bodyID, unitID', observation)
         self.assertIn('local prohibited = isolated', observation)
+
+    def test_world_init_and_projection_guard_unspawned_assets(self) -> None:
+        world_init = function_body(self.source, "local function world_init_record")
+        self.assertIn('type(a.unit_id) == "number" and Spring.ValidUnitID(a.unit_id)', world_init)
+        self.assertIn('type(unitID) ~= "number" or not Spring.ValidUnitID(unitID)', self.source)
 
     def test_link_reducer_normalizes_ids_before_canonical_ordering(self) -> None:
         reducer = function_body(self.source, "local function recompute_links")

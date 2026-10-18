@@ -217,14 +217,22 @@ if gadgetHandler:IsSyncedCode() then
       and entrapment_state.target == principal
   end
 
-  local function beacon_bearing(from_x, from_z, target_x, target_z, error_deg, seed)
+  local function compass_bearing(from_x, from_z, target_x, target_z)
     local dx, dz = target_x - from_x, target_z - from_z
-    local angle = math.deg(math.atan(dz / (dx == 0 and 0.000001 or dx)))
-    if dx < 0 then angle = angle + 180 end
+    -- Compass convention: 0=north (-z), 90=east (+x), clockwise.
+    local north = -dz
+    local angle = math.deg(math.atan(dx / (north == 0 and 0.000001 or north)))
+    if north < 0 then angle = angle + 180 end
     if angle < 0 then angle = angle + 360 end
-    -- The table seed is the complete source of the bounded perturbation.
-    local offset = (((seed or 0) % 2001) / 1000 - 1) * error_deg
-    return (angle + offset + 360) % 360
+    return angle % 360
+  end
+
+  local function beacon_bearing(from_x, from_z, target_x, target_z, error_deg, seed, asset)
+    local key = seed or 0
+    for i = 1, #(asset or "") do key = (key * 33 + string.byte(asset, i)) % 2001 end
+    local offset = (key / 1000 - 1) * error_deg
+    local truth = compass_bearing(from_x, from_z, target_x, target_z)
+    return truth, offset, (truth + offset + 360) % 360
   end
 
   -- The pinned engine exports TraceRayGroundBetweenPositions to synced Lua.
@@ -250,6 +258,7 @@ if gadgetHandler:IsSyncedCode() then
   end
 
   local function unit_sensor_range(unitID)
+    if type(unitID) ~= "number" or not Spring.ValidUnitID(unitID) then return 0 end
     local definition = UnitDefs[Spring.GetUnitDefID(unitID)] or {}
     local radius = scenario and scenario.sensors and scenario.sensors[definition.name] or nil
     radius = radius or definition.losRadius or 0
@@ -262,6 +271,8 @@ if gadgetHandler:IsSyncedCode() then
   end
 
   local function detects(observer, target)
+    if type(observer) ~= "number" or type(target) ~= "number"
+      or not Spring.ValidUnitID(observer) or not Spring.ValidUnitID(target) then return false end
     if observer == target then return true end
     local ox, oy, oz = Spring.GetUnitPosition(observer)
     local tx, ty, tz = Spring.GetUnitPosition(target)
@@ -293,6 +304,7 @@ if gadgetHandler:IsSyncedCode() then
   end
 
   local function apply_speed(unitID, health_factor, held)
+    if type(unitID) ~= "number" or not Spring.ValidUnitID(unitID) then return nil end
     local definition = UnitDefs[Spring.GetUnitDefID(unitID)]
     if Spring.MoveCtrl and Spring.MoveCtrl.SetGroundMoveTypeData and definition and definition.speed then
       local speed = held and 0 or math.min(definition.speed, definition.speed * speed_factor_for_unit(unitID) * (health_factor or 1))
@@ -395,6 +407,7 @@ if gadgetHandler:IsSyncedCode() then
   end
 
   local function entity_for(unitID, source)
+    if type(unitID) ~= "number" or not Spring.ValidUnitID(unitID) then return nil end
     local x, y, z = Spring.GetUnitPosition(unitID)
     if not x then return nil end
     local definition = UnitDefs[Spring.GetUnitDefID(unitID)]
@@ -429,12 +442,9 @@ if gadgetHandler:IsSyncedCode() then
     local tx, _, tz = Spring.GetUnitPosition(unitID)
     if not ox or not tx then return nil end
     local dx, dz = tx - ox, tz - oz
-    local angle = math.deg(math.atan(dz / (dx == 0 and 0.000001 or dx)))
-    if dx < 0 then angle = angle + 180 end
-    if angle < 0 then angle = angle + 360 end
     entity.pos = nil
     entity.distance = math.floor(math.sqrt(dx * dx + dz * dz) + 0.5)
-    entity.bearing_deg = math.floor(angle + 0.5) % 360
+    entity.bearing_deg = math.floor(compass_bearing(ox, oz, tx, tz) + 0.5) % 360
     return entity
   end
 
@@ -764,9 +774,12 @@ if gadgetHandler:IsSyncedCode() then
     local carried = 0
     for _, name in ipairs(asset_order) do
       local a = assets[name]
-      if a.unit_id and carrying_parts[a.unit_id] then carried = carried + 1 end
-      speed_factors.bodies[name] = { factor = a.speed_factor or (chassis_for_unit(a.unit_id) and scenario.chassis[chassis_for_unit(a.unit_id)].speed_factor) or 1,
-                                     max_speed = a.applied_max_speed or Json.null }
+      if type(a.unit_id) == "number" and Spring.ValidUnitID(a.unit_id) then
+        if carrying_parts[a.unit_id] then carried = carried + 1 end
+        local chassis = chassis_for_unit(a.unit_id)
+        speed_factors.bodies[name] = { factor = a.speed_factor or (chassis and scenario.chassis[chassis].speed_factor) or 1,
+                                       max_speed = a.applied_max_speed or Json.null }
+      end
     end
     local parts_total = scenario.resources and scenario.resources.parts or 0
     local parts_state = { total = parts_total, carried = carried, consumed = parts_consumed, available = resources and resources.parts or 0 }
@@ -786,6 +799,7 @@ if gadgetHandler:IsSyncedCode() then
       commander = commander and { unit_id = commander.unit_id, chip = commander.chip, position = commander.position or Json.null } or Json.null,
       assets = truth, inventory = inventory, inventory_consistent = consistent,
       distress = distress,
+      beacon_truth = entrapment_state and entrapment_state.beacon_truth or Json.null,
       link_check = link_check,
       terrain_occlusion = terrain_method, impairment = impaired and "persistent" or Json.null,
       principal_bodies = principal_bodies, speed_factors = speed_factors,
@@ -882,8 +896,14 @@ if gadgetHandler:IsSyncedCode() then
         local tx, _, tz = Spring.GetUnitPosition(target.unit_id)
         if fix.kind == "bearing" and commander and commander.unit_id and tx then
           local cx, _, cz = Spring.GetUnitPosition(commander.unit_id)
-          if cx then report.fix = { kind = "bearing", from = "commander",
-                                    bearing_deg = beacon_bearing(cx, cz, tx, tz, fix.error_deg, scenario.seed) } end
+          if cx then
+            local truth, offset, bearing = beacon_bearing(cx, cz, tx, tz, fix.error_deg, scenario.seed, d.asset)
+            report.fix = { kind = "bearing", from = "commander", bearing_deg = bearing,
+                           reference = "north_clockwise" }
+            if entrapment_state then
+              entrapment_state.beacon_truth = { true_bearing_deg = truth, applied_error_deg = offset }
+            end
+          end
         elseif fix.kind == "quadrant" and tx then
           report.fix = { kind = "quadrant", cell_x = math.floor(tx / fix.cell_elmos),
                          cell_z = math.floor(tz / fix.cell_elmos), cell_elmos = fix.cell_elmos }
@@ -1257,7 +1277,7 @@ if gadgetHandler:IsSyncedCode() then
       stop_unit(unitID)
       emit_receipt(intent, "rejected", "immobilised"); return true
     end
-    if payload.verb == "move_to" and entrapment_state and entrapment_state.beacon_only
+    if entrapment_state and entrapment_state.beacon_only
       and entrapment_state.unit_id == unitID and not entrapment_state.coordinates_delivered then
       emit_receipt(intent, "rejected", "no_position"); return true
     end
