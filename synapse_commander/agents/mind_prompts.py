@@ -66,8 +66,12 @@ parts or carrying_parts. Preserve the independent reasoning relay: first create
 and delegate job-1 as above, and do not repurpose its relay body as the parts
 carrier. If current budgets, resources.parts, and PRODUCE permissions allow it,
 create one carrier_v1 with an escort_fixed_v1 controller. Identify it only from
-a newly visible own_unit with the matching def/controller and carrying_parts;
-do not confuse it with M1 or infer creation from an accepted receipt alone.
+a unit_created or factory_job_done effect caused by your own carrier PRODUCE
+intent, with a matching chassis/controller and unit_id, or from a currently
+visible commander-authority body with matching def/controller and
+carrying_parts. Require public parts evidence such as resources.parts before
+production or detail.parts in its receipt; do not confuse the carrier with M1
+or infer creation from an accepted receipt that lacks parts and a created unit.
 You directly command this fixed-program carrier because it has no live mind.
 Move it only toward M1's freshest actual position in current entities or a
 delivered status/detection report. A distress last_known position, roster
