@@ -147,6 +147,18 @@ if gadgetHandler:IsSyncedCode() then
         if type(chassis) ~= "string" or listed[chassis] or not t.chassis[chassis] or not t.chassis[chassis].carries_parts then return nil, "invalid_entrapment" end
         listed[chassis] = true
       end
+      if entrapment.beacon_only ~= nil and type(entrapment.beacon_only) ~= "boolean" then return nil, "invalid_entrapment" end
+      if entrapment.beacon_fix ~= nil then
+        local fix = entrapment.beacon_fix
+        if type(fix) ~= "table" or (fix.kind ~= "bearing" and fix.kind ~= "quadrant") then return nil, "invalid_entrapment" end
+        if fix.kind == "bearing" then
+          if fix.from ~= "commander" or type(fix.error_deg) ~= "number" or fix.error_deg < 0 or fix.error_deg > 90 then return nil, "invalid_entrapment" end
+        elseif not count(fix.cell_elmos) or fix.cell_elmos < 1 or fix.cell_elmos > 8192 then
+          return nil, "invalid_entrapment"
+        end
+      elseif entrapment.beacon_only then
+        return nil, "invalid_entrapment"
+      end
     end
     local exposure = t.exposure
     if exposure ~= nil then
@@ -195,6 +207,26 @@ if gadgetHandler:IsSyncedCode() then
     return (x1 - x2) * (x1 - x2) + (z1 - z2) * (z1 - z2)
   end
 
+  local function beacon_isolated(unitID)
+    return entrapment_state and entrapment_state.beacon_only and not entrapment_state.delivered
+      and entrapment_state.unit_id == unitID
+  end
+
+  local function beacon_principal(principal)
+    return entrapment_state and entrapment_state.beacon_only and not entrapment_state.delivered
+      and entrapment_state.target == principal
+  end
+
+  local function beacon_bearing(from_x, from_z, target_x, target_z, error_deg, seed)
+    local dx, dz = target_x - from_x, target_z - from_z
+    local angle = math.deg(math.atan(dz / (dx == 0 and 0.000001 or dx)))
+    if dx < 0 then angle = angle + 180 end
+    if angle < 0 then angle = angle + 360 end
+    -- The table seed is the complete source of the bounded perturbation.
+    local offset = (((seed or 0) % 2001) / 1000 - 1) * error_deg
+    return (angle + offset + 360) % 360
+  end
+
   -- The pinned engine exports TraceRayGroundBetweenPositions to synced Lua.
   -- Keep the sampling fallback because a missing/changed export must fail
   -- closed as a terrain occluder rather than silently falling back to team LOS.
@@ -238,8 +270,12 @@ if gadgetHandler:IsSyncedCode() then
   end
 
   local function chassis_for_unit(unitID)
-    if not scenario then return nil end
-    local definition = UnitDefs[Spring.GetUnitDefID(unitID)]
+    -- A destroyed or never-spawned asset has no numeric unit id (live-11: H0 is
+    -- spawned destroyed), and a stale id may already be invalid; neither may
+    -- reach the engine lookup.
+    if not scenario or type(unitID) ~= "number" or not Spring.ValidUnitID(unitID) then return nil end
+    local defID = Spring.GetUnitDefID(unitID)
+    local definition = defID and UnitDefs[defID]
     for id, chassis in pairs(scenario.chassis) do
       if definition and chassis.def == definition.name then return id end
     end
@@ -319,9 +355,19 @@ if gadgetHandler:IsSyncedCode() then
     if not principal_mode then return end
     local units, reachable, queue = {}, {}, {}
     for _, unitID in ipairs(Spring.GetTeamUnits(TEAM0) or {}) do
-      if Spring.ValidUnitID(unitID) then units[#units + 1] = unitID end
+      -- The engine boundary is numeric.  Normalize before using an id in an
+      -- API call or ordering it: an unexpected proxy value must be skipped,
+      -- not reach GetUnitDefID through the link reducer.
+      unitID = tonumber(unitID)
+      if unitID and Spring.ValidUnitID(unitID) then units[#units + 1] = unitID end
     end
-    table.sort(units)
+    -- Avoid the BAR gadget environment's patched table.sort path here.  This
+    -- small bounded insertion sort preserves deterministic numeric ordering.
+    for i = 2, #units do
+      local item, j = units[i], i - 1
+      while j >= 1 and units[j] > item do units[j + 1] = units[j]; j = j - 1 end
+      units[j + 1] = item
+    end
     for _, unitID in ipairs(units) do
       if is_hq_node(unitID) then reachable[unitID] = true; queue[#queue + 1] = unitID end
     end
@@ -343,6 +389,7 @@ if gadgetHandler:IsSyncedCode() then
     end
     for _, unitID in ipairs(units) do
       local prior, current = links[unitID], reachable[unitID] == true
+      if beacon_isolated(unitID) then current = false end
       links[unitID] = current
       if prior ~= nil and prior ~= current then
         local principal = principal_for_unit(unitID)
@@ -379,6 +426,22 @@ if gadgetHandler:IsSyncedCode() then
       end
     end
     return body
+  end
+
+  local function relative_entity_for(observerID, unitID, source)
+    local entity = entity_for(unitID, source)
+    if not entity then return nil end
+    local ox, _, oz = Spring.GetUnitPosition(observerID)
+    local tx, _, tz = Spring.GetUnitPosition(unitID)
+    if not ox or not tx then return nil end
+    local dx, dz = tx - ox, tz - oz
+    local angle = math.deg(math.atan(dz / (dx == 0 and 0.000001 or dx)))
+    if dx < 0 then angle = angle + 180 end
+    if angle < 0 then angle = angle + 360 end
+    entity.pos = nil
+    entity.distance = math.floor(math.sqrt(dx * dx + dz * dz) + 0.5)
+    entity.bearing_deg = math.floor(angle + 0.5) % 360
+    return entity
   end
 
   local function out(kind, body)
@@ -714,12 +777,21 @@ if gadgetHandler:IsSyncedCode() then
     local parts_total = scenario.resources and scenario.resources.parts or 0
     local parts_state = { total = parts_total, carried = carried, consumed = parts_consumed, available = resources and resources.parts or 0 }
     parts_state.consistent = parts_state.total == parts_state.carried + parts_state.consumed + parts_state.available
+    local distress = Json.null
+    if d then
+      distress = { asset = d.asset, symptom = d.symptom, cause_hidden = d.cause_hidden,
+                   observed_frame = reports[1] and reports[1].observed_frame }
+      if scenario.entrapment and scenario.entrapment.beacon_fix then
+        distress.fix = reports[1] and reports[1].fix or Json.null
+      else
+        distress.last_known = reports[1] and reports[1].position or Json.null
+      end
+    end
     return {
       name = "world_init", id = scenario.id, version = scenario.version, seed = scenario.seed or Json.null, frame = frame,
       commander = commander and { unit_id = commander.unit_id, chip = commander.chip, position = commander.position or Json.null } or Json.null,
       assets = truth, inventory = inventory, inventory_consistent = consistent,
-      distress = d and { asset = d.asset, symptom = d.symptom, cause_hidden = d.cause_hidden,
-                         last_known = reports[1] and reports[1].position, observed_frame = reports[1] and reports[1].observed_frame } or Json.null,
+      distress = distress,
       link_check = link_check,
       terrain_occlusion = terrain_method, impairment = impaired and "persistent" or Json.null,
       principal_bodies = principal_bodies, speed_factors = speed_factors,
@@ -785,7 +857,9 @@ if gadgetHandler:IsSyncedCode() then
       local target = assets[scenario.entrapment.asset]
       if target and target.unit_id then
         entrapment_state = { config = scenario.entrapment, target = scenario.entrapment.asset,
-                             unit_id = target.unit_id, delivered = false, frames = {} }
+                             unit_id = target.unit_id, delivered = false, frames = {},
+                             beacon_only = scenario.entrapment.beacon_only == true,
+                             coordinates_delivered = false }
         stop_unit(target.unit_id)
         apply_speed(target.unit_id, target.health or 1, true)
         effect("immobilised", frame, target.unit_id, nil,
@@ -803,12 +877,28 @@ if gadgetHandler:IsSyncedCode() then
     end
     recompute_links(frame)
     if d then
-      -- The team starts with this already received, aged report and nothing else
-      -- about the asset; the cause stays in the evaluator-only record.
-      local px, pz = x + d.last_known.position[1], z + d.last_known.position[2]
-      reports[1] = { kind = "distress", asset = d.asset, position = { px, Spring.GetGroundHeight(px, pz), pz },
-                     observed_frame = frame - d.last_known.age_frames, delivered_frame = frame,
-                     age_frames = d.last_known.age_frames, symptom = d.symptom }
+      -- A beacon-only table exposes one deliberately coarse fix, never a
+      -- position or stale marker.  The cause stays evaluator-only.
+      local report = { kind = "distress", asset = d.asset,
+                       observed_frame = frame - d.last_known.age_frames, delivered_frame = frame,
+                       age_frames = d.last_known.age_frames, symptom = d.symptom }
+      local fix = scenario.entrapment and scenario.entrapment.beacon_fix
+      local target = assets[d.asset]
+      if fix and target and target.unit_id then
+        local tx, _, tz = Spring.GetUnitPosition(target.unit_id)
+        if fix.kind == "bearing" and commander and commander.unit_id and tx then
+          local cx, _, cz = Spring.GetUnitPosition(commander.unit_id)
+          if cx then report.fix = { kind = "bearing", from = "commander",
+                                    bearing_deg = beacon_bearing(cx, cz, tx, tz, fix.error_deg, scenario.seed) } end
+        elseif fix.kind == "quadrant" and tx then
+          report.fix = { kind = "quadrant", cell_x = math.floor(tx / fix.cell_elmos),
+                         cell_z = math.floor(tz / fix.cell_elmos), cell_elmos = fix.cell_elmos }
+        end
+      else
+        local px, pz = x + d.last_known.position[1], z + d.last_known.position[2]
+        report.position = { px, Spring.GetGroundHeight(px, pz), pz }
+      end
+      reports[1] = report
     end
     out("scenario", world_init_record(frame))
     return true
@@ -895,7 +985,7 @@ if gadgetHandler:IsSyncedCode() then
                            observed_frame = frame, body = entity_for(source, "sensor") }
         queue_report({ due = frame + scenario.comms.latency_frames, from = source, to = target_principal, body = observed })
         for _, candidate in ipairs(Spring.GetAllUnits()) do
-          if candidate ~= source and detects(source, candidate) then
+          if candidate ~= source and not beacon_isolated(candidate) and detects(source, candidate) then
             queue_report({ due = frame + scenario.comms.latency_frames, from = source, to = target_principal,
                            body = { kind = "detection", from = entity_names[source] or target_principal,
                                     observed_frame = frame, entity = entity_for(candidate, "sensor") } })
@@ -913,10 +1003,19 @@ if gadgetHandler:IsSyncedCode() then
         remaining[#remaining + 1] = report
       elseif report.message then
         local sender, recipient = body_for_principal(report.from), body_for_principal(report.to)
-        if sender and recipient and links[sender] and links[recipient] then
+        if recipient and beacon_isolated(recipient) then
+          effect("message_dropped", frame, sender, report.intent_id, { reason = "comms_destroyed", to = report.to }, report.from)
+        elseif sender and recipient and links[sender] and links[recipient] then
           local body = { kind = "message", from = report.from, text = report.text, observed_frame = report.observed_frame,
                          delivered_frame = frame, age_frames = frame - report.observed_frame }
           remember_report(report.to, body)
+          if entrapment_state and entrapment_state.delivered and entrapment_state.target == report.to then
+            local px, pz = report.text:match("^EXTRACT%s+(-?%d+)%s+(-?%d+)%s*$")
+            px, pz = tonumber(px), tonumber(pz)
+            if px and pz and px >= 0 and pz >= 0 and px <= Game.mapSizeX and pz <= Game.mapSizeZ then
+              entrapment_state.coordinates_delivered = true
+            end
+          end
           effect("message_delivered", frame, recipient, report.intent_id, { to = report.to }, report.to)
           effect("message_delivered", frame, sender, report.intent_id, { to = report.to }, report.from)
         else
@@ -1014,6 +1113,9 @@ if gadgetHandler:IsSyncedCode() then
     local detail = { target = state.target, by = by, unit_id = state.unit_id }
     effect_to_target_viewers("parts_delivered", frame, state.target, state.unit_id, detail)
     effect_to_target_viewers("mobility_restored", frame, state.target, state.unit_id, { target = state.target })
+    if state.beacon_only then
+      effect_to_target_viewers("comms_restored", frame, state.target, state.unit_id, { target = state.target })
+    end
   end
 
   local function update_exposure_state(frame)
@@ -1100,6 +1202,7 @@ if gadgetHandler:IsSyncedCode() then
       local payload, frame = intent.payload, Spring.GetGameFrame()
       if type(payload.to) ~= "string" or not principals[payload.to] then emit_receipt(intent, "rejected", "unknown_principal"); return true end
       if type(payload.text) ~= "string" or #payload.text > 256 then emit_receipt(intent, "rejected", "invalid_payload"); return true end
+      if beacon_principal(principal) then emit_receipt(intent, "rejected", "comms_destroyed"); return true end
       if not use_token(principal, frame) then emit_receipt(intent, "rejected", "rate_limited"); return true end
       emit_receipt(intent, "accepted", nil)
       effect("message_sent", frame, body_for_principal(principal), id, { to = payload.to }, principal)
@@ -1122,7 +1225,15 @@ if gadgetHandler:IsSyncedCode() then
         emit_receipt(intent, "rejected", "move_target_invalid"); return true
       end
       target = { tx, Spring.GetGroundHeight(tx, tz), tz }
-      if Spring.TestMoveOrder and not Spring.TestMoveOrder(Spring.GetUnitDefID(tonumber(payload.unit or payload.unit_id)), tx, target[2], tz) then
+      -- A late order for a body that is already extracted or destroyed must be
+      -- refused like any id outside the sender's view (live-12: TestMoveOrder was
+      -- handed a nil definition and the gadget faulted).
+      local moverID = tonumber(payload.unit or payload.unit_id)
+      local moverDef = moverID and Spring.ValidUnitID(moverID) and Spring.GetUnitDefID(moverID) or nil
+      if not moverDef then
+        emit_receipt(intent, "rejected", "unknown_unit"); return true
+      end
+      if Spring.TestMoveOrder and not Spring.TestMoveOrder(moverDef, tx, target[2], tz) then
         emit_receipt(intent, "rejected", "move_target_invalid"); return true
       end
     else
@@ -1151,6 +1262,10 @@ if gadgetHandler:IsSyncedCode() then
       or (exposure_state and exposure_state.immobilised and exposure_state.unit_id == unitID) then
       stop_unit(unitID)
       emit_receipt(intent, "rejected", "immobilised"); return true
+    end
+    if payload.verb == "move_to" and entrapment_state and entrapment_state.beacon_only
+      and entrapment_state.unit_id == unitID and not entrapment_state.coordinates_delivered then
+      emit_receipt(intent, "rejected", "no_position"); return true
     end
     local frame = Spring.GetGameFrame()
     local problem = freshness_problem(intent, principal_mode and principal or teamID, frame)
@@ -1234,12 +1349,17 @@ if gadgetHandler:IsSyncedCode() then
       for _, principal in ipairs(principal_order) do
         local bodyID = body_for_principal(principal)
         if bodyID then
-          local entities = { entity_for(bodyID, "own_body") }
+          local isolated = beacon_principal(principal)
+          local own_body = entity_for(bodyID, "own_body")
+          if isolated and own_body then own_body.pos = nil end
+          local entities = { own_body }
           for _, unitID in ipairs(Spring.GetAllUnits()) do
             local authority_body = principal == "commander" and unitID ~= bodyID and Spring.GetUnitTeam(unitID) == TEAM0
               and embodied[unitID] and not unit_principal[unitID] and links[unitID] == true
-            if unitID ~= bodyID and (authority_body or detects(bodyID, unitID)) then
-              local entity = entity_for(unitID, authority_body and "own_unit" or "sensor")
+            local prohibited = isolated and ((commander and unitID == commander.unit_id) or (factory and unitID == factory.unit_id))
+            if unitID ~= bodyID and not prohibited and (authority_body or detects(bodyID, unitID)) then
+              local entity = isolated and relative_entity_for(bodyID, unitID, authority_body and "own_unit" or "sensor")
+                or entity_for(unitID, authority_body and "own_unit" or "sensor")
               if entity then entities[#entities + 1] = entity end
             end
           end
@@ -1248,7 +1368,7 @@ if gadgetHandler:IsSyncedCode() then
           for i, report in ipairs(delivered_reports[principal] or {}) do listed_reports[i] = report end
           local body = { schema = "ObservationFrame/v1", principal = principal,
                          observation_id = "obs-" .. principal .. "-" .. frame, team = TEAM0, frame = frame,
-                         body = entity_for(bodyID, "own_body"), entities = entities,
+                         body = own_body, entities = entities,
                          reports = listed_reports, truncated = false, omitted = 0,
                          scenario = { id = scenario.id, version = scenario.version },
                          permitted_intents = { { type = "TASK", verbs = { "advance", "move_to" } }, { type = "MESSAGE" } } }

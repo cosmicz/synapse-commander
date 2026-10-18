@@ -191,6 +191,29 @@ class GadgetSourceContractTests(unittest.TestCase):
         self.assertIn("state.immobilised = true", update)
         self.assertIn('body.immobilised, body.reason = true, "exposure"', self.source)
 
+    def test_beacon_only_hides_positions_and_requires_physical_comms_repair(self) -> None:
+        self.assertIn('entrapment.beacon_only', self.source)
+        self.assertIn('entrapment.beacon_fix', self.source)
+        self.assertIn('local function beacon_isolated', self.source)
+        self.assertIn('if beacon_isolated(unitID) then current = false end', self.source)
+        self.assertIn('not beacon_isolated(candidate)', self.source)
+        self.assertIn('reason = "comms_destroyed"', self.source)
+        self.assertIn('emit_receipt(intent, "rejected", "comms_destroyed")', self.source)
+        self.assertIn('emit_receipt(intent, "rejected", "no_position")', self.source)
+        self.assertIn('effect_to_target_viewers("comms_restored"', self.source)
+        self.assertIn('if scenario.entrapment and scenario.entrapment.beacon_fix then', self.source)
+        self.assertIn('distress.fix = reports[1] and reports[1].fix', self.source)
+        observation = self.source[self.source.index("if principal_mode then", self.source.index("function gadget:GameFrame")):]
+        self.assertIn('if isolated and own_body then own_body.pos = nil end', observation)
+        self.assertIn('relative_entity_for(bodyID, unitID', observation)
+        self.assertIn('local prohibited = isolated', observation)
+
+    def test_link_reducer_normalizes_ids_without_engine_table_sort(self) -> None:
+        reducer = function_body(self.source, "local function recompute_links")
+        self.assertIn("unitID = tonumber(unitID)", reducer)
+        self.assertIn("bounded insertion sort", reducer)
+        self.assertNotIn("table.sort(units)", reducer)
+
 
 class FactoryProvisioningSourceTests(unittest.TestCase):
     """Loop 1 (rah26-8zp) contract for the synced reducer.
