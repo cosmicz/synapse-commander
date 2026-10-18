@@ -379,6 +379,13 @@ class RouteSelectionTests(unittest.TestCase):
         self.assertEqual(build_parser().parse_args(base).route, "claude")
 
 
+class AgentsRequiredDecisionTests(unittest.TestCase):
+    def test_delegation_must_be_addressed_to_the_created_child(self):
+        from synapse_commander.run import AGENTS_REQUIRED_DECISIONS
+        delegate = next(d for d in AGENTS_REQUIRED_DECISIONS if d["label"] == "delegate")
+        self.assertEqual((delegate["principal"], delegate["type"], delegate["to"]), ("commander", "MESSAGE", "job-1"))
+
+
 class AgentsAutonomyTests(unittest.TestCase):
     def test_an_agent_only_ledger_does_not_fail_an_agents_run(self):
         from types import SimpleNamespace

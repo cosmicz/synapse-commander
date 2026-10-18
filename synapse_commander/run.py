@@ -52,7 +52,8 @@ AGENT_PRINCIPAL = "agent-commander"
 # LiveMind decision labels: PRODUCE create_agent, MESSAGE delegate, TASK the mind's task label.
 AGENTS_REQUIRED_DECISIONS = [
     {"label": "create_agent", "principal": "commander", "type": "PRODUCE"},
-    {"label": "delegate", "principal": "commander", "type": "MESSAGE"},
+    # Delegation is a commander message to the child it created, not any message (to M1 included).
+    {"label": "delegate", "principal": "commander", "type": "MESSAGE", "to": "job-1"},
     {"label": "relay_move", "principal": "job-1", "type": "TASK"},
     {"label": "return_home", "principal": "M1", "type": "TASK"},
 ]
