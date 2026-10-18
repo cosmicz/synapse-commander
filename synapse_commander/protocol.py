@@ -234,6 +234,65 @@ def _uses_exposure(scenario_table: Mapping[str, Any] | None) -> bool:
     return scenario_table is not None and isinstance(scenario_table.get("exposure"), Mapping)
 
 
+def _beacon_only_principal(scenario_table: Mapping[str, Any] | None, principal: str | None) -> bool:
+    """Whether this principal has the deliberately positionless §10 view."""
+    if scenario_table is None or principal is None:
+        return False
+    entrapment = scenario_table.get("entrapment")
+    return _uses_beacon_only(scenario_table) and entrapment.get("asset") == principal
+
+
+def _uses_beacon_only(scenario_table: Mapping[str, Any] | None) -> bool:
+    if scenario_table is None:
+        return False
+    entrapment = scenario_table.get("entrapment")
+    return (isinstance(entrapment, Mapping) and entrapment.get("until") == "parts_delivered"
+            and entrapment.get("beacon_only") is True)
+
+
+def _bounded_relative(value: Any, field: str, *, minimum: int, maximum: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
+        raise ProtocolError("invalid_observation", f"{field} must be a bounded integer")
+    return value
+
+
+def _bounded_beacon_fix(value: Any, scenario_table: Mapping[str, Any] | None) -> dict[str, Any]:
+    entrapment = {} if scenario_table is None else scenario_table.get("entrapment", {})
+    declared = entrapment.get("beacon_fix") if isinstance(entrapment, Mapping) else None
+    if not isinstance(declared, Mapping) or not isinstance(value, Mapping):
+        raise ProtocolError("invalid_observation", "invalid beacon fix")
+    if declared.get("kind") == "bearing":
+        if (set(value) != {"kind", "from", "bearing_deg"} or value.get("kind") != "bearing"
+                or value.get("from") != "commander"):
+            raise ProtocolError("invalid_observation", "invalid bearing fix")
+        return {"kind": "bearing", "from": "commander",
+                "bearing_deg": _bounded_relative(value.get("bearing_deg"), "bearing_deg", minimum=-360, maximum=360)}
+    if declared.get("kind") == "quadrant":
+        if (set(value) != {"kind", "cell_x", "cell_z", "cell_elmos"}
+                or value.get("kind") != "quadrant" or value.get("cell_elmos") != declared.get("cell_elmos")):
+            raise ProtocolError("invalid_observation", "invalid quadrant fix")
+        return {"kind": "quadrant", "cell_x": _public_count(value.get("cell_x"), "cell_x"),
+                "cell_z": _public_count(value.get("cell_z"), "cell_z"),
+                "cell_elmos": _public_count(value.get("cell_elmos"), "cell_elmos")}
+    raise ProtocolError("invalid_observation", "invalid declared beacon fix")
+
+
+def _strip_absolute_coordinates(value: Any) -> Any:
+    """Remove coordinates from a positionless principal's otherwise public event."""
+    if isinstance(value, Mapping):
+        public: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {"pos", "position", "last_known"}:
+                continue
+            if key == "target" and isinstance(item, list) and 2 <= len(item) <= 3 and all(type(n) in (int, float) and math.isfinite(n) for n in item):
+                continue
+            public[key] = _strip_absolute_coordinates(item)
+        return public
+    if isinstance(value, list):
+        return [_strip_absolute_coordinates(item) for item in value]
+    return value
+
+
 def _bounded_resources(value: Any, scenario_table: Mapping[str, Any] | None,
                        principal: str | None) -> dict[str, Any]:
     """Keep the v2 parts stock commander-only without widening legacy views."""
@@ -248,11 +307,14 @@ def _bounded_resources(value: Any, scenario_table: Mapping[str, Any] | None,
     return {"parts": _public_count(value.get("parts"), "resources.parts")}
 
 
-def _bounded_v2_effects(effects: list[Any], scenario_table: Mapping[str, Any] | None) -> list[Any]:
+def _bounded_v2_effects(effects: list[Any], scenario_table: Mapping[str, Any] | None,
+                        principal: str | None = None) -> list[Any]:
     """Retain v1 event compatibility while fail-closing the new repair effects."""
     parts_entrapment = _uses_parts_entrapment(scenario_table)
     exposure = _uses_exposure(scenario_table)
-    if not parts_entrapment and not exposure:
+    beacon_only = _beacon_only_principal(scenario_table, principal)
+    beacon_scenario = _uses_beacon_only(scenario_table)
+    if not parts_entrapment and not exposure and not beacon_only:
         return effects
     entrapment = scenario_table.get("entrapment", {})
     asset = entrapment.get("asset")
@@ -266,7 +328,8 @@ def _bounded_v2_effects(effects: list[Any], scenario_table: Mapping[str, Any] | 
             public.append(effect)
             continue
         name = effect.get("effect")
-        repair = parts_entrapment and name in {"parts_delivered", "mobility_restored"}
+        repair = parts_entrapment and (name in {"parts_delivered", "mobility_restored"}
+                                       or (beacon_scenario and name == "comms_restored"))
         critical = exposure and name == "exposure_critical"
         if not repair and not critical:
             public.append(effect)
@@ -286,9 +349,9 @@ def _bounded_v2_effects(effects: list[Any], scenario_table: Mapping[str, Any] | 
             if by not in known_by and not re.fullmatch(r"job-[0-9]{1,8}", by):
                 raise ProtocolError("invalid_observation", "parts delivery source is unknown")
             public_detail = {"target": asset, "by": by, "unit_id": unit_id}
-        elif name == "mobility_restored":
+        elif name in {"mobility_restored", "comms_restored"}:
             if set(detail) != {"target"}:
-                raise ProtocolError("invalid_observation", "mobility effect has invalid detail")
+                raise ProtocolError("invalid_observation", "restoration effect has invalid detail")
             public_detail = {"target": asset}
         else:
             if set(detail) != {"target", "unit_id"} or detail.get("unit_id") != unit_id:
@@ -303,7 +366,7 @@ def _bounded_v2_effects(effects: list[Any], scenario_table: Mapping[str, Any] | 
             else:
                 item["intent_id"] = None
         public.append(item)
-    return public
+    return [_strip_absolute_coordinates(effect) for effect in public] if beacon_only else public
 
 
 def _bounded_factory_observation(value: Any, scenario: Mapping[str, Any]) -> tuple[list[dict[str, Any]], int, int]:
@@ -424,10 +487,11 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
     controllers = frozenset() if scenario_table is None else frozenset(scenario_table["chips"])
     parts_entrapment = _uses_parts_entrapment(scenario_table)
     exposure = _uses_exposure(scenario_table)
+    beacon_only = _beacon_only_principal(scenario_table, principal)
     fields = frozenset({
         "id", "pos", "source", "team", "observed_frame", "age_frames",
         "def", "health", "max_health", "commands", "controller", "sensor_range", "link",
-        "immobilised", "reason", "carrying_parts", "speed_factor", "exposure",
+        "immobilised", "reason", "carrying_parts", "speed_factor", "exposure", "distance", "bearing_deg",
     })
     for entity in value:
         if not isinstance(entity, Mapping):
@@ -455,6 +519,21 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
             if projected.get("source") != "own_body":
                 projected.pop("link")
         source = projected.get("source")
+        if beacon_only:
+            # The stranded principal cannot derive an absolute position from
+            # its own stream.  Strip a gadget regression rather than leak it.
+            projected.pop("pos", None)
+            if source == "own_body":
+                projected.pop("distance", None)
+                projected.pop("bearing_deg", None)
+            else:
+                if source != "sensor":
+                    raise ProtocolError("invalid_observation", "beacon view has a non-sensor entity")
+                projected["distance"] = _bounded_relative(projected.get("distance"), "entity distance", minimum=0, maximum=MAX_BUDGET)
+                projected["bearing_deg"] = _bounded_relative(projected.get("bearing_deg"), "entity bearing_deg", minimum=-360, maximum=360)
+        else:
+            projected.pop("distance", None)
+            projected.pop("bearing_deg", None)
         if parts_entrapment and (source == "own_body" or (principal == "commander" and source == "own_unit")):
             if "speed_factor" in projected:
                 factor = projected["speed_factor"]
@@ -511,7 +590,7 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
 
 
 def _bounded_principal_reports(value: Mapping[str, Any], result: dict[str, Any],
-                               scenario_table: Mapping[str, Any] | None) -> None:
+                               scenario_table: Mapping[str, Any] | None, principal: str) -> None:
     """Expose only delivered, typed reports in an embodied principal stream."""
     reports = value.get("reports", [])
     if not isinstance(reports, list):
@@ -547,20 +626,31 @@ def _bounded_principal_reports(value: Mapping[str, Any], result: dict[str, Any],
                 item["text"] = text
             else:
                 entity = report.get("body" if kind == "status" else "entity")
-                projected = _bounded_entities([entity], scenario_table)
+                projected = _bounded_entities([entity], scenario_table, principal)
                 if len(projected) != 1 or not isinstance(projected[0], dict):
                     raise ProtocolError("invalid_observation", "invalid report entity")
                 item["body" if kind == "status" else "entity"] = projected[0]
             public.append(item)
             continue
-        # The commander's initial distress report is deliberately a distinct,
-        # public report type.  It never contains the hidden cause or truth.
-        if scenario_table is None or set(report) != {"kind", "asset", "position", "observed_frame", "age_frames", "symptom"}:
+        # The initial distress report is deliberately distinct from live
+        # detections.  A §10 table replaces its obsolete point with a typed,
+        # bounded clue, never a hidden coordinate.
+        if scenario_table is None:
             raise ProtocolError("invalid_observation", "invalid distress report")
         distress = scenario_table.get("distress", {})
+        if report.get("asset") != distress.get("asset") or report.get("symptom") != distress.get("symptom"):
+            raise ProtocolError("invalid_observation", "invalid distress report")
+        if _uses_beacon_only(scenario_table):
+            if set(report) != {"kind", "asset", "fix", "observed_frame", "age_frames", "symptom"}:
+                raise ProtocolError("invalid_observation", "invalid beacon distress report")
+            public.append({"kind": "distress", "asset": report["asset"],
+                           "fix": _bounded_beacon_fix(report.get("fix"), scenario_table),
+                           "observed_frame": observed, "age_frames": age, "symptom": report["symptom"]})
+            continue
+        if set(report) != {"kind", "asset", "position", "observed_frame", "age_frames", "symptom"}:
+            raise ProtocolError("invalid_observation", "invalid distress report")
         position = report.get("position")
-        if (report.get("asset") != distress.get("asset") or report.get("symptom") != distress.get("symptom")
-                or not isinstance(position, list) or len(position) != 3
+        if (not isinstance(position, list) or len(position) != 3
                 or any(type(n) not in (int, float) or not math.isfinite(n) for n in position)):
             raise ProtocolError("invalid_observation", "invalid distress report")
         public.append({"kind": "distress", "asset": report["asset"], "position": list(position),
@@ -579,7 +669,7 @@ def _bounded_principal_body(value: Mapping[str, Any], result: dict[str, Any],
     if len(projected) != 1 or not isinstance(projected[0], dict) or projected[0].get("source") != "own_body":
         raise ProtocolError("invalid_observation", "invalid principal own body")
     result["body"] = projected[0]
-    _bounded_principal_reports(value, result, scenario_table)
+    _bounded_principal_reports(value, result, scenario_table, principal)
     if "link_state" in value:
         links = value["link_state"]
         if not isinstance(links, list) or len(links) > MAX_ENTITIES:
@@ -657,12 +747,26 @@ def _bounded_expedition(value: Mapping[str, Any], result: dict[str, Any], scenar
         raise ProtocolError("invalid_observation", "invalid reports")
     public_reports: list[dict[str, Any]] = []
     for report in reports:
-        if not isinstance(report, Mapping) or set(report) != {"kind", "asset", "position", "observed_frame", "age_frames", "symptom"}:
+        if not isinstance(report, Mapping):
             raise ProtocolError("invalid_observation", "invalid report")
         asset = _public_identifier(report.get("asset"), "report asset")
-        position = report.get("position")
         observed = report.get("observed_frame")
-        if report.get("kind") != "distress" or asset not in known or report.get("symptom") != distress.get("symptom") or not isinstance(position, list) or len(position) != 3 or any(type(number) not in (int, float) or not math.isfinite(number) for number in position) or not isinstance(observed, int) or isinstance(observed, bool):
+        if (report.get("kind") != "distress" or asset not in known or report.get("symptom") != distress.get("symptom")
+                or not isinstance(observed, int) or isinstance(observed, bool)):
+            raise ProtocolError("invalid_observation", "invalid report")
+        if _uses_beacon_only(scenario_table):
+            if set(report) != {"kind", "asset", "fix", "observed_frame", "age_frames", "symptom"}:
+                raise ProtocolError("invalid_observation", "invalid beacon report")
+            public_reports.append({"kind": "distress", "asset": asset,
+                                   "fix": _bounded_beacon_fix(report.get("fix"), scenario_table),
+                                   "observed_frame": observed,
+                                   "age_frames": _public_count(report.get("age_frames"), "age_frames"),
+                                   "symptom": report["symptom"]})
+            continue
+        if set(report) != {"kind", "asset", "position", "observed_frame", "age_frames", "symptom"}:
+            raise ProtocolError("invalid_observation", "invalid report")
+        position = report.get("position")
+        if not isinstance(position, list) or len(position) != 3 or any(type(number) not in (int, float) or not math.isfinite(number) for number in position):
             raise ProtocolError("invalid_observation", "invalid report")
         public_reports.append({"kind": "distress", "asset": asset, "position": list(position), "observed_frame": observed, "age_frames": _public_count(report.get("age_frames"), "age_frames"), "symptom": report["symptom"]})
     result["roster"] = sorted(public_roster, key=lambda item: item["name"])
@@ -693,7 +797,7 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
     ordered_effects = sorted(effects, key=event_key)
     clipped_entities = _bounded_entities(ordered_entities[:MAX_ENTITIES], scenario_table, principal)
     clipped_receipts = ordered_receipts[-MAX_RECENT_EVENTS:]
-    clipped_effects = _bounded_v2_effects(ordered_effects[-MAX_RECENT_EVENTS:], scenario_table)
+    clipped_effects = _bounded_v2_effects(ordered_effects[-MAX_RECENT_EVENTS:], scenario_table, principal)
     resources = _bounded_resources(value.get("resources", {}), scenario_table, principal)
     result: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
@@ -734,7 +838,8 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
         if not valid:
             raise ProtocolError("invalid_observation", "waypoint must contain three finite coordinates")
         public_waypoints[waypoint] = list(goal)
-    if public_waypoints:
+    beacon_only = _beacon_only_principal(scenario_table, principal)
+    if public_waypoints and not beacon_only:
         result["scenario"] = {"waypoints": public_waypoints}
     if principal == "commander" and "objective" in value:
         objective = value["objective"]
@@ -747,7 +852,7 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
             raise ProtocolError("invalid_observation", "invalid commander objective")
         result["objective"] = {"type": objective["type"], "target": objective["target"],
                                "status": objective["status"]}
-    if principal is not None and "extraction" in scenario:
+    if principal is not None and not beacon_only and "extraction" in scenario:
         extraction = scenario["extraction"]
         declared = None if scenario_table is None else scenario_table.get("objective")
         if (not isinstance(extraction, Mapping) or set(extraction) != {"id", "position", "radius"}
@@ -761,7 +866,8 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
         result.setdefault("scenario", {})["extraction"] = {
             "id": extraction["id"], "position": list(extraction["position"]), "radius": extraction["radius"],
         }
-    _bounded_provisioning(value, result, scenario_table)
+    if not beacon_only:
+        _bounded_provisioning(value, result, scenario_table)
     if principal is None:
         _bounded_expedition(value, result, scenario_table)
     else:
@@ -770,7 +876,7 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
         # derivable from this observation frame, so add only that bounded value
         # before handing reports to the strict typed projection.
         principal_value: Mapping[str, Any] = value
-        reports = value.get("reports")
+        reports = [] if beacon_only else value.get("reports")
         if isinstance(reports, list):
             normalized_reports = []
             for report in reports:
@@ -796,7 +902,7 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
             principal_value = {**value, "reports": normalized_reports}
         # Commander roster is a separately declared public inventory view;
         # leave richer delivered reports to the principal-report projection.
-        if "roster" in principal_value:
+        if not beacon_only and "roster" in principal_value:
             expedition = dict(principal_value)
             expedition["reports"] = [report for report in principal_value.get("reports", [])
                                       if isinstance(report, Mapping) and report.get("kind") == "distress"]
@@ -823,6 +929,8 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
                 seen_permissions.add("TASK")
             continue
         if intent.get("type") == "PRODUCE":
+            if beacon_only:
+                continue
             factories = intent.get("factories", [])
             chassis = intent.get("chassis", [])
             controllers = intent.get("controllers", [])

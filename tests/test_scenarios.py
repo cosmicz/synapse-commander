@@ -182,6 +182,24 @@ class ScenarioTableTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertRaises(ScenarioError, _validate, broken(change), "rescue_v2")
 
+    def test_beacon_only_entrapment_requires_a_declared_bounded_fix(self):
+        table = copy.deepcopy(load_scenario("rescue_v2"))
+        table["entrapment"].update({
+            "beacon_only": True,
+            "beacon_fix": {"kind": "bearing", "from": "commander", "error_deg": 10},
+        })
+        self.assertTrue(_validate(table, table["id"])["entrapment"]["beacon_only"])
+        for change in (
+            lambda t: t["entrapment"].pop("beacon_fix"),
+            lambda t: t["entrapment"]["beacon_fix"].__setitem__("from", "M1"),
+            lambda t: t["entrapment"]["beacon_fix"].__setitem__("error_deg", 181),
+            lambda t: t["entrapment"].__setitem__("beacon_only", False),
+        ):
+            invalid = copy.deepcopy(table)
+            change(invalid)
+            with self.subTest(change=change):
+                self.assertRaisesRegex(ScenarioError, "entrapment", _validate, invalid, invalid["id"])
+
 
 if __name__ == "__main__":
     unittest.main()

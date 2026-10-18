@@ -46,6 +46,24 @@ def _speed_factor(value: Any) -> bool:
 ENTRAPMENT_UNTIL = ("parts_delivered",)  # "towed" is reserved for mission v2.1 and refused until implemented
 
 
+def _validate_beacon_fix(value: Any) -> bool:
+    """Validate the public, deliberately imprecise search clue for §10."""
+    if not isinstance(value, Mapping):
+        return False
+    kind = value.get("kind")
+    if kind == "bearing":
+        error = value.get("error_deg")
+        return (set(value) == {"kind", "from", "error_deg"}
+                and value.get("from") == "commander"
+                and type(error) in (int, float) and math.isfinite(error)
+                and 0 <= error <= 180)
+    if kind == "quadrant":
+        cell = value.get("cell_elmos")
+        return (set(value) == {"kind", "cell_elmos"}
+                and _non_negative_int(cell) and cell > 0)
+    return False
+
+
 def _validate_mission_v2(root: Mapping[str, Any], chassis: Mapping[str, Any]) -> None:
     """Mission v2 (kbk Design 9): speed factors, parts stock and parts-delivery entrapment, all optional."""
     for asset in root.get("predeployed") or []:
@@ -61,13 +79,19 @@ def _validate_mission_v2(root: Mapping[str, Any], chassis: Mapping[str, Any]) ->
     names = {a.get("name"): a for a in root.get("predeployed") or [] if isinstance(a, Mapping)}
     carriers = entrapment.get("parts_carrier_chassis")
     radius, frames = entrapment.get("assist_range"), entrapment.get("assist_frames")
-    if set(entrapment) != {"asset", "until", "assist_capability", "assist_range", "assist_frames", "parts_carrier_chassis"} \
+    required = {"asset", "until", "assist_capability", "assist_range", "assist_frames", "parts_carrier_chassis"}
+    beacon_only = entrapment.get("beacon_only", False)
+    if beacon_only:
+        required |= {"beacon_only", "beacon_fix"}
+    if set(entrapment) != required \
             or entrapment["until"] not in ENTRAPMENT_UNTIL \
             or entrapment["asset"] not in names or names[entrapment["asset"]].get("state") != "active" \
             or not _identifier(entrapment["assist_capability"]) \
             or type(radius) not in (int, float) or not math.isfinite(radius) or radius <= 0 \
             or not _non_negative_int(frames) or frames == 0 \
-            or not isinstance(carriers, list) or not carriers or any(c not in chassis or chassis[c].get("carries_parts") is not True for c in carriers) or len(set(carriers)) != len(carriers):
+            or not isinstance(carriers, list) or not carriers or any(c not in chassis or chassis[c].get("carries_parts") is not True for c in carriers) or len(set(carriers)) != len(carriers) \
+            or ("beacon_only" in entrapment and beacon_only is not True) \
+            or (beacon_only and not _validate_beacon_fix(entrapment.get("beacon_fix"))):
         raise ScenarioError("invalid entrapment")
     if "exposure" in root:
         exposure = _mapping(root["exposure"], "exposure")

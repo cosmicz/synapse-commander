@@ -448,3 +448,116 @@ class SmokeObservationTests(unittest.TestCase):
         source["permitted_intents"][2]["chassis"] = ["private_chassis"]
         with self.assertRaisesRegex(ProtocolError, "unknown PRODUCE permission"):
             bounded_observation(source, scenario_table=load_scenario())
+
+    def test_beacon_only_view_is_relative_and_strips_coordinates_from_effects(self):
+        table = deepcopy(load_scenario("rescue_baseline"))
+        table["entrapment"] = {
+            "asset": "M1", "until": "parts_delivered", "assist_capability": "assist",
+            "assist_range": 96, "assist_frames": 150, "parts_carrier_chassis": ["carrier_v1"],
+            "beacon_only": True,
+            "beacon_fix": {"kind": "bearing", "from": "commander", "error_deg": 10},
+        }
+        body = {"id": 42, "pos": [100, 0, 100], "source": "own_body", "immobilised": True,
+                "reason": "needs_parts", "health": 300}
+        sensor = {"id": 43, "pos": [999, 0, 888], "source": "sensor", "distance": 120,
+                  "bearing_deg": -45, "def": "armck", "private": "not forwarded"}
+        source = engine_observation()
+        source.update({
+            "principal": "M1", "body": body, "entities": [body, sensor], "reports": [{
+                "kind": "distress", "asset": "M1", "position": [123, 0, 456],
+                "observed_frame": 1, "age_frames": 99, "symptom": table["distress"]["symptom"],
+            }],
+            "resources": {"parts": 1}, "commander": {"unit_id": 7, "chip": "reasoner_large_v1"},
+            "factories": [{"name": "F0", "unit_id": 7}], "roster": [],
+            "scenario": {"id": table["id"], "version": table["version"],
+                         "waypoints": {"W1": [500, 0, 100]},
+                         "extraction": {"id": table["objective"]["extraction"], "position": [1, 2], "radius": 3}},
+            "permitted_intents": [{"type": "TASK", "verbs": ["move_to"]}, {"type": "PRODUCE", "factories": ["F0"], "chassis": ["carrier_v1"], "controllers": ["reasoner_small_v1"]}],
+            "recent_effects": [
+                {"effect": "unit_moved", "frame": 100, "unit_id": 42, "detail": {"pos": [1, 0, 2], "progress": 5}},
+                {"effect": "order_started", "frame": 101, "unit_id": 42, "detail": {"target": [8, 0, 9]}},
+                {"effect": "comms_restored", "frame": 102, "unit_id": 42, "detail": {"target": "M1"}},
+            ],
+        })
+        observed = bounded_observation(source, scenario_table=table, principal="M1")
+        self.assertNotIn("pos", observed["body"])
+        detected = next(entity for entity in observed["entities"] if entity["id"] == 43)
+        self.assertEqual(detected["distance"], 120)
+        self.assertEqual(detected["bearing_deg"], -45)
+        self.assertNotIn("pos", detected)
+        self.assertNotIn("scenario", observed)
+        self.assertNotIn("commander", observed)
+        self.assertNotIn("factories", observed)
+        self.assertNotIn("roster", observed)
+        self.assertEqual(observed["reports"], [])
+        self.assertEqual(observed["permitted_intents"], [{"type": "TASK", "verbs": ["move_to"]}])
+        self.assertEqual(observed["recent_effects"][0]["detail"], {"progress": 5})
+        self.assertEqual(observed["recent_effects"][1]["detail"], {})
+        self.assertEqual(observed["recent_effects"][2]["detail"], {"target": "M1"})
+        self.assertNotIn("[999, 0, 888]", json.dumps(observed))
+
+    def test_beacon_only_requires_relative_detection_and_exact_restoration_effect(self):
+        table = deepcopy(load_scenario("rescue_baseline"))
+        table["entrapment"] = {
+            "asset": "M1", "until": "parts_delivered", "assist_capability": "assist",
+            "assist_range": 96, "assist_frames": 150, "parts_carrier_chassis": ["carrier_v1"],
+            "beacon_only": True,
+            "beacon_fix": {"kind": "bearing", "from": "commander", "error_deg": 10},
+        }
+        body = {"id": 42, "source": "own_body", "immobilised": True, "reason": "needs_parts"}
+        source = engine_observation()
+        source.update(principal="M1", body=body, entities=[body, {"id": 43, "source": "sensor", "distance": 10}],
+                      reports=[], resources={"parts": 1}, scenario={"id": table["id"], "version": table["version"]})
+        with self.assertRaisesRegex(ProtocolError, "bearing_deg"):
+            bounded_observation(source, scenario_table=table, principal="M1")
+        source["entities"][1]["bearing_deg"] = 3
+        source["recent_effects"] = [{"effect": "comms_restored", "frame": 10, "unit_id": 42,
+                                      "detail": {"target": "M1", "true_pos": [1, 0, 2]}}]
+        with self.assertRaisesRegex(ProtocolError, "restoration effect"):
+            bounded_observation(source, scenario_table=table, principal="M1")
+
+    def test_party_beacon_report_keeps_fix_not_position(self):
+        table = deepcopy(load_scenario("rescue_baseline"))
+        table["entrapment"] = {
+            "asset": "M1", "until": "parts_delivered", "assist_capability": "assist",
+            "assist_range": 96, "assist_frames": 150, "parts_carrier_chassis": ["carrier_v1"],
+            "beacon_only": True,
+            "beacon_fix": {"kind": "quadrant", "cell_elmos": 1024},
+        }
+        body = {"id": 7, "source": "own_body", "pos": [1, 0, 2]}
+        source = engine_observation()
+        source.update(principal="commander", body=body, entities=[body], resources={"parts": 1},
+                      scenario={"id": table["id"], "version": table["version"]}, reports=[{
+                          "kind": "distress", "asset": "M1", "fix": {"kind": "quadrant", "cell_x": 5, "cell_z": 7, "cell_elmos": 1024},
+                          "observed_frame": 1, "age_frames": 9, "symptom": table["distress"]["symptom"],
+                      }])
+        observed = bounded_observation(source, scenario_table=table, principal="commander")
+        self.assertEqual(observed["reports"], [{"kind": "distress", "asset": "M1",
+                                                   "fix": {"kind": "quadrant", "cell_x": 5, "cell_z": 7, "cell_elmos": 1024},
+                                                   "observed_frame": 1, "age_frames": 9,
+                                                   "symptom": table["distress"]["symptom"]}])
+        source["reports"][0]["position"] = [99, 0, 99]
+        with self.assertRaisesRegex(ProtocolError, "beacon distress"):
+            bounded_observation(source, scenario_table=table, principal="commander")
+
+    def test_bearing_fix_retains_its_declared_receiver_and_requires_integer_angle(self):
+        table = deepcopy(load_scenario("rescue_baseline"))
+        table["entrapment"] = {
+            "asset": "M1", "until": "parts_delivered", "assist_capability": "assist",
+            "assist_range": 96, "assist_frames": 150, "parts_carrier_chassis": ["carrier_v1"],
+            "beacon_only": True,
+            "beacon_fix": {"kind": "bearing", "from": "commander", "error_deg": 10},
+        }
+        body = {"id": 7, "source": "own_body", "pos": [1, 0, 2]}
+        source = engine_observation()
+        source.update(principal="commander", body=body, entities=[body], resources={"parts": 1},
+                      scenario={"id": table["id"], "version": table["version"]}, reports=[{
+                          "kind": "distress", "asset": "M1",
+                          "fix": {"kind": "bearing", "from": "commander", "bearing_deg": -15},
+                          "observed_frame": 1, "age_frames": 9, "symptom": table["distress"]["symptom"],
+                      }])
+        observed = bounded_observation(source, scenario_table=table, principal="commander")
+        self.assertEqual(observed["reports"][0]["fix"], {"kind": "bearing", "from": "commander", "bearing_deg": -15})
+        source["reports"][0]["fix"]["bearing_deg"] = 1.5
+        with self.assertRaisesRegex(ProtocolError, "bearing_deg"):
+            bounded_observation(source, scenario_table=table, principal="commander")
