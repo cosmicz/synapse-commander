@@ -67,6 +67,12 @@ class ScenarioTableTests(unittest.TestCase):
             "parts_carrier_chassis": ["carrier_v1"],
         }
         self.assertEqual(_validate(table, table["id"])["entrapment"]["until"], "parts_delivered")
+        table["exposure"] = {"asset": "M1", "decay_per_minute": .06, "floor": .1}
+        self.assertEqual(_validate(table, table["id"])["exposure"]["floor"], .1)
+        invalid = copy.deepcopy(table)
+        invalid["exposure"]["floor"] = 2
+        with self.assertRaisesRegex(ScenarioError, "exposure"):
+            _validate(invalid, invalid["id"])
         invalid = copy.deepcopy(table)
         invalid["entrapment"]["until"] = "towed"
         with self.assertRaisesRegex(ScenarioError, "entrapment"):

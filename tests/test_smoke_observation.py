@@ -126,6 +126,28 @@ class SmokeObservationTests(unittest.TestCase):
         with self.assertRaisesRegex(ProtocolError, "principal body cannot carry"):
             bounded_observation(source, scenario_table=table, principal="commander")
 
+    def test_v2_exposure_is_own_body_only_and_critical_effect_is_bounded(self):
+        table = deepcopy(load_scenario("rescue_baseline"))
+        table["exposure"] = {"asset": "M1", "decay_per_minute": 0.06, "floor": 0.1}
+        body = {"id": 42, "pos": [100, 0, 100], "source": "own_body", "immobilised": True,
+                "reason": "exposure", "exposure": {"decay_per_minute": 0.06, "health_now": 0.1}}
+        sensor = {"id": 43, "pos": [101, 0, 100], "source": "sensor", "immobilised": True,
+                  "reason": "exposure", "exposure": {"decay_per_minute": 0.06, "health_now": 0.1}}
+        source = engine_observation()
+        source.update(principal="M1", body=body, entities=[body, sensor], reports=[], resources={},
+                      scenario={"id": table["id"], "version": table["version"]},
+                      recent_effects=[{"effect": "exposure_critical", "frame": 20, "unit_id": 42,
+                                       "detail": {"target": "M1", "unit_id": 42}}])
+        observed = bounded_observation(source, scenario_table=table, principal="M1")
+        self.assertEqual(observed["body"]["exposure"], {"decay_per_minute": 0.06, "health_now": 0.1})
+        sensor_view = next(item for item in observed["entities"] if item["id"] == 43)
+        self.assertNotIn("exposure", sensor_view)
+        self.assertNotIn("reason", sensor_view)
+        self.assertEqual(observed["recent_effects"][0]["detail"], {"target": "M1", "unit_id": 42})
+        source["recent_effects"][0]["detail"]["cause_hidden"] = "terrain"
+        with self.assertRaisesRegex(ProtocolError, "exposure effect"):
+            bounded_observation(source, scenario_table=table, principal="M1")
+
     def test_mission_briefing_is_public_but_world_truth_and_source_overrides_are_not(self):
         for principal in ("commander", "job-1", "M1"):
             with self.subTest(principal=principal):

@@ -230,6 +230,10 @@ def _uses_parts_entrapment(scenario_table: Mapping[str, Any] | None) -> bool:
     return isinstance(entrapment, Mapping) and entrapment.get("until") == "parts_delivered"
 
 
+def _uses_exposure(scenario_table: Mapping[str, Any] | None) -> bool:
+    return scenario_table is not None and isinstance(scenario_table.get("exposure"), Mapping)
+
+
 def _bounded_resources(value: Any, scenario_table: Mapping[str, Any] | None,
                        principal: str | None) -> dict[str, Any]:
     """Keep the v2 parts stock commander-only without widening legacy views."""
@@ -246,16 +250,25 @@ def _bounded_resources(value: Any, scenario_table: Mapping[str, Any] | None,
 
 def _bounded_v2_effects(effects: list[Any], scenario_table: Mapping[str, Any] | None) -> list[Any]:
     """Retain v1 event compatibility while fail-closing the new repair effects."""
-    if not _uses_parts_entrapment(scenario_table):
+    parts_entrapment = _uses_parts_entrapment(scenario_table)
+    exposure = _uses_exposure(scenario_table)
+    if not parts_entrapment and not exposure:
         return effects
-    entrapment = scenario_table["entrapment"]
+    entrapment = scenario_table.get("entrapment", {})
     asset = entrapment.get("asset")
+    exposure_asset = scenario_table.get("exposure", {}).get("asset")
     predeployed = scenario_table.get("predeployed", [])
     known_by = {"commander", *scenario_table.get("chassis", {})}
     known_by.update(item.get("name") for item in predeployed if isinstance(item, Mapping))
     public: list[Any] = []
     for effect in effects:
-        if not isinstance(effect, Mapping) or effect.get("effect") not in {"parts_delivered", "mobility_restored"}:
+        if not isinstance(effect, Mapping):
+            public.append(effect)
+            continue
+        name = effect.get("effect")
+        repair = parts_entrapment and name in {"parts_delivered", "mobility_restored"}
+        critical = exposure and name == "exposure_critical"
+        if not repair and not critical:
             public.append(effect)
             continue
         if set(effect) - {"schema", "effect", "frame", "unit_id", "team", "intent_id", "detail", "principal"}:
@@ -263,9 +276,9 @@ def _bounded_v2_effects(effects: list[Any], scenario_table: Mapping[str, Any] | 
         frame = _public_count(effect.get("frame"), "repair effect frame")
         unit_id = _public_count(effect.get("unit_id"), "repair effect unit_id")
         detail = effect.get("detail")
-        if not isinstance(detail, Mapping) or detail.get("target") != asset:
-            raise ProtocolError("invalid_observation", "repair effect has invalid target")
-        name = effect["effect"]
+        target = asset if repair else exposure_asset
+        if not isinstance(detail, Mapping) or detail.get("target") != target:
+            raise ProtocolError("invalid_observation", "mission effect has invalid target")
         if name == "parts_delivered":
             if set(detail) != {"target", "by", "unit_id"} or detail.get("unit_id") != unit_id:
                 raise ProtocolError("invalid_observation", "parts delivery effect has invalid detail")
@@ -273,10 +286,14 @@ def _bounded_v2_effects(effects: list[Any], scenario_table: Mapping[str, Any] | 
             if by not in known_by and not re.fullmatch(r"job-[0-9]{1,8}", by):
                 raise ProtocolError("invalid_observation", "parts delivery source is unknown")
             public_detail = {"target": asset, "by": by, "unit_id": unit_id}
-        else:
+        elif name == "mobility_restored":
             if set(detail) != {"target"}:
                 raise ProtocolError("invalid_observation", "mobility effect has invalid detail")
             public_detail = {"target": asset}
+        else:
+            if set(detail) != {"target", "unit_id"} or detail.get("unit_id") != unit_id:
+                raise ProtocolError("invalid_observation", "exposure effect has invalid detail")
+            public_detail = {"target": exposure_asset, "unit_id": unit_id}
         item: dict[str, Any] = {"effect": name, "frame": frame, "unit_id": unit_id,
                                 "detail": public_detail}
         if "intent_id" in effect:
@@ -406,10 +423,11 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
     public: list[Any] = []
     controllers = frozenset() if scenario_table is None else frozenset(scenario_table["chips"])
     parts_entrapment = _uses_parts_entrapment(scenario_table)
+    exposure = _uses_exposure(scenario_table)
     fields = frozenset({
         "id", "pos", "source", "team", "observed_frame", "age_frames",
         "def", "health", "max_health", "commands", "controller", "sensor_range", "link",
-        "immobilised", "reason", "carrying_parts", "speed_factor",
+        "immobilised", "reason", "carrying_parts", "speed_factor", "exposure",
     })
     for entity in value:
         if not isinstance(entity, Mapping):
@@ -444,18 +462,32 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
                     raise ProtocolError("invalid_observation", "entity speed_factor must be in 0.05..1.0")
         else:
             projected.pop("speed_factor", None)
-        if parts_entrapment and source == "own_body":
+        if (parts_entrapment or exposure) and source == "own_body":
             if "immobilised" in projected and not isinstance(projected["immobilised"], bool):
                 raise ProtocolError("invalid_observation", "entity immobilised must be boolean")
             if "reason" in projected:
-                if projected.get("immobilised") is not True or projected["reason"] != "needs_parts":
+                allowed = {"needs_parts"} if parts_entrapment else set()
+                if exposure:
+                    allowed.add("exposure")
+                if projected.get("immobilised") is not True or projected["reason"] not in allowed:
                     raise ProtocolError("invalid_observation", "invalid immobilised reason")
+            if "exposure" in projected:
+                state = projected["exposure"]
+                expected = scenario_table.get("exposure") if exposure else None
+                if (not isinstance(state, Mapping) or set(state) != {"decay_per_minute", "health_now"}
+                        or any(type(state.get(key)) not in (int, float) or not math.isfinite(state[key])
+                               for key in ("decay_per_minute", "health_now"))
+                        or not 0 < state["decay_per_minute"] <= 1 or not 0 <= state["health_now"] <= 1
+                        or expected is None or state["decay_per_minute"] != expected["decay_per_minute"]):
+                    raise ProtocolError("invalid_observation", "invalid exposure state")
+                projected["exposure"] = {"decay_per_minute": state["decay_per_minute"],
+                                         "health_now": state["health_now"]}
             if "carrying_parts" in projected and not isinstance(projected["carrying_parts"], bool):
                 raise ProtocolError("invalid_observation", "entity carrying_parts must be boolean")
             if projected.get("carrying_parts") is True:
                 raise ProtocolError("invalid_observation", "principal body cannot carry mission parts")
         else:
-            for field in ("immobilised", "reason"):
+            for field in ("immobilised", "reason", "exposure"):
                 projected.pop(field, None)
             if not (parts_entrapment and principal == "commander" and source == "own_unit"):
                 projected.pop("carrying_parts", None)

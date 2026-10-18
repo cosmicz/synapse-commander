@@ -69,6 +69,14 @@ def _validate_mission_v2(root: Mapping[str, Any], chassis: Mapping[str, Any]) ->
             or not _non_negative_int(frames) or frames == 0 \
             or not isinstance(carriers, list) or not carriers or any(c not in chassis or chassis[c].get("carries_parts") is not True for c in carriers) or len(set(carriers)) != len(carriers):
         raise ScenarioError("invalid entrapment")
+    if "exposure" in root:
+        exposure = _mapping(root["exposure"], "exposure")
+        decay, floor = exposure.get("decay_per_minute"), exposure.get("floor")
+        if set(exposure) != {"asset", "decay_per_minute", "floor"} \
+                or exposure.get("asset") not in names or names[exposure["asset"]].get("state") != "active" \
+                or type(decay) not in (int, float) or not math.isfinite(decay) or not 0 < decay <= 1 \
+                or type(floor) not in (int, float) or not math.isfinite(floor) or not 0 <= floor <= 1:
+            raise ScenarioError("invalid exposure")
 
 
 def _validate(table: Any, scenario_name: str) -> dict[str, Any]:
