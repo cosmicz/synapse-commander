@@ -23,6 +23,22 @@ class Response:
 
 
 class OpenAICompatibleRouteTests(unittest.TestCase):
+    def test_openrouter_reasoning_never_combines_effort_with_a_token_budget(self) -> None:
+        """OpenRouter rejects the effort/budget combination for this route."""
+        seen = {}
+
+        def opener(wire, *, timeout):
+            seen["body"] = json.loads(wire.data)
+            return Response({"model": "nvidia/nemotron-3-nano-30b-a3b",
+                             "choices": [{"message": {"content": "{}"}}]})
+
+        reply = OpenRouterRoute("nvidia/nemotron-3-nano-30b-a3b", system_prompt="p",
+                                environment={"OPENROUTER_API_KEY": "k"}, opener=opener).call("o")
+        reasoning = seen["body"]["reasoning"]
+        self.assertIsNone(reply.error)
+        self.assertIn("max_tokens", reasoning)
+        self.assertNotIn("effort", reasoning)
+
     def test_openrouter_posts_bounded_chat_with_the_injected_system_prompt(self) -> None:
         seen = {}
 
