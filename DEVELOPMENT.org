@@ -238,9 +238,24 @@ quality on a real mission.
 * Live rescue variations
 Select these with =run-rescue --mode agents --scenario NAME= and the same
 engine, gateway, provider and recording arguments as the baseline rescue.
-Each uses three separate live minds: commander, the manufactured =job-1=,
-and the stranded =M1=. The model chooses production, delegation, relay movement
-and the target's return through the existing typed interface.
+The commander and stranded =M1= each have their own live model, token and view.
+Manufactured reasoning bodies receive independent models under their actual
+=job-N= principal, within the eight predeclared job slots. Job numbers follow
+all production, including fixed-program bodies; a fixed bot built first must
+not prevent a reasoning mind built second from acting. An unembodied slot has
+no model calls, and a fixed body has no mind view. Production, division of work,
+search and recovery remain model choices within the physical rules.
+
+The agents manifest declares those job slots as =optional_principals=. Unused
+slots do not count as active minds. The shared =$child= decision binding asks
+for a delivered commander delegation and a live action by the same realized
+child, regardless of its production number. Physical mission outcome and
+this evidence of delegation are reported separately. Model decisions do not
+establish physical success without the engine outcome.
+
+=python3 -W error -m unittest tests.test_dynamic_minds= exercises second-job
+activation, own-view isolation, unused slots and run checks with test doubles;
+native runs are needed to establish gameplay behavior.
 
 | Scenario | Version | Spare bodies | Spare reasoning chips | Spare fixed chips | Extraction deadline |
 |----------+---------+--------------+-----------------------+-------------------+---------------------|

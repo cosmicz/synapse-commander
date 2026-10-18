@@ -53,8 +53,8 @@ AGENT_PRINCIPAL = "agent-commander"
 AGENTS_REQUIRED_DECISIONS = [
     {"label": "create_agent", "principal": "commander", "type": "PRODUCE"},
     # Delegation is a commander message to the child it created, not any message (to M1 included).
-    {"label": "delegate", "principal": "commander", "type": "MESSAGE", "to": "job-1"},
-    {"label": "relay_move", "principal": "job-1", "type": "TASK"},
+    {"label": "delegate", "principal": "commander", "type": "MESSAGE", "to": "$child"},
+    {"label": "relay_move", "principal": "$child", "type": "TASK"},
     {"label": "return_home", "principal": "M1", "type": "TASK"},
 ]
 JOB_PRINCIPALS = tuple(f"job-{number}" for number in range(1, 9))
@@ -345,7 +345,8 @@ def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, iden
                    external_budgets: dict[str, Any] | None = None,
                    required_decisions: list[dict[str, Any]] | None = None,
                    principals: list[str] | None = None,
-                   principal_sources: dict[str, str] | None = None) -> dict[str, Any]:
+                   principal_sources: dict[str, str] | None = None,
+                   optional_principals: list[str] | None = None) -> dict[str, Any]:
     declared_principals = [principal] if principals is None else list(principals)
     if not declared_principals or len(set(declared_principals)) != len(declared_principals):
         raise ValueError("manifest principals must be unique and non-empty")
@@ -373,6 +374,11 @@ def build_manifest(*, run_id: str, rig_commit: str | None, app_commit: str, iden
         if set(principal_sources) != set(declared_principals) or any(source not in PRINCIPAL_SOURCES for source in principal_sources.values()):
             raise ValueError("principal_sources must name every declared principal")
         manifest["principal_sources"] = dict(principal_sources)
+    if optional_principals is not None:
+        if (len(optional_principals) > 8 or len(set(optional_principals)) != len(optional_principals)
+                or not set(optional_principals) <= set(declared_principals)):
+            raise ValueError("optional principals must be unique bounded declared slots")
+        manifest["optional_principals"] = list(optional_principals)
     return manifest
 
 
@@ -526,12 +532,13 @@ def run_smoke(config: SmokeConfig, *,
         manifest = build_manifest(
             run_id=run_id, rig_commit=config.rig_commit, app_commit=app_commit, identity=identity,
             config_hashes=config_hashes, presentation=presentation, scenario=scenario_identity(table),
-            # In agents mode the produced reasoner body's principal job-1 also acts and records.
-            principals=[*view_principals, "job-1"] if agents_mode else view_principals,
-            principal_sources={"commander": "agent", "M1": "agent", "job-1": "agent"} if agents_mode else
+            # Production order chooses the job number; only reasoners gain a principal view.
+            principals=session_principals if agents_mode else view_principals,
+            principal_sources={name: "agent" for name in session_principals} if agents_mode else
             {name: ("human" if play and name == "commander"
                     else "agent" if bonded and name == "commander" else "scripted")
              for name in view_principals},
+            optional_principals=list(JOB_PRINCIPALS) if agents_mode else None,
             model_id=config.model if bonded or agents_mode else None,
             # The live chain the recorder must see from live inference to label a principal agent_only.
             required_decisions=AGENTS_REQUIRED_DECISIONS if agents_mode else None,
@@ -604,7 +611,7 @@ def run_smoke(config: SmokeConfig, *,
         elif bonded:
             ordered.principal_origins = {"commander": "agent", "M1": "scripted"}
         elif agents_mode:
-            ordered.principal_origins = {"commander": "agent", "M1": "agent", "job-1": "agent"}
+            ordered.principal_origins = {name: "agent" for name in session_principals}
         gateway = LoopbackGateway(transport, principal=AGENT_PRINCIPAL if agent else ("commander" if view or rescue else PRINCIPAL),
                                   team=TEAM, origin="agent" if agent else "scripted", ledger=ordered,
                                   scenario=config.scenario,
@@ -1272,7 +1279,8 @@ def evaluate_rescue(trace: dict[str, Any], ordered: OrderedLedger | None,
         verdict["rescue_outcome"] = trace.get("outcome")
     elif trace.get("agents"):
         minds = trace.get("minds") or {}
-        check("live_minds_ran", all(name in minds for name in ("commander", "job-1", "M1")),
+        check("live_minds_ran", all((minds.get(name) or {}).get("calls", 0) > 0
+                                   for name in ("commander", "M1")),
               calls={name: (m or {}).get("calls") for name, m in minds.items()}, outcome=trace.get("outcome"))
         check("outcome_extracted", trace.get("outcome") == "extracted", outcome=trace.get("outcome"))
         verdict["rescue_outcome"] = trace.get("outcome")
@@ -1364,10 +1372,11 @@ def live_route(config: SmokeConfig, system_prompt: str, claude: Callable[[], Any
 
 def make_agents(config: SmokeConfig, layout: launch.RunLayout, ordered: OrderedLedger, port: int,
                 tokens: dict[str, str], http_timeout_s: float, model_route: Any) -> Any:
-    """Commander, job-1 and M1 as live minds, each with its own token, view and prompt."""
+    """Start bounded mind slots; only engine-embodied principals invoke models."""
     from .agents.embodied import LiveClaudeRoute
     from .agents.mind_prompts import CHILD_PROMPT, COMMANDER_PROMPT, TARGET_PROMPT
-    prompts = {"commander": COMMANDER_PROMPT, "job-1": CHILD_PROMPT, "M1": TARGET_PROMPT}
+    prompts = {"commander": COMMANDER_PROMPT, "M1": TARGET_PROMPT,
+               **{name: CHILD_PROMPT for name in JOB_PRINCIPALS}}
     clients = {name: GatewayClient(f"http://127.0.0.1:{port}", token=tokens[name], timeout_s=http_timeout_s)
                for name in prompts}
     routes = {name: model_route or live_route(

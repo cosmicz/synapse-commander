@@ -34,6 +34,10 @@ actual target position. Coordinates in move_to are integer world x and z.
 Missing coordinates are unknown. Relative distance and bearing are local
 sensor information, not an absolute position. Do not recover withheld positions
 from a remembered map layout or manufacture coordinates for another mind.
+Engine bearing_deg uses 0 degrees = +x (east), 90 = +z (south, down the map),
+180 = -x (west), and 270 = -z (north). It is not a north-zero compass bearing.
+A reported beacon bearing is anchored at the receiving body's position at
+beacon time; use that known origin, not a different observer's current position.
 
 Reply with exactly one JSON object:
  {"action":"intent","plan":"<current goal and reasoning in brief>",
@@ -82,6 +86,10 @@ reasoning mind can adapt locally, while a fixed-program body executes bounded
 orders. A relay-capable body can extend the radio network. Weigh these uses
 against other demands. Choose positions and routes from evidence, not a fixed
 waypoint recipe.
+Where the public inventory supplies three subordinate reasoning chips, you
+can provision up to three independent minds. Decide how many are useful, how
+to divide the work, and which bodies suit it; preserve the resources needed
+for physical rescue. The current observed budget remains authoritative.
 
 Other live minds decide their own actions. Share goals, constraints, relevant
 observations and requests with them; do not TASK their bodies. You may TASK
@@ -109,11 +117,17 @@ stranded mind using current sightings or delivered reports. Reconnaissance may
 be needed before committing it. Do not assume the commander carries parts or
 can transfer them. Choose when to build, scout, move, maintain contact or wait
 from the current situation. Report success only from observed mission evidence.
+If the public briefing establishes a rival recovery party, account for its
+observed progress and uncertainty in your plan. Under a rule where a nearby
+friendly escort blocks capture, weigh protecting the stranded mind against
+searching, delivering parts and maintaining communications. Do not invent
+weapons, attacks, repair powers or knowledge of the rival's hidden state.
 """ + _SHARED_CONTRACT
 
 
-CHILD_PROMPT = """You are an independent newly manufactured mind, principal
-"job-1", controlling your own embodied body. Your standing purpose is to help
+CHILD_PROMPT = """You are an independent newly manufactured mind. Your principal
+is identified in your current observation; control your own embodied body.
+Your standing purpose is to help
 the expedition recover endangered minds while preserving useful resources.
 The commander can delegate a more specific goal and constraints by MESSAGE.
 You have initiative within your own authority: assess your situation, share

@@ -481,11 +481,11 @@ class BondedRescue:
 
 
 class AgentsRescue:
-    """Three live minds, each on its own gateway view and token: commander, job-1, M1.
+    """Live minds on isolated views, including bounded manufactured job slots.
 
-    job-1 is the principal the engine gives the reasoner body the commander may
-    produce; its mind makes no model call until that body exists. The run ends at
-    a terminal objective or the deadline.
+    A job slot makes no model call until the engine supplies its own embodied
+    principal view. Fixed-program production never supplies such a view. Job
+    numbering follows production order, not controller type.
     """
 
     def __init__(self, clients: dict[str, GatewayClient], routes: dict[str, Any], sink: Any, *,
@@ -494,7 +494,8 @@ class AgentsRescue:
                  on_order: Callable[[str, int], None] | None = None, control_token: str | None = None,
                  control_port: int = 8090, announce: Callable[[str], None] | None = None) -> None:
         from .embodied import LiveMind
-        labels = {"commander": "mind_task", "job-1": "relay_move", "M1": "return_home"}
+        labels = {name: ("mind_task" if name == "commander" else
+                         "return_home" if name == "M1" else "relay_move") for name in clients}
         principals = frozenset(clients)
         self.minds = {name: LiveMind(name, clients[name], routes[name], sink, principals=principals,
                                      on_decision=on_decision, call_budget=call_budget,
@@ -531,6 +532,8 @@ class AgentsRescue:
         finally:
             if self.control is not None:
                 self.control.close()
-            self.trace["minds"] = {name: mind.stop() for name, mind in self.minds.items()}
+            stopped = {name: mind.stop() for name, mind in self.minds.items()}
+            self.trace["minds"] = {name: trace for name, trace in stopped.items()
+                                   if not name.startswith("job-") or trace.get("calls", 0) > 0}
         self.trace.setdefault("outcome", "not_reached")
         return self.trace
