@@ -105,6 +105,8 @@ MANIFEST_FIELDS: dict[str, type | tuple[type, ...]] = {
 _COMMIT = re.compile(r"^[0-9a-f]{7,64}$")
 _PRINCIPAL = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 PRINCIPAL_SOURCES = frozenset({"scripted", "agent", "human"})
+# In a required decision, the one realized optional principal (job-N) the chain is about.
+CHILD = "$child"
 # The labels that bear out each declared source; anything else is reported.
 SUPPORTED_BY = {"scripted": frozenset({"scripted_replay", "scripted_fixture"}), "agent": frozenset({"agent_only"}),
                 "human": frozenset({"human_only"})}
@@ -261,11 +263,15 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
     if sources is not None:
         # Per-principal views (rah26-mmn): the declared source of every
         # principal; the evidence, not this declaration, decides its label.
-        if not isinstance(sources, Mapping) or set(sources) != set(principals) or not 1 <= len(sources) <= 8:
+        if not isinstance(sources, Mapping) or set(sources) != set(principals) or not 1 <= len(sources) <= 16:
             raise LedgerError("invalid_manifest", "principal_sources must name exactly the manifest principals")
         for name, source in sources.items():
             if not _PRINCIPAL.match(name) or not _one_of(source, PRINCIPAL_SOURCES):
                 raise LedgerError("invalid_manifest", f"principal {name!r} needs a source of scripted or agent")
+    optional = manifest.get("optional_principals")
+    if optional is not None and (not isinstance(optional, list) or len(optional) > 8 or len(set(optional)) != len(optional)
+                                 or not all(isinstance(p, str) and p in principals for p in optional)):
+        raise LedgerError("invalid_manifest", "optional_principals must be up to 8 distinct declared principals")
     labels = set()
     for decision in manifest["required_decisions"]:
         if not isinstance(decision, Mapping) or not isinstance(decision.get("label"), str):
@@ -281,6 +287,10 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         if decision.get("to") is not None and not isinstance(decision["to"], str):
             raise LedgerError("invalid_manifest", "required decision recipient must be a string")
         owner = decision.get("principal")
+        if CHILD in (owner, decision.get("to")) and not optional:
+            raise LedgerError("invalid_manifest", f"{CHILD} needs declared optional_principals")
+        if owner == CHILD:
+            continue
         if sources is not None and len(sources) > 1 and not _one_of(owner, sources):
             raise LedgerError("invalid_manifest", "with several principals every required decision names its principal")
         if owner is not None and not _one_of(owner, sources or principals):
@@ -854,7 +864,20 @@ def _classify(result: Verification) -> None:
 
     chains = {r["event_id"]: live_chain(r) for r in intents if r["origin"] == "agent"}
 
-    def label(subset: list[dict[str, Any]], decisions: list[dict[str, Any]]) -> str:
+    # Optional principals (job-N slots) are present only once the engine bound
+    # one and the gateway recorded its own observation stream.
+    optional = manifest.get("optional_principals") or []
+    realized = sorted({r["payload"].get("principal") for r in records if r["kind"] == OBSERVATION} & set(optional))
+    absent = set(optional) - set(realized)
+
+    def alternatives(decisions: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        """Expand $child against ONE realized child at a time: a chain met by two children is not met."""
+        if not any(CHILD in (d.get("principal"), d.get("to")) for d in decisions):
+            return [decisions]
+        return [[{**d, **{k: child for k in ("principal", "to") if d.get(k) == CHILD}} for d in decisions]
+                for child in realized]
+
+    def label(subset: list[dict[str, Any]], decision_sets: list[list[dict[str, Any]]]) -> str:
         origins = {r["origin"] for r in subset}
         if interventions:
             return "assisted"
@@ -867,20 +890,22 @@ def _classify(result: Verification) -> None:
         if origins == {"human"}:
             return "human_only"
         if origins == {"agent"}:
-            met = _required_decisions_met(decisions, records, subset, receipts, chains)
+            met = any(_required_decisions_met(decisions, records, subset, receipts, chains) for decisions in decision_sets)
             return "agent_only" if met else "agent_partial"
         return "scripted_fixture"
 
     required = manifest.get("required_decisions") or []
-    classification = label(intents, required)
+    classification = label(intents, alternatives(required))
     sources = manifest.get("principal_sources")
     if sources is not None:
         # Every principal is labelled from its own intents and decisions; a
-        # decision without a principal belongs to the sole principal.
-        for name in sorted(sources):
+        # decision without a principal belongs to the sole principal. An
+        # optional slot that was never realized is absent, not a failure.
+        for name in sorted(set(sources) - absent):
             mine = [r for r in intents if r["payload"]["principal"] == name]
-            decisions = [d for d in required if d.get("principal", name if len(sources) == 1 else None) == name]
-            result.principal_classifications[name] = label(mine, decisions)
+            sets = [[d for d in decisions if d.get("principal", name if len(sources) == 1 else None) == name]
+                    for decisions in alternatives(required)]
+            result.principal_classifications[name] = label(mine, sets)
             result.principals[name] = _principal_summary(name, records, mine, receipts)
     result.classification = classification
     result.autonomous = classification == "agent_only" and all(
@@ -903,6 +928,8 @@ def _classify(result: Verification) -> None:
         # Recorded faithfully rather than refused; the dispatcher should not do this.
         limits.append(f"intent_id {intent_id} accepted more than once")
     for name, declared in sorted((sources or {}).items()):
+        if name in absent:
+            continue
         got = result.principal_classifications[name]
         if got not in SUPPORTED_BY[declared]:
             # The declaration never upgrades a label; the disagreement is reported.
@@ -971,6 +998,8 @@ def _required_decisions_met(required: list[dict[str, Any]], records: list[dict[s
             payload = intent["payload"]
             if payload.get("decision") != decision["label"]:
                 continue
+            if decision.get("principal") is not None and payload.get("principal") != decision["principal"]:
+                continue  # a decision binds its principal, whoever the caller passes
             if decision.get("type") is not None and payload["type"] != decision["type"]:
                 continue
             # A delegation names its recipient: a message to anyone else is not

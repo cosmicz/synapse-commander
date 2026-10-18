@@ -1496,6 +1496,81 @@ class OutcomeRules(PrincipalLedgerCase):
         self.assertIn("duplicate_extraction", result.errors[0])
 
 
+class OptionalChildren(PrincipalLedgerCase):
+    """Dynamic job-N minds: declared optional slots, realized by their own stream, one common $child."""
+    PRINCIPALS = ["commander", "M1", "job-1", "job-2", "job-3"]
+    CHAIN = [{"label": "create_agent", "principal": "commander", "type": "PRODUCE"},
+             {"label": "delegate", "principal": "commander", "type": "MESSAGE", "to": "$child"},
+             {"label": "relay_move", "principal": "$child", "type": "TASK"},
+             {"label": "return_home", "principal": "M1", "type": "TASK"}]
+
+    def run_with(self, steps, required=None):
+        """steps: (principal, decision, type, to) acted live, in order; a MESSAGE is delivered to its recipient."""
+        r = self.recorder(principals=self.PRINCIPALS, principal_sources=dict.fromkeys(self.PRINCIPALS, "agent"),
+                          optional_principals=["job-1", "job-2", "job-3"], model_id=MODEL,
+                          required_decisions=self.CHAIN if required is None else required)
+        r.run_start(0)
+        for frame, (principal, decision, kind, to) in enumerate(steps):
+            o = self.obs(r, principal, f"obs-{principal}-{frame}", frame=frame)
+            cause = self.inference(r, principal, f"inf-{frame}", o, frame=frame)
+            extra = {"type": kind, **({"payload": {"to": to, "text": "go"}} if to else {})}
+            sub = self.intent(r, principal, f"i-{frame}", f"obs-{principal}-{frame}", [cause], origin="agent",
+                              decision=decision, frame=frame, **extra)
+            rc = self.receipt(r, principal, f"i-{frame}", sub, frame=frame)
+            if to:
+                r.record(rec.EFFECT, sim_frame=frame, origin="engine", causes=[rc], payload={
+                    "type": "message_delivered", "principal": to, "intent_id": f"i-{frame}", "detail": {"to": to}})
+        r.run_end(len(steps) + 1, {})
+        result = verify_ledger(self.path)
+        self.assertTrue(result.ok, result.errors)
+        return result
+
+    def test_one_realized_child_meets_the_chain_and_empty_slots_are_absent(self):
+        # live-10 shape: job-1 never streamed (a fixed-program body); the reasoning job-2 did the work.
+        result = self.run_with([("commander", "create_agent", "PRODUCE", None), ("commander", "delegate", "MESSAGE", "job-2"),
+                                ("job-2", "relay_move", "TASK", None), ("M1", "return_home", "TASK", None)])
+        self.assertEqual(result.principal_classifications,
+                         {"commander": "agent_only", "M1": "agent_only", "job-2": "agent_only"})
+        self.assertEqual(result.classification, "agent_only")
+        self.assertTrue(result.autonomous)
+        self.assertFalse(any("job-1" in x or "job-3" in x for x in result.evidence_limits), result.evidence_limits)
+
+    def test_a_chain_split_across_two_children_is_not_met(self):
+        # arc-cdx 18:48: delegate to job-2 plus a TASK by job-3 cannot satisfy the whole chain.
+        result = self.run_with([("commander", "create_agent", "PRODUCE", None), ("commander", "delegate", "MESSAGE", "job-2"),
+                                ("job-3", "relay_move", "TASK", None), ("job-2", "idle", "TASK", None),
+                                ("M1", "return_home", "TASK", None)])
+        self.assertEqual(result.classification, "agent_partial")
+        self.assertFalse(result.autonomous)
+        self.assertEqual(result.principal_classifications["job-2"], "agent_partial")
+
+    def test_a_decision_binds_its_principal(self):
+        # M1 labelling its own TASK "relay_move" never stands in for the child's decision.
+        result = self.run_with([("commander", "create_agent", "PRODUCE", None), ("commander", "delegate", "MESSAGE", "job-2"),
+                                ("job-2", "chat", "TASK", None), ("M1", "relay_move", "TASK", None),
+                                ("M1", "return_home", "TASK", None)])
+        self.assertEqual(result.classification, "agent_partial")
+
+    def test_no_realized_child_means_no_delegation(self):
+        result = self.run_with([("commander", "create_agent", "PRODUCE", None), ("M1", "return_home", "TASK", None)])
+        self.assertEqual(result.classification, "agent_partial")
+        self.assertEqual(set(result.principal_classifications), {"commander", "M1"})
+
+    def test_manifest_rules_for_optional_principals(self):
+        ten = ["commander", "M1", *(f"job-{n}" for n in range(1, 9))]
+        rec.validate_manifest(manifest(principals=ten, principal_sources=dict.fromkeys(ten, "agent"),
+                                       optional_principals=ten[2:], required_decisions=self.CHAIN))
+        for broken in ({"optional_principals": ["job-9"]}, {"optional_principals": "job-1"},
+                       {"optional_principals": ["job-1", "job-1"]}, {"optional_principals": None}):
+            with self.subTest(broken=broken):
+                fields = dict(principals=self.PRINCIPALS, principal_sources=dict.fromkeys(self.PRINCIPALS, "agent"),
+                              required_decisions=self.CHAIN, **broken)
+                if fields["optional_principals"] is None:
+                    del fields["optional_principals"]  # $child without any optional slot
+                with self.assertRaises(LedgerError):
+                    rec.validate_manifest(manifest(**fields))
+
+
 class SensitiveContent(LedgerCase):
     def test_credentials_and_private_paths_rejected(self):
         r = self.recorder()
