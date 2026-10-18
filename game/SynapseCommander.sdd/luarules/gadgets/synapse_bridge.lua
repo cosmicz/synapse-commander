@@ -130,9 +130,9 @@ if gadgetHandler:IsSyncedCode() then
       end
     end
     local entrapment = t.entrapment
-    if entrapment ~= nil and entrapment.until ~= nil then
-      if type(entrapment) == "table" and entrapment.until == "towed" then return nil, "table_invalid" end
-      if type(entrapment) ~= "table" or not names[entrapment.asset] or entrapment.until ~= "parts_delivered"
+    if entrapment ~= nil and entrapment["until"] ~= nil then
+      if type(entrapment) == "table" and entrapment["until"] == "towed" then return nil, "table_invalid" end
+      if type(entrapment) ~= "table" or not names[entrapment.asset] or entrapment["until"] ~= "parts_delivered"
         or type(entrapment.assist_capability) ~= "string" or not count(entrapment.assist_range) or entrapment.assist_range <= 0
         or not count(entrapment.assist_frames) or entrapment.assist_frames <= 0
         or type(entrapment.parts_carrier_chassis) ~= "table" or #entrapment.parts_carrier_chassis < 1 then return nil, "invalid_entrapment" end
@@ -775,7 +775,7 @@ if gadgetHandler:IsSyncedCode() then
     for _, a in ipairs(scenario.predeployed or {}) do spawn_asset(a, x, z) end
     local frame, d = Spring.GetGameFrame(), scenario.distress
     entrapment_state = nil
-    if scenario.entrapment and scenario.entrapment.until == "parts_delivered" then
+    if scenario.entrapment and scenario.entrapment["until"] == "parts_delivered" then
       local target = assets[scenario.entrapment.asset]
       if target and target.unit_id then
         entrapment_state = { config = scenario.entrapment, target = scenario.entrapment.asset,

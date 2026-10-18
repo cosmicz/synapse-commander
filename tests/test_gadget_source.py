@@ -148,11 +148,17 @@ class GadgetSourceContractTests(unittest.TestCase):
 
     def test_v2_speed_and_parts_are_bounded_and_accounted(self) -> None:
         self.assertIn('a.speed_factor ~= nil and (type(a.speed_factor) ~= "number" or a.speed_factor < 0.05 or a.speed_factor > 1)', self.source)
-        self.assertIn('entrapment.until == "towed" then return nil, "table_invalid"', self.source)
+        self.assertIn('entrapment["until"] == "towed" then return nil, "table_invalid"', self.source)
         self.assertIn("definition.speed * speed_factor_for_unit(unitID) * (health_factor or 1)", self.source)
         record = function_body(self.source, "local function world_init_record")
         self.assertIn("parts_state.consistent", record)
         self.assertIn("speed_factors", record)
+
+    def test_lua_reserved_table_keys_use_bracket_syntax(self) -> None:
+        # `until` is a Lua keyword; ScenarioTable JSON keys must not become
+        # dotted Lua access, which native LuaRules rejects before GameStart.
+        self.assertNotIn(".until", self.source)
+        self.assertIn('entrapment["until"]', self.source)
 
     def test_parts_observations_have_the_gateway_required_shapes(self) -> None:
         observation = self.source[self.source.index("if principal_mode then", self.source.index("function gadget:GameFrame")):]
