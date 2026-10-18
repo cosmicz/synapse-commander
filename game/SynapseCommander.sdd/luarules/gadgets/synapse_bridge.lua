@@ -217,12 +217,11 @@ if gadgetHandler:IsSyncedCode() then
       and entrapment_state.target == principal
   end
 
-  local function compass_bearing(from_x, from_z, target_x, target_z)
+  local function planar_bearing(from_x, from_z, target_x, target_z)
     local dx, dz = target_x - from_x, target_z - from_z
-    -- Compass convention: 0=north (-z), 90=east (+x), clockwise.
-    local north = -dz
-    local angle = math.deg(math.atan(dx / (north == 0 and 0.000001 or north)))
-    if north < 0 then angle = angle + 180 end
+    -- Map convention used by the role prompts: 0=east (+x), 90=south (+z).
+    local angle = math.deg(math.atan(dz / (dx == 0 and 0.000001 or dx)))
+    if dx < 0 then angle = angle + 180 end
     if angle < 0 then angle = angle + 360 end
     return angle % 360
   end
@@ -231,7 +230,7 @@ if gadgetHandler:IsSyncedCode() then
     local key = seed or 0
     for i = 1, #(asset or "") do key = (key * 33 + string.byte(asset, i)) % 2001 end
     local offset = (key / 1000 - 1) * error_deg
-    local truth = compass_bearing(from_x, from_z, target_x, target_z)
+    local truth = planar_bearing(from_x, from_z, target_x, target_z)
     return truth, offset, (truth + offset + 360) % 360
   end
 
@@ -444,7 +443,7 @@ if gadgetHandler:IsSyncedCode() then
     local dx, dz = tx - ox, tz - oz
     entity.pos = nil
     entity.distance = math.floor(math.sqrt(dx * dx + dz * dz) + 0.5)
-    entity.bearing_deg = math.floor(compass_bearing(ox, oz, tx, tz) + 0.5) % 360
+    entity.bearing_deg = math.floor(planar_bearing(ox, oz, tx, tz) + 0.5) % 360
     return entity
   end
 
@@ -899,7 +898,7 @@ if gadgetHandler:IsSyncedCode() then
           if cx then
             local truth, offset, bearing = beacon_bearing(cx, cz, tx, tz, fix.error_deg, scenario.seed, d.asset)
             report.fix = { kind = "bearing", from = "commander", bearing_deg = bearing,
-                           reference = "north_clockwise" }
+                           reference = "east_south_clockwise" }
             if entrapment_state then
               entrapment_state.beacon_truth = { true_bearing_deg = truth, applied_error_deg = offset }
             end
