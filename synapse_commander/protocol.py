@@ -222,6 +222,28 @@ def _public_identifier(value: Any, field: str) -> str:
         raise ProtocolError("invalid_observation", error.detail) from error
 
 
+def _uses_parts_entrapment(scenario_table: Mapping[str, Any] | None) -> bool:
+    """Whether this selected table declares the narrowly public v2 repair rule."""
+    if scenario_table is None:
+        return False
+    entrapment = scenario_table.get("entrapment")
+    return isinstance(entrapment, Mapping) and entrapment.get("until") == "parts_delivered"
+
+
+def _bounded_resources(value: Any, scenario_table: Mapping[str, Any] | None,
+                       principal: str | None) -> dict[str, Any]:
+    """Keep the v2 parts stock commander-only without widening legacy views."""
+    if not isinstance(value, dict):
+        raise ProtocolError("invalid_observation", "resources must be an object")
+    if not _uses_parts_entrapment(scenario_table):
+        return value
+    if principal != "commander":
+        return {}
+    if set(value) != {"parts"}:
+        raise ProtocolError("invalid_observation", "invalid commander parts resources")
+    return {"parts": _public_count(value.get("parts"), "resources.parts")}
+
+
 def _bounded_factory_observation(value: Any, scenario: Mapping[str, Any]) -> tuple[list[dict[str, Any]], int, int]:
     """Project only public factory/job fields from an engine observation."""
     if value is None:
@@ -337,9 +359,11 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
     """Preserve the Loop 0 entity view while filtering the new identity field."""
     public: list[Any] = []
     controllers = frozenset() if scenario_table is None else frozenset(scenario_table["chips"])
+    parts_entrapment = _uses_parts_entrapment(scenario_table)
     fields = frozenset({
         "id", "pos", "source", "team", "observed_frame", "age_frames",
         "def", "health", "max_health", "commands", "controller", "sensor_range", "link",
+        "immobilised", "reason", "carrying_parts",
     })
     for entity in value:
         if not isinstance(entity, Mapping):
@@ -366,6 +390,17 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
                 raise ProtocolError("invalid_observation", "entity link must be boolean")
             if projected.get("source") != "own_body":
                 projected.pop("link")
+        if parts_entrapment and projected.get("source") == "own_body":
+            if "immobilised" in projected and not isinstance(projected["immobilised"], bool):
+                raise ProtocolError("invalid_observation", "entity immobilised must be boolean")
+            if "reason" in projected:
+                if projected.get("immobilised") is not True or projected["reason"] != "needs_parts":
+                    raise ProtocolError("invalid_observation", "invalid immobilised reason")
+            if "carrying_parts" in projected and not isinstance(projected["carrying_parts"], bool):
+                raise ProtocolError("invalid_observation", "entity carrying_parts must be boolean")
+        else:
+            for field in ("immobilised", "reason", "carrying_parts"):
+                projected.pop(field, None)
         if "controller" in projected:
             if scenario_table is None or projected.get("source") not in {"own_unit", "own_body"}:
                 projected.pop("controller")
@@ -475,6 +510,7 @@ def _bounded_expedition(value: Mapping[str, Any], result: dict[str, Any], scenar
         raise ProtocolError("invalid_observation", "selected scenario has no expedition declaration")
     if len(predeployed) > 8:
         raise ProtocolError("invalid_observation", "expedition declaration exceeds roster limit")
+    parts_entrapment = _uses_parts_entrapment(scenario_table)
     known = {item.get("name"): item for item in predeployed if isinstance(item, Mapping) and isinstance(item.get("name"), str)}
     if (len(known) != len(predeployed)
             or any(not _IDENTIFIER.fullmatch(name) for name in known)
@@ -491,6 +527,8 @@ def _bounded_expedition(value: Mapping[str, Any], result: dict[str, Any], scenar
             raise ProtocolError("invalid_observation", "invalid roster entry")
         status = item.get("status")
         expected = {"name", "def", "controller", "status", "unit_id"} if status == "in_contact" else {"name", "def", "controller", "status"}
+        if parts_entrapment and status == "in_contact":
+            expected.add("carrying_parts")
         if set(item) != expected or status not in {"in_contact", "no_contact", "extracted", "lost"}:
             raise ProtocolError("invalid_observation", "invalid roster entry")
         name = _public_identifier(item.get("name"), "roster name")
@@ -510,6 +548,10 @@ def _bounded_expedition(value: Mapping[str, Any], result: dict[str, Any], scenar
         public = {"name": name, "def": item["def"], "controller": item["controller"], "status": status}
         if status == "in_contact":
             public["unit_id"] = _public_count(item.get("unit_id"), "roster unit_id")
+            if parts_entrapment:
+                if not isinstance(item.get("carrying_parts"), bool):
+                    raise ProtocolError("invalid_observation", "roster carrying_parts must be boolean")
+                public["carrying_parts"] = item["carrying_parts"]
         public_roster.append(public)
     reports = value.get("reports", [])
     if not isinstance(reports, list) or len(reports) > 16:
@@ -553,11 +595,12 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
     clipped_entities = _bounded_entities(ordered_entities[:MAX_ENTITIES], scenario_table)
     clipped_receipts = ordered_receipts[-MAX_RECENT_EVENTS:]
     clipped_effects = ordered_effects[-MAX_RECENT_EVENTS:]
+    resources = _bounded_resources(value.get("resources", {}), scenario_table, principal)
     result: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
         "observation_id": observation_id,
         "frame": frame,
-        "resources": value.get("resources", {}),
+        "resources": resources,
         "entities": clipped_entities,
         "recent_receipts": clipped_receipts,
         "recent_effects": clipped_effects,
@@ -570,8 +613,6 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
     }
     if principal is not None:
         result["principal"] = principal
-    if not isinstance(result["resources"], dict):
-        raise ProtocolError("invalid_observation", "resources must be an object")
     # The smoke client needs its declared fixed goal, not the engine's private
     # scenario table. Copy only this public, typed field before the size check.
     scenario = value.get("scenario", {})

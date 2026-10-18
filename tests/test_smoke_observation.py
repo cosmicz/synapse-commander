@@ -1,6 +1,7 @@
 """The declared goal survives HTTP filtering; private scenario details do not."""
 import http.client
 import json
+from copy import deepcopy
 import threading
 import unittest
 
@@ -43,6 +44,61 @@ def provisioning_observation():
 
 
 class SmokeObservationTests(unittest.TestCase):
+    def test_v2_parts_state_is_typed_and_commander_only(self):
+        table = deepcopy(load_scenario("rescue_baseline"))
+        table["entrapment"] = {"until": "parts_delivered"}
+        source = provisioning_observation()
+        body = {"id": 42, "pos": [100, 0, 100], "source": "own_body",
+                "controller": "reasoner_large_v1", "immobilised": True,
+                "reason": "needs_parts", "carrying_parts": False,
+                "private": "not forwarded"}
+        source.update({
+            "principal": "commander", "body": body, "entities": [body], "reports": [],
+            "scenario": {"id": table["id"], "version": table["version"],
+                         "waypoints": {"W1": [500, 0, 100]}},
+            "resources": {"parts": 1},
+            "roster": [{"name": "S0", "def": "armflea", "controller": "escort_fixed_v1",
+                        "status": "in_contact", "unit_id": 71, "carrying_parts": True}],
+            "recent_effects": [
+                {"effect": "parts_delivered", "frame": 150, "unit_id": 42,
+                 "detail": {"target": "M1", "by": "S0", "unit_id": 42}},
+                {"effect": "mobility_restored", "frame": 150, "unit_id": 42,
+                 "detail": {"target": "M1", "by": "S0", "unit_id": 42}},
+            ],
+        })
+        observed = bounded_observation(source, scenario_table=table, principal="commander")
+        self.assertEqual(observed["resources"], {"parts": 1})
+        self.assertEqual(observed["body"]["reason"], "needs_parts")
+        self.assertFalse(observed["body"]["carrying_parts"])
+        self.assertTrue(observed["roster"][0]["carrying_parts"])
+        self.assertEqual([item["effect"] for item in observed["recent_effects"]],
+                         ["mobility_restored", "parts_delivered"])
+        self.assertNotIn("private", observed["body"])
+
+        non_commander = deepcopy(source)
+        non_commander["principal"] = "M1"
+        non_commander.pop("roster")
+        self.assertEqual(bounded_observation(non_commander, scenario_table=table,
+                                             principal="M1")["resources"], {})
+
+    def test_v2_parts_projection_rejects_untyped_state(self):
+        table = deepcopy(load_scenario("rescue_baseline"))
+        table["entrapment"] = {"until": "parts_delivered"}
+        source = provisioning_observation()
+        body = {"id": 42, "pos": [100, 0, 100], "source": "own_body",
+                "immobilised": "yes", "reason": "needs_parts"}
+        source.update({
+            "principal": "commander", "body": body, "entities": [body], "reports": [],
+            "scenario": {"id": table["id"], "version": table["version"]},
+            "resources": {"parts": 1},
+        })
+        with self.assertRaisesRegex(ProtocolError, "immobilised must be boolean"):
+            bounded_observation(source, scenario_table=table, principal="commander")
+        source["body"]["immobilised"] = True
+        source["resources"] = {"parts": 1, "hidden": 2}
+        with self.assertRaisesRegex(ProtocolError, "commander parts resources"):
+            bounded_observation(source, scenario_table=table, principal="commander")
+
     def test_mission_briefing_is_public_but_world_truth_and_source_overrides_are_not(self):
         for principal in ("commander", "job-1", "M1"):
             with self.subTest(principal=principal):

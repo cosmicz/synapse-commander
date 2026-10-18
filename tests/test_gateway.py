@@ -373,6 +373,19 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(receipt["reason"], "expiry_out_of_range")
 
+    def test_engine_immobilised_refusal_is_preserved(self) -> None:
+        class ImmobilisedTransport(MemoryTransport):
+            def submit_intent(self, envelope, wait_s: float = 1.0):
+                return IntentReceipt(envelope.intent_id, False, self.frame, "engine-immobilised", "immobilised")
+
+        self.server.shutdown(); self.thread.join(); self.server.server_close()
+        self.transport = ImmobilisedTransport(frame=100)
+        self.transport.publish_observation("blue", observation())
+        self.server = LoopbackGateway(self.transport, principal="agent-alpha", team="blue").make_server()
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
+        status, receipt = self.request("POST", "/v1/intents", produce())
+        self.assertEqual((status, receipt["accepted"], receipt["reason"]), (409, False, "immobilised"))
+
     def test_wrong_team_observation_cannot_be_used_by_fixed_team(self) -> None:
         self.transport.publish_observation("red", observation("red-obs"))
         status, receipt = self.request("POST", "/v1/intents", produce("red-obs"))
