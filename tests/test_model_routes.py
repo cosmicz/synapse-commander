@@ -97,6 +97,19 @@ class OpenAICompatibleRouteTests(unittest.TestCase):
             OpenAICompatibleRoute(name="x", model="m", endpoint="https://x", key_env="K", system_prompt="p",
                                   extra_body={"model": "other"}, environment={})
 
+    def test_reasoning_request_never_sets_both_effort_and_a_token_budget(self) -> None:
+        # OpenRouter answers HTTP 400 to every call that sets both.
+        seen = {}
+
+        def opener(wire, *, timeout):
+            seen["body"] = json.loads(wire.data)
+            return Response({"model": "m", "choices": [{"message": {"content": "{}"}}]})
+
+        OpenRouterRoute("m", system_prompt="p", environment={"OPENROUTER_API_KEY": "k"}, opener=opener).call("o")
+        reasoning = seen["body"]["reasoning"]
+        self.assertTrue(reasoning.get("enabled"))
+        self.assertFalse({"effort", "max_tokens"} <= set(reasoning), reasoning)
+
     def test_max_tokens_is_bounded(self) -> None:
         for bad in (0, 9000, True, 1.5):
             with self.assertRaises(ValueError):
