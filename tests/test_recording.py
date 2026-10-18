@@ -1325,8 +1325,10 @@ class PrincipalStreams(PrincipalLedgerCase):
 
     def test_a_delegation_decision_needs_its_named_recipient(self):
         # nav-rec 18:25 (live-07): "delegate" was met by any commander MESSAGE, even one to M1.
-        for to, expected in (("M1", "agent_only"), ("job-1", "agent_partial")):
-            with self.subTest(to=to):
+        # Met only by a message to the named recipient that the engine delivered into its stream.
+        for to, delivered, expected in (("M1", True, "agent_only"), ("job-1", True, "agent_partial"),
+                                        ("M1", False, "agent_partial")):
+            with self.subTest(to=to, delivered=delivered):
                 self.path.unlink(missing_ok=True)
                 r = self.recorder(principals=["commander", "M1"], principal_sources={"commander": "agent", "M1": "agent"},
                                   model_id=MODEL, required_decisions=[
@@ -1339,7 +1341,10 @@ class PrincipalStreams(PrincipalLedgerCase):
                     extra = {"type": "MESSAGE", "payload": {"to": "M1", "text": "EXTRACT"}} if principal == "commander" else {}
                     sub = self.intent(r, principal, f"i-{principal}", f"obs-{principal}-0", [cause], origin="agent",
                                       decision="delegate" if principal == "commander" else "d-M1", frame=frame, **extra)
-                    self.receipt(r, principal, f"i-{principal}", sub, frame=frame)
+                    rc = self.receipt(r, principal, f"i-{principal}", sub, frame=frame)
+                    if principal == "commander" and delivered:
+                        r.record(rec.EFFECT, sim_frame=frame, origin="engine", causes=[rc], payload={
+                            "type": "message_delivered", "principal": "M1", "intent_id": "i-commander", "detail": {"to": "M1"}})
                 r.run_end(2, {})
                 result = verify_ledger(self.path)
                 self.assertTrue(result.ok, result.errors)

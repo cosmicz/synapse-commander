@@ -973,8 +973,14 @@ def _required_decisions_met(required: list[dict[str, Any]], records: list[dict[s
                 continue
             if decision.get("type") is not None and payload["type"] != decision["type"]:
                 continue
-            # A delegation names its recipient: a message to anyone else is not it.
-            if decision.get("to") is not None and _recipient(payload) != decision["to"]:
+            # A delegation names its recipient: a message to anyone else is not
+            # it, and it counts only once the engine delivered that message into
+            # the recipient's own stream (an accepted but dropped message does not).
+            if decision.get("to") is not None and (_recipient(payload) != decision["to"] or not any(
+                    r["kind"] == EFFECT and r["payload"].get("type") == "message_delivered"
+                    and r["payload"].get("intent_id") == payload["intent_id"]
+                    and r["payload"].get("principal") == decision["to"]
+                    and (r["payload"].get("detail") or {}).get("to") == decision["to"] for r in records)):
                 continue
             chain = chains.get(intent["event_id"], [])
             if after_seq is not None:
