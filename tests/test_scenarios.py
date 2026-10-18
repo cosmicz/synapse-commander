@@ -118,7 +118,9 @@ class ScenarioTableTests(unittest.TestCase):
         self.assertEqual(table["resources"], {"parts": 1})
         self.assertEqual(table["entrapment"], {"asset": "M1", "until": "parts_delivered", "assist_capability": "assist",
                                                "assist_range": 96, "assist_frames": 150,
-                                               "parts_carrier_chassis": ["carrier_v1", "relay_support_v1"]})
+                                               "parts_carrier_chassis": ["carrier_v1"]})
+        # 18:10 ruling: only a produced carrier carries the one part; the relay does not.
+        self.assertNotIn("carries_parts", table["chassis"]["relay_support_v1"])
         self.assertEqual(table["mission"], {"timeout_frames": 15000})
         self.assertEqual(table["chips"], load_scenario("rescue_baseline")["chips"])
         self.assertEqual(table["distress"]["cause_hidden"], "terrain_entrapment+parts")

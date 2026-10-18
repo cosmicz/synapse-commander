@@ -187,8 +187,7 @@
     "assist_range": 96,
     "assist_frames": 150,
     "parts_carrier_chassis": [
-      "carrier_v1",
-      "relay_support_v1"
+      "carrier_v1"
     ]
   }
 }
