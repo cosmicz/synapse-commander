@@ -510,7 +510,9 @@ class AgentsRescue:
         self.announce = announce or (lambda _text: None)
         self.wall_deadline_s = wall_deadline_s
         self.sleep = sleep
-        self.trace: dict[str, Any] = {"agents": True}
+        self.trace: dict[str, Any] = {"agents": True,
+                                     "model_calls_per_principal": call_budget,
+                                     "model_calls_limit": call_budget * len(self.minds)}
 
     def run(self) -> dict[str, Any]:
         for mind in self.minds.values():

@@ -111,5 +111,32 @@ class ManufacturedMindTests(unittest.TestCase):
                 self.assertEqual(checks["live_minds_ran"]["ok"], expected)
 
 
+class MindBudgetEvidenceTests(unittest.TestCase):
+    def check(self, observed, traced=None, per_mind=2, total=6):
+        names = ["commander", "M1", "job-2"]
+        records = [{"kind": "MANIFEST", "payload": {
+            "principal_sources": {name: "agent" for name in names},
+            "external_budgets": {"model_calls_per_principal": per_mind, "model_calls": total}}}]
+        records += [{"kind": "INFERENCE", "payload": {"principal": name, "live": True}}
+                    for name, count in observed.items() for _ in range(count)]
+        trace = {"agents": True, "minds": {name: {"calls": count}
+                 for name, count in (observed if traced is None else traced).items()}}
+        return run.rescue_ledger_checks(records, trace)["model_call_budgets"]
+
+    def test_all_realized_minds_fit_the_declared_per_mind_and_aggregate_limits(self):
+        self.assertTrue(self.check({"commander": 2, "M1": 1, "job-2": 2})["ok"])
+
+    def test_one_mind_cannot_borrow_an_unused_minds_budget(self):
+        self.assertFalse(self.check({"commander": 3, "M1": 1})["ok"])
+
+    def test_an_incorrect_aggregate_declaration_is_refused(self):
+        self.assertFalse(self.check({"commander": 1}, total=2)["ok"])
+
+    def test_an_attempt_missing_from_the_ledger_is_not_hidden(self):
+        result = self.check({"commander": 1}, traced={"commander": 2})
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["trace_matches_ledger"])
+
+
 if __name__ == "__main__":
     unittest.main()

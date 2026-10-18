@@ -38,6 +38,8 @@ Engine bearing_deg uses 0 degrees = +x (east), 90 = +z (south, down the map),
 180 = -x (west), and 270 = -z (north). It is not a north-zero compass bearing.
 A reported beacon bearing is anchored at the receiving body's position at
 beacon time; use that known origin, not a different observer's current position.
+Relative entity bearings and distances instead use your own body as the origin
+at that observation's frame.
 
 Reply with exactly one JSON object:
  {"action":"intent","plan":"<current goal and reasoning in brief>",

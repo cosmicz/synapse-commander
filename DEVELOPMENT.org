@@ -253,6 +253,12 @@ child, regardless of its production number. Physical mission outcome and
 this evidence of delegation are reported separately. Model decisions do not
 establish physical success without the engine outcome.
 
+In agents mode, =--call-budget= bounds calls per live mind. The manifest records
+=model_calls_per_principal= and the aggregate =model_calls= ceiling across all
+ten bounded slots (commander, target and eight optional jobs). Unembodied slots
+make zero calls. The final check reconciles each mind's attempted-call count
+with the inference ledger and checks both limits; route failures consume calls.
+
 =python3 -W error -m unittest tests.test_dynamic_minds= exercises second-job
 activation, own-view isolation, unused slots and run checks with test doubles;
 native runs are needed to establish gameplay behavior.

@@ -542,7 +542,9 @@ def run_smoke(config: SmokeConfig, *,
             model_id=config.model if bonded or agents_mode else None,
             # The live chain the recorder must see from live inference to label a principal agent_only.
             required_decisions=AGENTS_REQUIRED_DECISIONS if agents_mode else None,
-            external_budgets={"model_calls": config.call_budget, "per_call_timeout_s": config.call_timeout_s,
+            external_budgets={"model_calls": config.call_budget * (len(session_principals) if agents_mode else 1),
+                              **({"model_calls_per_principal": config.call_budget} if agents_mode else {}),
+                              "per_call_timeout_s": config.call_timeout_s,
                               "wall_deadline_s": config.agent_deadline_s,
                               "route": getattr(model_route, "name", ROUTE_NAMES[config.route])}
             if bonded or agents_mode else None,
@@ -1335,6 +1337,22 @@ def rescue_ledger_checks(records: list[dict[str, Any]], trace: dict[str, Any]) -
             "routes": sorted({str(r["payload"].get("route")) for r in inferences}),
             "models": sorted({str(r["payload"].get("model_id")) for r in inferences}),
             "reported_cost_usd": round(sum(costs), 6) if costs else None}
+        manifest = next((r["payload"] for r in records if r["kind"] == "MANIFEST"), {})
+        budgets = manifest.get("external_budgets", {})
+        if "model_calls_per_principal" in budgets:
+            per_mind, total = budgets["model_calls_per_principal"], budgets.get("model_calls")
+            declared = manifest.get("principal_sources", {})
+            calls = {name: mind.get("calls", 0) for name, mind in (trace.get("minds") or {}).items()}
+            valid_limits = (type(per_mind) is int and per_mind > 0 and type(total) is int
+                            and total == per_mind * len(declared))
+            reconciled = all(calls.get(name, 0) == by_principal.get(name, 0)
+                             for name in set(calls) | set(by_principal))
+            checks["model_call_budgets"] = {
+                "ok": valid_limits and reconciled and len(inferences) <= total
+                      and set(by_principal) <= set(declared)
+                      and all(count <= per_mind for count in by_principal.values()),
+                "per_principal_limit": per_mind, "aggregate_limit": total,
+                "calls": by_principal, "trace_matches_ledger": reconciled}
     elif trace.get("bonded"):
         interventions = [r for r in records if r["kind"] == "OPERATOR_INTERVENTION"]
         inferences = [r for r in records if r["kind"] == "INFERENCE"]

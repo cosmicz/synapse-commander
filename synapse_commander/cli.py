@@ -107,7 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
     rescue.add_argument("--model", default=None,
                         help="bonded/agents: model for the route (claude-sonnet-5, gpt-6.1-sol, or "
                              "nvidia/nemotron-3-nano-30b-a3b by route)")
-    rescue.add_argument("--call-budget", type=int, default=20, help="bonded: maximum model calls")
+    rescue.add_argument("--call-budget", type=int, default=20,
+                        help="maximum calls per live mind in agents mode; total calls in bonded mode")
     rescue.add_argument("--call-timeout", type=float, default=60.0, help="bonded: seconds per model call")
     rescue.add_argument("--deadline", type=float, default=400.0, help="bonded/agents: wall seconds for the run")
     rescue.add_argument("--control-port", type=int, default=8090, help="bonded/agents --orders: loopback control port")
