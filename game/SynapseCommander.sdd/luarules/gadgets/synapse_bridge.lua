@@ -21,13 +21,14 @@ if gadgetHandler:IsSyncedCode() then
   -- mod option names a ScenarioTable/v1 file in this archive.  Every count
   -- and unit name comes from that versioned table, never from this code.
   local SCENARIO_LIMIT, MAX_JOBS = 16384, 8
-  local scenario, budgets, commander, factory = nil, nil, nil, nil
+  local scenario, budgets, resources, commander, factory = nil, nil, nil, nil, nil
   local scenario_origin_x, scenario_origin_z = nil, nil
   local extracted, lost, initial_losses, extraction_dwell, mission_outcome = {}, {}, {}, {}, nil
   local jobs, job_seq, job_spawning, embodied, commander_lost = {}, 0, nil, {}, false
   -- Initial world (rah26-5hf). Assets hold evaluator truth; principal-mode
   -- observations derive only from each body and delivered reports.
   local assets, asset_order, hidden, reports = {}, {}, {}, {}
+  local carrying_parts, entrapment_state, parts_consumed = {}, nil, 0
   local spawning_hidden = false
   -- Per-principal state is enabled only by a declared principals table.
   -- In that mode observations are calculated from geometry below, never from
@@ -85,10 +86,14 @@ if gadgetHandler:IsSyncedCode() then
         or (c.capabilities ~= nil and type(c.capabilities) ~= "table") then
         return nil, "invalid_chassis"
       end
+      if c.speed_factor ~= nil and (type(c.speed_factor) ~= "number" or c.speed_factor < 0.05 or c.speed_factor > 1) then return nil, "invalid_chassis" end
+      if c.carries_parts ~= nil and type(c.carries_parts) ~= "boolean" then return nil, "invalid_chassis" end
       for _, verb in ipairs(c.capabilities or {}) do if verb ~= "move" and verb ~= "sense" and verb ~= "assist" and verb ~= "relay" then return nil, "invalid_chassis" end end
       kinds = kinds + 1
     end
     if kinds < 1 or kinds > 8 then return nil, "invalid_chassis" end
+    if t.commander.speed_factor ~= nil and (type(t.commander.speed_factor) ~= "number" or t.commander.speed_factor < 0.05 or t.commander.speed_factor > 1) then return nil, "invalid_commander" end
+    if t.resources ~= nil and (type(t.resources) ~= "table" or not count(t.resources.parts or 0)) then return nil, "invalid_resources" end
     local w1 = type(t.waypoints) == "table" and t.waypoints.W1
     if type(w1) ~= "table" or type(w1[1]) ~= "number" or type(w1[3]) ~= "number" then return nil, "invalid_waypoint" end
     -- Optional initial-world fields.  The table is the fully chosen world for
@@ -102,7 +107,8 @@ if gadgetHandler:IsSyncedCode() then
         if type(a) ~= "table" or not identifier(a.name) or names[a.name] or not identifier(a.def) or not UnitDefNames[a.def]
           or (a.controller ~= nil and (not identifier(a.controller) or t.chips[a.controller] == nil))
           or not offset_pair(a.position) or (a.state ~= "active" and a.state ~= "destroyed") or type(a.contact) ~= "boolean"
-          or (a.health ~= nil and (type(a.health) ~= "number" or a.health <= 0 or a.health > 1)) then
+          or (a.health ~= nil and (type(a.health) ~= "number" or a.health <= 0 or a.health > 1))
+          or (a.speed_factor ~= nil and (type(a.speed_factor) ~= "number" or a.speed_factor < 0.05 or a.speed_factor > 1)) then
           return nil, "invalid_predeployed"
         end
         names[a.name] = true
@@ -120,6 +126,19 @@ if gadgetHandler:IsSyncedCode() then
       if type(d) ~= "table" or not names[d.asset] or type(d.last_known) ~= "table" or not offset_pair(d.last_known.position)
         or not count(d.last_known.age_frames) or not identifier(d.symptom) or not identifier(d.cause_hidden) then
         return nil, "invalid_distress"
+      end
+    end
+    local entrapment = t.entrapment
+    if entrapment ~= nil and entrapment.until ~= nil then
+      if type(entrapment) == "table" and entrapment.until == "towed" then return nil, "table_invalid" end
+      if type(entrapment) ~= "table" or not names[entrapment.asset] or entrapment.until ~= "parts_delivered"
+        or type(entrapment.assist_capability) ~= "string" or not count(entrapment.assist_range) or entrapment.assist_range <= 0
+        or not count(entrapment.assist_frames) or entrapment.assist_frames <= 0
+        or type(entrapment.parts_carrier_chassis) ~= "table" or #entrapment.parts_carrier_chassis < 1 then return nil, "invalid_entrapment" end
+      local listed = {}
+      for _, chassis in ipairs(entrapment.parts_carrier_chassis) do
+        if type(chassis) ~= "string" or listed[chassis] or not t.chassis[chassis] or not t.chassis[chassis].carries_parts then return nil, "invalid_entrapment" end
+        listed[chassis] = true
       end
     end
     -- Principal mode is deliberately opt-in for backwards-compatible Loop 1
@@ -214,6 +233,46 @@ if gadgetHandler:IsSyncedCode() then
     return nil
   end
 
+  local asset_for_unit
+
+  local function speed_factor_for_unit(unitID)
+    if commander and commander.unit_id == unitID then return scenario.commander.speed_factor or 1 end
+    local _, asset = asset_for_unit(unitID)
+    if asset and asset.speed_factor then return asset.speed_factor end
+    local chassis = chassis_for_unit(unitID)
+    return chassis and (scenario.chassis[chassis].speed_factor or 1) or 1
+  end
+
+  local function apply_speed(unitID, health_factor, held)
+    local definition = UnitDefs[Spring.GetUnitDefID(unitID)]
+    if Spring.MoveCtrl and Spring.MoveCtrl.SetGroundMoveTypeData and definition and definition.speed then
+      local speed = held and 0 or math.min(definition.speed, definition.speed * speed_factor_for_unit(unitID) * (health_factor or 1))
+      pcall(Spring.MoveCtrl.SetGroundMoveTypeData, unitID, "maxSpeed",
+            speed)
+      return speed
+    end
+    return nil
+  end
+
+  local function chassis_carries_parts(chassis)
+    return chassis and scenario.chassis[chassis] and scenario.chassis[chassis].carries_parts == true
+  end
+
+  local function allocate_parts(chassis)
+    if chassis_carries_parts(chassis) and resources and resources.parts > 0 then
+      resources.parts = resources.parts - 1
+      return true
+    end
+    return false
+  end
+
+  asset_for_unit = function(unitID)
+    for _, name in ipairs(asset_order) do
+      if assets[name].unit_id == unitID then return name, assets[name] end
+    end
+    return nil, nil
+  end
+
   local function principal_for_unit(unitID)
     if unit_principal[unitID] then return unit_principal[unitID] end
     if principal_mode and Spring.GetUnitTeam(unitID) == TEAM0 then return "commander" end
@@ -283,6 +342,10 @@ if gadgetHandler:IsSyncedCode() then
       body.controller = embodied[unitID]
       body.sensor_range = unit_sensor_range(unitID)
       body.link = links[unitID] == true
+      if carrying_parts[unitID] then body.carrying_parts = true end
+      if entrapment_state and not entrapment_state.delivered and entrapment_state.unit_id == unitID then
+        body.immobilised, body.reason = true, "needs_parts"
+      end
     end
     return body
   end
@@ -312,7 +375,7 @@ if gadgetHandler:IsSyncedCode() then
     return false
   end
 
-  local function emit_receipt(intent, status, reason)
+  local function emit_receipt(intent, status, reason, detail)
     local id = type(intent) == "table" and intent.intent_id or nil
     local body = {
       schema = "IntentReceipt/v1",
@@ -323,6 +386,7 @@ if gadgetHandler:IsSyncedCode() then
       reason = reason,
       frame = Spring.GetGameFrame(),
     }
+    if detail then body.detail = detail end
     out("receipt", body)
   end
 
@@ -382,6 +446,25 @@ if gadgetHandler:IsSyncedCode() then
     out("effect", body)
   end
 
+  local function effect_to_target_viewers(name, frame, target_name, targetID, detail)
+    local sent, owner = {}, principal_for_unit(targetID)
+    if owner then
+      effect(name, frame, targetID, nil, detail, owner)
+      sent[owner] = true
+    end
+    for _, principal in ipairs(principal_order) do
+      local bodyID = body_for_principal(principal)
+      if bodyID and not sent[principal] and detects(bodyID, targetID) then
+        effect(name, frame, targetID, nil, detail, principal)
+        sent[principal] = true
+      end
+    end
+  end
+
+  local function stop_unit(unitID)
+    if Spring.ValidUnitID(unitID) then Spring.GiveOrderToUnit(unitID, CMD.STOP, {}, 0) end
+  end
+
   -- The embodied commander is BAR's own team-0 commander.  Binding it spends
   -- one body and the declared chip, because the body cap counts every mobile
   -- embodiment; an unbudgeted commander stays unbound and the team cannot act.
@@ -408,6 +491,7 @@ if gadgetHandler:IsSyncedCode() then
       end
     end
     embodied[unitID] = chip
+    apply_speed(unitID, 1, false)
     if principal_mode then unit_principal[unitID], principal_body_ids[unitID] = "commander", true end
     effect("commander_bound", Spring.GetGameFrame(), unitID, nil, { chip = chip }, principal_mode and "commander" or nil)
   end
@@ -423,7 +507,8 @@ if gadgetHandler:IsSyncedCode() then
   end
 
   local function job_detail(job)
-    return { job_id = job.job_id, factory = factory.name, chassis = job.chassis, controller = job.controller }
+    return { job_id = job.job_id, factory = factory.name, chassis = job.chassis, controller = job.controller,
+             parts = job.carrying_parts and 1 or 0 }
   end
 
   local PRODUCE_FIELDS = { factory = true, chassis = true, controller = true, parameters = true }
@@ -463,9 +548,10 @@ if gadgetHandler:IsSyncedCode() then
     local job = {
       job_id = "job-" .. job_seq, seq = job_seq, intent_id = id, chassis = payload.chassis, controller = payload.controller,
       started_frame = start, done_frame = start + chassis.build_frames + chassis.commission_frames, started = false,
+      carrying_parts = allocate_parts(payload.chassis),
     }
     jobs[#jobs + 1] = job
-    emit_receipt(intent, "accepted", nil)
+    emit_receipt(intent, "accepted", nil, { parts = job.carrying_parts and 1 or 0 })
     if start == frame then
       job.started = true
       effect("factory_job_started", frame, factory.unit_id, id, job_detail(job))
@@ -490,6 +576,9 @@ if gadgetHandler:IsSyncedCode() then
       return
     end
     embodied[unitID] = job.controller
+    entity_names[unitID] = job.job_id
+    if job.carrying_parts then carrying_parts[unitID] = true end
+    apply_speed(unitID, 1, false)
     if principal_mode then
       for _, chip in ipairs(scenario.reasoner_chips) do
         if chip == job.controller then
@@ -515,6 +604,7 @@ if gadgetHandler:IsSyncedCode() then
     if a.controller then budgets.chips[a.controller] = budgets.chips[a.controller] - 1 end
     local ax, az = x + a.position[1], z + a.position[2]
     local record = { name = a.name, def = a.def, controller = a.controller, state = a.state, contact = a.contact, health = a.health,
+                     speed_factor = a.speed_factor,
                      position = { ax, Spring.GetGroundHeight(ax, az), az } }
     assets[a.name] = record
     asset_order[#asset_order + 1] = a.name
@@ -534,14 +624,13 @@ if gadgetHandler:IsSyncedCode() then
     if a.controller then embodied[unitID] = a.controller end
     entity_names[unitID] = a.name
     if principal_mode and principals[a.name] then unit_principal[unitID], principal_body_ids[unitID] = a.name, true end
+    local carried = allocate_parts(chassis_for_unit(unitID))
+    if carried then carrying_parts[unitID] = true end
     if a.health then
       local _, max_health = Spring.GetUnitHealth(unitID)
       if max_health then Spring.SetUnitHealth(unitID, max_health * a.health) end
-      local definition = UnitDefs[Spring.GetUnitDefID(unitID)]
-      if Spring.MoveCtrl and Spring.MoveCtrl.SetGroundMoveTypeData and definition and definition.speed then
-        Spring.MoveCtrl.SetGroundMoveTypeData(unitID, "maxSpeed", definition.speed * a.health)
-      end
     end
+    record.applied_max_speed = apply_speed(unitID, a.health or 1, false)
   end
 
   -- Evaluator-only truth, recorded before play: never part of an observation.
@@ -581,6 +670,21 @@ if gadgetHandler:IsSyncedCode() then
     if principal_mode then
       for _, name in ipairs(principal_order) do principal_bodies[name] = body_for_principal(name) or Json.null end
     end
+    local speed_factors = { commander = scenario.commander.speed_factor or 1, chassis = {}, bodies = {} }
+    for id, chassis in pairs(scenario.chassis) do speed_factors.chassis[id] = chassis.speed_factor or 1 end
+    if commander and commander.unit_id then
+      speed_factors.bodies.commander = { factor = speed_factor_for_unit(commander.unit_id), max_speed = apply_speed(commander.unit_id, 1, false) or Json.null }
+    end
+    local carried = 0
+    for _, name in ipairs(asset_order) do
+      local a = assets[name]
+      if a.unit_id and carrying_parts[a.unit_id] then carried = carried + 1 end
+      speed_factors.bodies[name] = { factor = a.speed_factor or (chassis_for_unit(a.unit_id) and scenario.chassis[chassis_for_unit(a.unit_id)].speed_factor) or 1,
+                                     max_speed = a.applied_max_speed or Json.null }
+    end
+    local parts_total = scenario.resources and scenario.resources.parts or 0
+    local parts_state = { total = parts_total, carried = carried, consumed = parts_consumed, available = resources and resources.parts or 0 }
+    parts_state.consistent = parts_state.total == parts_state.carried + parts_state.consumed + parts_state.available
     return {
       name = "world_init", id = scenario.id, version = scenario.version, seed = scenario.seed or Json.null, frame = frame,
       commander = commander and { unit_id = commander.unit_id, chip = commander.chip, position = commander.position or Json.null } or Json.null,
@@ -589,7 +693,9 @@ if gadgetHandler:IsSyncedCode() then
                          last_known = reports[1] and reports[1].position, observed_frame = reports[1] and reports[1].observed_frame } or Json.null,
       link_check = link_check,
       terrain_occlusion = terrain_method, impairment = impaired and "persistent" or Json.null,
-      principal_bodies = principal_bodies,
+      principal_bodies = principal_bodies, speed_factors = speed_factors,
+      resources = resources and { parts = resources.parts } or Json.null,
+      parts = parts_state,
     }
   end
 
@@ -618,6 +724,7 @@ if gadgetHandler:IsSyncedCode() then
       end
     end
     budgets = { bodies_remaining = scenario.bodies, chips = {} }
+    resources, parts_consumed = { parts = (scenario.resources and scenario.resources.parts) or 0 }, 0
     for id, n in pairs(scenario.chips) do budgets.chips[id] = n end
     out("scenario", { name = "factory_spawn", id = scenario.id, version = scenario.version, waypoints = { W1 = waypoint } })
     scenario_emitted = true
@@ -644,6 +751,19 @@ if gadgetHandler:IsSyncedCode() then
     end
     for _, a in ipairs(scenario.predeployed or {}) do spawn_asset(a, x, z) end
     local frame, d = Spring.GetGameFrame(), scenario.distress
+    entrapment_state = nil
+    if scenario.entrapment and scenario.entrapment.until == "parts_delivered" then
+      local target = assets[scenario.entrapment.asset]
+      if target and target.unit_id then
+        entrapment_state = { config = scenario.entrapment, target = scenario.entrapment.asset,
+                             unit_id = target.unit_id, delivered = false, frames = {} }
+        stop_unit(target.unit_id)
+        apply_speed(target.unit_id, target.health or 1, true)
+        effect("immobilised", frame, target.unit_id, nil,
+               { target = scenario.entrapment.asset, unit_id = target.unit_id, reason = "needs_parts" },
+               scenario.entrapment.asset)
+      end
+    end
     recompute_links(frame)
     if d then
       -- The team starts with this already received, aged report and nothing else
@@ -821,6 +941,43 @@ if gadgetHandler:IsSyncedCode() then
     end
   end
 
+  local function update_entrapment_state(frame)
+    local state = entrapment_state
+    if not state or state.delivered or not Spring.ValidUnitID(state.unit_id) then return end
+    local target_x, _, target_z = Spring.GetUnitPosition(state.unit_id)
+    if not target_x then return end
+    local eligible, selected = {}, nil
+    for _, unitID in ipairs(Spring.GetTeamUnits(TEAM0) or {}) do
+      local chassis, allowed = chassis_for_unit(unitID), false
+      for _, id in ipairs(state.config.parts_carrier_chassis) do if chassis == id then allowed = true; break end end
+      if allowed and embodied[unitID] and carrying_parts[unitID] and has_capability(unitID, state.config.assist_capability) then
+        eligible[#eligible + 1] = unitID
+      else
+        state.frames[unitID] = nil
+      end
+    end
+    table.sort(eligible)
+    for _, unitID in ipairs(eligible) do
+      local x, _, z = Spring.GetUnitPosition(unitID)
+      if x and squared_distance(x, z, target_x, target_z) <= state.config.assist_range * state.config.assist_range then
+        state.frames[unitID] = (state.frames[unitID] or 0) + 1
+        if state.frames[unitID] >= state.config.assist_frames and not selected then selected = unitID end
+      else
+        state.frames[unitID] = 0
+      end
+    end
+    if not selected then return end
+    state.delivered = true
+    carrying_parts[selected] = nil
+    parts_consumed = parts_consumed + 1
+    local target_name, asset = asset_for_unit(state.unit_id)
+    apply_speed(state.unit_id, asset and asset.health or 1, false)
+    local by = entity_names[selected] or ("unit-" .. selected)
+    local detail = { target = state.target, by = by, unit_id = state.unit_id }
+    effect_to_target_viewers("parts_delivered", frame, state.target, state.unit_id, detail)
+    effect_to_target_viewers("mobility_restored", frame, state.target, state.unit_id, detail)
+  end
+
   -- Principal-mode rejection must not turn an arbitrary numeric id into an
   -- existence oracle.  A principal may name its own body, a body it currently
   -- detects, or (for the commander) a named principal body that is already
@@ -935,6 +1092,10 @@ if gadgetHandler:IsSyncedCode() then
       if not owner and not links[unitID] then emit_receipt(intent, "rejected", "no_link"); return true end
       if not has_capability(unitID, "move") then emit_receipt(intent, "rejected", "incapable"); return true end
     end
+    if entrapment_state and not entrapment_state.delivered and entrapment_state.unit_id == unitID then
+      stop_unit(unitID)
+      emit_receipt(intent, "rejected", "immobilised"); return true
+    end
     local frame = Spring.GetGameFrame()
     local problem = freshness_problem(intent, principal_mode and principal or teamID, frame)
     if problem then emit_receipt(intent, "rejected", problem); return true end
@@ -962,10 +1123,8 @@ if gadgetHandler:IsSyncedCode() then
           and a.unit_id and Spring.ValidUnitID(a.unit_id) then
           local health, max_health = Spring.GetUnitHealth(a.unit_id)
           if health and max_health and health > max_health * a.health then Spring.SetUnitHealth(a.unit_id, max_health * a.health) end
-          local definition = UnitDefs[Spring.GetUnitDefID(a.unit_id)]
-          if Spring.MoveCtrl and Spring.MoveCtrl.SetGroundMoveTypeData and definition and definition.speed then
-            Spring.MoveCtrl.SetGroundMoveTypeData(a.unit_id, "maxSpeed", definition.speed * a.health)
-          end
+          local held = entrapment_state and not entrapment_state.delivered and entrapment_state.unit_id == a.unit_id
+          a.applied_max_speed = apply_speed(a.unit_id, a.health, held)
         end
       end
     end
@@ -1010,6 +1169,7 @@ if gadgetHandler:IsSyncedCode() then
         end
       end
     end
+    update_entrapment_state(frame)
     update_rescue_state(frame)
     if frame % OBS_INTERVAL ~= 0 then return end
     if principal_mode then
@@ -1041,6 +1201,7 @@ if gadgetHandler:IsSyncedCode() then
           end
           if principal == "commander" then
             body.budgets = { bodies_remaining = budgets.bodies_remaining, chips = budgets.chips }
+            body.resources = { parts = resources.parts }
             body.permitted_intents[#body.permitted_intents + 1] = {
               type = "PRODUCE", factories = { factory.name },
               chassis = sorted_keys(scenario.chassis), controllers = sorted_keys(scenario.chips),
@@ -1059,14 +1220,33 @@ if gadgetHandler:IsSyncedCode() then
               local a = assets[name]
               local linked = a.unit_id and links[a.unit_id] == true
               local status = extracted[name] and "extracted" or (lost[name] and "lost" or (linked and "in_contact" or "no_contact"))
-              body.roster[#body.roster + 1] = { name = name, def = a.def, controller = a.controller or Json.null,
-                                                 status = status,
-                                                 unit_id = status == "in_contact" and a.unit_id or nil }
+              local entry = { name = name, def = a.def, controller = a.controller or Json.null,
+                              status = status, unit_id = status == "in_contact" and a.unit_id or nil }
+              if status == "in_contact" then entry.carrying_parts = carrying_parts[a.unit_id] == true end
+              body.roster[#body.roster + 1] = entry
+            end
+            local asset_units, units = {}, Spring.GetTeamUnits(TEAM0) or {}
+            for _, name in ipairs(asset_order) do if assets[name].unit_id then asset_units[assets[name].unit_id] = true end end
+            table.sort(units)
+            for _, unitID in ipairs(units) do
+              if unitID ~= commander.unit_id and unitID ~= factory.unit_id and not asset_units[unitID] and embodied[unitID] then
+                local linked = links[unitID] == true
+                local definition = UnitDefs[Spring.GetUnitDefID(unitID)]
+                local entry = { name = entity_names[unitID] or ("unit-" .. unitID), def = definition and definition.name,
+                                controller = embodied[unitID], status = linked and "in_contact" or "no_contact",
+                                unit_id = linked and unitID or nil }
+                if linked then entry.carrying_parts = carrying_parts[unitID] == true end
+                body.roster[#body.roster + 1] = entry
+              end
             end
             if #reports > 0 then body.reports = body.reports or {}; for _, report in ipairs(reports) do table.insert(body.reports, report) end end
           end
-          while #Json.encode(body) > 32768 and #body.reports > 0 do table.remove(body.reports, 1); body.truncated = true; body.omitted = body.omitted + 1 end
           while #Json.encode(body) > 32768 and #body.entities > 1 do table.remove(body.entities); body.truncated = true; body.omitted = body.omitted + 1 end
+          while #Json.encode(body) > 32768 and #body.reports > 0 do
+            local remove = 1
+            for i, report in ipairs(body.reports) do if report.kind ~= "message" then remove = i; break end end
+            table.remove(body.reports, remove); body.truncated = true; body.omitted = body.omitted + 1
+          end
           remember_observation(principal, body.observation_id, frame)
           out("observation", body)
         end

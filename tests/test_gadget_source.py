@@ -114,7 +114,7 @@ class GadgetSourceContractTests(unittest.TestCase):
     def test_declared_impairment_survives_runtime_spawn_and_is_recorded(self) -> None:
         self.assertIn("contact = a.contact, health = a.health", self.source)
         spawn = self.source[self.source.index("local function spawn_asset"):self.source.index("local function world_init_record")]
-        self.assertIn('SetGroundMoveTypeData(unitID, "maxSpeed", definition.speed * a.health)', spawn)
+        self.assertIn("record.applied_max_speed = apply_speed(unitID, a.health or 1, false)", spawn)
         record = function_body(self.source, "local function world_init_record")
         self.assertIn("health = a.health or Json.null", record)
         self.assertIn('impairment = impaired and "persistent" or Json.null', record)
@@ -133,6 +133,31 @@ class GadgetSourceContractTests(unittest.TestCase):
             self.source.index('emit_receipt(intent, "rejected", "already_at_waypoint")'),
             self.task_rate_check(),
         )
+
+    def test_parts_entrapment_is_authorized_after_visibility_and_restores_physical_speed(self) -> None:
+        task = self.source[self.source.index('if intent.type ~= "TASK"'):self.source.index("function gadget:GameFrame")]
+        self.assertIn('emit_receipt(intent, "rejected", "immobilised")', task)
+        self.assertGreater(task.index('"immobilised"'), task.index("principal_can_name_unit"))
+        self.assertIn("stop_unit(unitID)", task)
+        update = function_body(self.source, "local function update_entrapment_state")
+        self.assertIn('effect_to_target_viewers("parts_delivered"', update)
+        self.assertIn('effect_to_target_viewers("mobility_restored"', update)
+        self.assertIn("carrying_parts[selected] = nil", update)
+        self.assertIn("apply_speed(state.unit_id", update)
+
+    def test_v2_speed_and_parts_are_bounded_and_accounted(self) -> None:
+        self.assertIn('a.speed_factor ~= nil and (type(a.speed_factor) ~= "number" or a.speed_factor < 0.05 or a.speed_factor > 1)', self.source)
+        self.assertIn('entrapment.until == "towed" then return nil, "table_invalid"', self.source)
+        self.assertIn("definition.speed * speed_factor_for_unit(unitID) * (health_factor or 1)", self.source)
+        record = function_body(self.source, "local function world_init_record")
+        self.assertIn("parts_state.consistent", record)
+        self.assertIn("speed_factors", record)
+
+    def test_parts_observations_have_the_gateway_required_shapes(self) -> None:
+        observation = self.source[self.source.index("if principal_mode then", self.source.index("function gadget:GameFrame")):]
+        self.assertIn("body.resources = { parts = resources.parts }", observation)
+        self.assertIn("entry.carrying_parts = carrying_parts[a.unit_id] == true", observation)
+        self.assertIn("entry.carrying_parts = carrying_parts[unitID] == true", observation)
 
 
 class FactoryProvisioningSourceTests(unittest.TestCase):
@@ -162,7 +187,7 @@ class FactoryProvisioningSourceTests(unittest.TestCase):
     def test_produce_spends_only_after_every_check_and_before_acceptance(self) -> None:
         self.order('"rate_limited"', "budgets.bodies_remaining = budgets.bodies_remaining - 1",
                    "budgets.chips[payload.controller] = budgets.chips[payload.controller] - 1",
-                   'emit_receipt(intent, "accepted", nil)')
+                   'emit_receipt(intent, "accepted", nil,')
         self.assertIn("#jobs >= MAX_JOBS", self.produce)
         self.assertIn("MAX_JOBS = 16384, 8", self.source)
 
@@ -360,14 +385,16 @@ class PrincipalViewSourceTests(unittest.TestCase):
         self.assertIn("while #list > MAX_REPORTS", self.source)
 
     def test_authority_and_observation_rejections_precede_orders(self) -> None:
-        task = self.source[self.source.index('if intent.type ~= "TASK"'):self.source.index("Spring.GiveOrderToUnit")]
+        task_start = self.source.index('if intent.type ~= "TASK"')
+        task = self.source[task_start:self.source.index("Spring.GiveOrderToUnit", task_start)]
         for reason in ('"unknown_principal"', '"not_authorized"', '"no_link"', '"incapable"', '"unknown_observation"'):
             self.assertIn(reason, self.source)
         self.assertLess(task.index('"not_authorized"'), task.index("Spring.GetUnitPosition"))
         self.assertIn("principal_mode and principal or teamID", task)
 
     def test_principal_task_ids_are_visibility_gated_before_authority(self) -> None:
-        task = self.source[self.source.index('if intent.type ~= "TASK"'):self.source.index("Spring.GiveOrderToUnit")]
+        task_start = self.source.index('if intent.type ~= "TASK"')
+        task = self.source[task_start:self.source.index("Spring.GiveOrderToUnit", task_start)]
         self.assertIn("local function principal_can_name_unit", self.source)
         self.assertLess(task.index("principal_can_name_unit(principal, unitID)"), task.index('"not_authorized"'))
         self.assertLess(task.index("principal_can_name_unit(principal, unitID)"), task.index('"not_owned"'))
