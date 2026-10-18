@@ -56,6 +56,30 @@ class ScenarioTableTests(unittest.TestCase):
         table = load_scenario("rescue_baseline")
         self.assertEqual(table["commander"]["position"], [0, 240])
 
+    def test_v2_parts_entrapment_is_explicit_and_towing_is_refused(self):
+        table = copy.deepcopy(load_scenario("rescue_baseline"))
+        table["resources"] = {"parts": 1}
+        table["commander"]["speed_factor"] = .6
+        table["chassis"]["carrier_v1"].update({"speed_factor": .6, "carries_parts": True})
+        table["entrapment"] = {
+            "asset": "M1", "until": "parts_delivered", "assist_capability": "assist",
+            "assist_range": 96, "assist_frames": 150,
+            "parts_carrier_chassis": ["carrier_v1"],
+        }
+        self.assertEqual(_validate(table, table["id"])["entrapment"]["until"], "parts_delivered")
+        invalid = copy.deepcopy(table)
+        invalid["entrapment"]["until"] = "towed"
+        with self.assertRaisesRegex(ScenarioError, "entrapment"):
+            _validate(invalid, invalid["id"])
+        invalid = copy.deepcopy(table)
+        invalid["chassis"]["carrier_v1"]["carries_parts"] = False
+        with self.assertRaisesRegex(ScenarioError, "entrapment"):
+            _validate(invalid, invalid["id"])
+        invalid = copy.deepcopy(table)
+        invalid["commander"]["speed_factor"] = .01
+        with self.assertRaisesRegex(ScenarioError, "invalid commander"):
+            _validate(invalid, invalid["id"])
+
     def test_view_smoke_is_a_separate_principal_fixture(self):
         table = load_scenario("view_smoke")
         self.assertEqual(set(table["principals"]), {"commander", "M1"})

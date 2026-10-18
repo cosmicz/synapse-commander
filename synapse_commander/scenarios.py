@@ -67,7 +67,7 @@ def _validate_mission_v2(root: Mapping[str, Any], chassis: Mapping[str, Any]) ->
             or not _identifier(entrapment["assist_capability"]) \
             or type(radius) not in (int, float) or not math.isfinite(radius) or radius <= 0 \
             or not _non_negative_int(frames) or frames == 0 \
-            or not isinstance(carriers, list) or not carriers or any(c not in chassis for c in carriers) or len(set(carriers)) != len(carriers):
+            or not isinstance(carriers, list) or not carriers or any(c not in chassis or chassis[c].get("carries_parts") is not True for c in carriers) or len(set(carriers)) != len(carriers):
         raise ScenarioError("invalid entrapment")
 
 

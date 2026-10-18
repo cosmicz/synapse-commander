@@ -244,6 +244,51 @@ def _bounded_resources(value: Any, scenario_table: Mapping[str, Any] | None,
     return {"parts": _public_count(value.get("parts"), "resources.parts")}
 
 
+def _bounded_v2_effects(effects: list[Any], scenario_table: Mapping[str, Any] | None) -> list[Any]:
+    """Retain v1 event compatibility while fail-closing the new repair effects."""
+    if not _uses_parts_entrapment(scenario_table):
+        return effects
+    entrapment = scenario_table["entrapment"]
+    asset = entrapment.get("asset")
+    predeployed = scenario_table.get("predeployed", [])
+    known_by = {"commander", *scenario_table.get("chassis", {})}
+    known_by.update(item.get("name") for item in predeployed if isinstance(item, Mapping))
+    public: list[Any] = []
+    for effect in effects:
+        if not isinstance(effect, Mapping) or effect.get("effect") not in {"parts_delivered", "mobility_restored"}:
+            public.append(effect)
+            continue
+        if set(effect) - {"schema", "effect", "frame", "unit_id", "team", "intent_id", "detail", "principal"}:
+            raise ProtocolError("invalid_observation", "repair effect has unsupported fields")
+        frame = _public_count(effect.get("frame"), "repair effect frame")
+        unit_id = _public_count(effect.get("unit_id"), "repair effect unit_id")
+        detail = effect.get("detail")
+        if not isinstance(detail, Mapping) or detail.get("target") != asset:
+            raise ProtocolError("invalid_observation", "repair effect has invalid target")
+        name = effect["effect"]
+        if name == "parts_delivered":
+            if set(detail) != {"target", "by", "unit_id"} or detail.get("unit_id") != unit_id:
+                raise ProtocolError("invalid_observation", "parts delivery effect has invalid detail")
+            by = _public_identifier(detail.get("by"), "parts delivery source")
+            if by not in known_by and not re.fullmatch(r"job-[0-9]{1,8}", by):
+                raise ProtocolError("invalid_observation", "parts delivery source is unknown")
+            public_detail = {"target": asset, "by": by, "unit_id": unit_id}
+        else:
+            if set(detail) != {"target"}:
+                raise ProtocolError("invalid_observation", "mobility effect has invalid detail")
+            public_detail = {"target": asset}
+        item: dict[str, Any] = {"effect": name, "frame": frame, "unit_id": unit_id,
+                                "detail": public_detail}
+        if "intent_id" in effect:
+            intent_id = effect["intent_id"]
+            if intent_id is not None:
+                item["intent_id"] = _public_identifier(intent_id, "repair effect intent_id")
+            else:
+                item["intent_id"] = None
+        public.append(item)
+    return public
+
+
 def _bounded_factory_observation(value: Any, scenario: Mapping[str, Any]) -> tuple[list[dict[str, Any]], int, int]:
     """Project only public factory/job fields from an engine observation."""
     if value is None:
@@ -355,7 +400,8 @@ def _bounded_provisioning(value: Mapping[str, Any], result: dict[str, Any], scen
         result["truncated"] = result["truncated"] or factory_omitted > 0 or job_omitted > 0
 
 
-def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None) -> list[Any]:
+def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None,
+                      principal: str | None = None) -> list[Any]:
     """Preserve the Loop 0 entity view while filtering the new identity field."""
     public: list[Any] = []
     controllers = frozenset() if scenario_table is None else frozenset(scenario_table["chips"])
@@ -363,7 +409,7 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
     fields = frozenset({
         "id", "pos", "source", "team", "observed_frame", "age_frames",
         "def", "health", "max_health", "commands", "controller", "sensor_range", "link",
-        "immobilised", "reason", "carrying_parts",
+        "immobilised", "reason", "carrying_parts", "speed_factor",
     })
     for entity in value:
         if not isinstance(entity, Mapping):
@@ -390,7 +436,15 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
                 raise ProtocolError("invalid_observation", "entity link must be boolean")
             if projected.get("source") != "own_body":
                 projected.pop("link")
-        if parts_entrapment and projected.get("source") == "own_body":
+        source = projected.get("source")
+        if parts_entrapment and (source == "own_body" or (principal == "commander" and source == "own_unit")):
+            if "speed_factor" in projected:
+                factor = projected["speed_factor"]
+                if type(factor) not in (int, float) or not math.isfinite(factor) or not 0.05 <= factor <= 1.0:
+                    raise ProtocolError("invalid_observation", "entity speed_factor must be in 0.05..1.0")
+        else:
+            projected.pop("speed_factor", None)
+        if parts_entrapment and source == "own_body":
             if "immobilised" in projected and not isinstance(projected["immobilised"], bool):
                 raise ProtocolError("invalid_observation", "entity immobilised must be boolean")
             if "reason" in projected:
@@ -399,8 +453,12 @@ def _bounded_entities(value: list[Any], scenario_table: Mapping[str, Any] | None
             if "carrying_parts" in projected and not isinstance(projected["carrying_parts"], bool):
                 raise ProtocolError("invalid_observation", "entity carrying_parts must be boolean")
         else:
-            for field in ("immobilised", "reason", "carrying_parts"):
+            for field in ("immobilised", "reason"):
                 projected.pop(field, None)
+            if not (parts_entrapment and principal == "commander" and source == "own_unit"):
+                projected.pop("carrying_parts", None)
+            elif "carrying_parts" in projected and not isinstance(projected["carrying_parts"], bool):
+                raise ProtocolError("invalid_observation", "entity carrying_parts must be boolean")
         if "controller" in projected:
             if scenario_table is None or projected.get("source") not in {"own_unit", "own_body"}:
                 projected.pop("controller")
@@ -474,11 +532,11 @@ def _bounded_principal_reports(value: Mapping[str, Any], result: dict[str, Any],
 
 
 def _bounded_principal_body(value: Mapping[str, Any], result: dict[str, Any],
-                            scenario_table: Mapping[str, Any] | None) -> None:
+                            scenario_table: Mapping[str, Any] | None, principal: str) -> None:
     body = value.get("body")
     if not isinstance(body, Mapping):
         raise ProtocolError("invalid_observation", "principal observation needs an own body")
-    projected = _bounded_entities([body], scenario_table)
+    projected = _bounded_entities([body], scenario_table, principal)
     if len(projected) != 1 or not isinstance(projected[0], dict) or projected[0].get("source") != "own_body":
         raise ProtocolError("invalid_observation", "invalid principal own body")
     result["body"] = projected[0]
@@ -592,9 +650,9 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
     ordered_entities = sorted(entities, key=compact_json)
     ordered_receipts = sorted(receipts, key=event_key)
     ordered_effects = sorted(effects, key=event_key)
-    clipped_entities = _bounded_entities(ordered_entities[:MAX_ENTITIES], scenario_table)
+    clipped_entities = _bounded_entities(ordered_entities[:MAX_ENTITIES], scenario_table, principal)
     clipped_receipts = ordered_receipts[-MAX_RECENT_EVENTS:]
-    clipped_effects = ordered_effects[-MAX_RECENT_EVENTS:]
+    clipped_effects = _bounded_v2_effects(ordered_effects[-MAX_RECENT_EVENTS:], scenario_table)
     resources = _bounded_resources(value.get("resources", {}), scenario_table, principal)
     result: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
@@ -702,7 +760,7 @@ def bounded_observation(value: Mapping[str, Any], *, scenario_table: Mapping[str
             expedition["reports"] = [report for report in principal_value.get("reports", [])
                                       if isinstance(report, Mapping) and report.get("kind") == "distress"]
             _bounded_expedition(expedition, result, scenario_table)
-        _bounded_principal_body(principal_value, result, scenario_table)
+        _bounded_principal_body(principal_value, result, scenario_table, principal)
     permitted = value.get("permitted_intents", [])
     if not isinstance(permitted, list) or len(permitted) > 16:
         raise ProtocolError("invalid_observation", "invalid permitted intents")

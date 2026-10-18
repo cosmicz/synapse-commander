@@ -46,14 +46,21 @@ def provisioning_observation():
 class SmokeObservationTests(unittest.TestCase):
     def test_v2_parts_state_is_typed_and_commander_only(self):
         table = deepcopy(load_scenario("rescue_baseline"))
-        table["entrapment"] = {"until": "parts_delivered"}
+        table["entrapment"] = {"asset": "M1", "until": "parts_delivered"}
         source = provisioning_observation()
         body = {"id": 42, "pos": [100, 0, 100], "source": "own_body",
                 "controller": "reasoner_large_v1", "immobilised": True,
                 "reason": "needs_parts", "carrying_parts": False,
+                "speed_factor": 0.6,
                 "private": "not forwarded"}
+        carrier = {"id": 43, "pos": [101, 0, 100], "source": "own_unit",
+                   "carrying_parts": True, "speed_factor": 0.6,
+                   "immobilised": True, "reason": "needs_parts"}
+        sensed = {"id": 44, "pos": [102, 0, 100], "source": "sensor",
+                  "carrying_parts": True, "speed_factor": 0.6,
+                  "immobilised": True, "reason": "needs_parts"}
         source.update({
-            "principal": "commander", "body": body, "entities": [body], "reports": [],
+            "principal": "commander", "body": body, "entities": [body, carrier, sensed], "reports": [],
             "scenario": {"id": table["id"], "version": table["version"],
                          "waypoints": {"W1": [500, 0, 100]}},
             "resources": {"parts": 1},
@@ -63,16 +70,24 @@ class SmokeObservationTests(unittest.TestCase):
                 {"effect": "parts_delivered", "frame": 150, "unit_id": 42,
                  "detail": {"target": "M1", "by": "S0", "unit_id": 42}},
                 {"effect": "mobility_restored", "frame": 150, "unit_id": 42,
-                 "detail": {"target": "M1", "by": "S0", "unit_id": 42}},
+                 "detail": {"target": "M1"}},
             ],
         })
         observed = bounded_observation(source, scenario_table=table, principal="commander")
         self.assertEqual(observed["resources"], {"parts": 1})
         self.assertEqual(observed["body"]["reason"], "needs_parts")
         self.assertFalse(observed["body"]["carrying_parts"])
+        self.assertEqual(observed["body"]["speed_factor"], 0.6)
+        carrier_view = next(item for item in observed["entities"] if item["id"] == 43)
+        self.assertEqual(carrier_view["carrying_parts"], True)
+        self.assertNotIn("immobilised", carrier_view)
+        self.assertNotIn("reason", carrier_view)
+        sensed_view = next(item for item in observed["entities"] if item["id"] == 44)
+        self.assertNotIn("carrying_parts", sensed_view)
+        self.assertNotIn("speed_factor", sensed_view)
         self.assertTrue(observed["roster"][0]["carrying_parts"])
         self.assertEqual([item["effect"] for item in observed["recent_effects"]],
-                         ["mobility_restored", "parts_delivered"])
+                         ["parts_delivered", "mobility_restored"])
         self.assertNotIn("private", observed["body"])
 
         non_commander = deepcopy(source)
@@ -83,7 +98,7 @@ class SmokeObservationTests(unittest.TestCase):
 
     def test_v2_parts_projection_rejects_untyped_state(self):
         table = deepcopy(load_scenario("rescue_baseline"))
-        table["entrapment"] = {"until": "parts_delivered"}
+        table["entrapment"] = {"asset": "M1", "until": "parts_delivered"}
         source = provisioning_observation()
         body = {"id": 42, "pos": [100, 0, 100], "source": "own_body",
                 "immobilised": "yes", "reason": "needs_parts"}
@@ -97,6 +112,12 @@ class SmokeObservationTests(unittest.TestCase):
         source["body"]["immobilised"] = True
         source["resources"] = {"parts": 1, "hidden": 2}
         with self.assertRaisesRegex(ProtocolError, "commander parts resources"):
+            bounded_observation(source, scenario_table=table, principal="commander")
+        source["resources"] = {"parts": 1}
+        source["recent_effects"] = [{"effect": "parts_delivered", "frame": 10, "unit_id": 42,
+                                     "detail": {"target": "M1", "by": "S0", "unit_id": 42,
+                                                "cause_hidden": "secret"}}]
+        with self.assertRaisesRegex(ProtocolError, "parts delivery effect"):
             bounded_observation(source, scenario_table=table, principal="commander")
 
     def test_mission_briefing_is_public_but_world_truth_and_source_overrides_are_not(self):
