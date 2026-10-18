@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import signal
 import sys
 from typing import Sequence
 
@@ -130,6 +131,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class Terminated(Exception):
+    """SIGTERM during a run: raised in the main thread so the run's teardown and verdict still happen."""
+
+
+def _terminate(signum: int, _frame: object) -> None:
+    signal.signal(signum, signal.SIG_DFL)  # a second TERM ends the process if teardown hangs
+    raise Terminated(f"signal {signum}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -164,6 +174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                              springsettings=args.springsettings or env_path("SPRINGSETTINGS"),
                              extra_widgets_dir=args.extra_widgets_dir or env_path("EXTRA_WIDGETS_DIR"),
                              scenario=args.scenario, allow_join=args.allow_join, **extra)
+        signal.signal(signal.SIGTERM, _terminate)
         try:
             verdict = run_smoke(config)
         except launch.LaunchError as exc:

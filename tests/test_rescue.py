@@ -392,6 +392,35 @@ class RouteSelectionTests(unittest.TestCase):
         self.assertEqual(build_parser().parse_args(base).route, "claude")
 
 
+class TerminationTests(unittest.TestCase):
+    def test_sigterm_during_a_run_becomes_an_exception_inside_the_run(self):
+        # A stopped run must still tear down the engine and write its verdict.
+        import os
+        import signal
+        import time
+        from unittest import mock
+        from synapse_commander import cli
+        previous = signal.getsignal(signal.SIGTERM)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+        seen = {}
+
+        def fake_run(config):
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(5)
+            except cli.Terminated as exc:
+                seen["terminated"] = str(exc)
+            return {"run_id": config.run_id, "verdict": "FAIL", "error": "terminated"}
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(cli, "run_smoke", fake_run), \
+                mock.patch("sys.stdout", io.StringIO()):
+            rc = cli.main(["run-rescue", "--mode", "agents", "--engine-dir", tmp, "--data-dir", tmp,
+                           "--out", tmp, "--rig-commit", "r", "--run-id", "term"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(seen, {"terminated": f"signal {int(signal.SIGTERM)}"})
+        self.assertIs(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+
+
 class UndeclaredPrincipalIngestionTests(unittest.TestCase):
     def test_an_effect_for_an_undeclared_child_does_not_stop_ingestion(self):
         # live-10: the commander's second PRODUCE made job-2, which the manifest did not
