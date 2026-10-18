@@ -392,6 +392,51 @@ class RouteSelectionTests(unittest.TestCase):
         self.assertEqual(build_parser().parse_args(base).route, "claude")
 
 
+class UndeclaredPrincipalIngestionTests(unittest.TestCase):
+    def test_an_effect_for_an_undeclared_child_does_not_stop_ingestion(self):
+        # live-10: the commander's second PRODUCE made job-2, which the manifest did not
+        # declare; the recorder refused its unit_created and ingestion stopped for good.
+        from synapse_commander.recording import Recorder, verify_ledger
+        from synapse_commander.run import OrderedLedger, build_manifest
+
+        class Events:
+            def __init__(self, events):
+                self.events = events
+
+            def events_since(self, seq, limit=256):
+                return [e for e in self.events if e["seq"] > seq][:limit]
+
+            def current_frame(self):
+                return 900
+
+        def effect(seq, frame, principal, name):
+            return {"seq": seq, "frame": frame, "kind": "effect",
+                    "body": {"effect": name, "principal": principal, "unit_id": 7, "team": 0, "frame": frame}}
+
+        manifest = build_manifest(run_id="undeclared", rig_commit="b" * 40, app_commit="a" * 40,
+                                  identity={"engine": {"name": "e", "version": "1"}, "game": {"name": "g", "version": "1"},
+                                            "map": {"name": "m", "version": "1"}},
+                                  config_hashes={}, principals=["commander", "M1", "job-1"],
+                                  principal_sources={"commander": "agent", "M1": "agent", "job-1": "agent"})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.jsonl"
+            recorder = Recorder.create(path, manifest, fsync=False)
+            recorder.run_start(0)
+            ordered = OrderedLedger(recorder, Events([
+                {"seq": 1, "frame": 1, "kind": "scenario", "body": {"name": "rescue_baseline"}},
+                effect(2, 821, "job-2", "unit_created"),
+                effect(3, 852, "M1", "unit_moved")]))
+            ordered.pump()
+            recorder.run_end(ordered.last_frame, {"status": "test"})
+            recorder.close()
+            self.assertEqual([e["seq"] for e in ordered.undeclared_principal_events], [2])
+            kinds = [json.loads(line)["payload"].get("type") for line in path.read_text().splitlines()
+                     if json.loads(line)["kind"] == "EFFECT"]
+            self.assertEqual(kinds, ["unit_moved"])
+            verification = verify_ledger(path)
+            self.assertEqual(verification.errors, [], verification.status)
+
+
 class AgentsRequiredDecisionTests(unittest.TestCase):
     def test_delegation_must_be_addressed_to_the_created_child(self):
         from synapse_commander.run import AGENTS_REQUIRED_DECISIONS

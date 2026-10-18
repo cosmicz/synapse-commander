@@ -39,7 +39,7 @@ from .agents.rescue import AgentsRescue, BondedRescue, RescuePlay, RescueRehears
 from .agents.commander import SYSTEM_PROMPT, AgentCommander, ClaudeCliRoute, displacement_after_receipt
 from .gateway import LoopbackGateway
 from .scenarios import ScenarioError, load_scenario
-from .recording import PRINCIPAL_SOURCES, EFFECT, INTENT_RECEIPT, Recorder, verify_ledger
+from .recording import PRINCIPAL_SOURCES, EFFECT, INTENT_RECEIPT, LedgerError, Recorder, verify_ledger
 
 
 SCENARIO = {"id": "loop0-advance-smoke", "version": "0", "seed": 1}
@@ -158,6 +158,9 @@ class OrderedLedger:
         self.bye: dict[str, Any] | None = None
         self.bridge_errors: list[dict[str, Any]] = []
         self.uncited_effects: list[dict[str, Any]] = []
+        # Engine events for a principal the manifest does not declare (a second produced
+        # body, job-2): kept out of the ledger and listed, never allowed to stop ingestion.
+        self.undeclared_principal_events: list[dict[str, Any]] = []
         self.engine_receipts: dict[str, dict[str, Any]] = {}
         self.observation_events: dict[str, str] = {}
         self._inference_links: dict[str, tuple[str, str, dict[str, Any]]] = {}
@@ -248,7 +251,15 @@ class OrderedLedger:
             frame = int(event.get("frame", 0))
             if upto is not None and frame > upto:
                 return
-            if not self._ingest(event, final=final):
+            try:
+                ingested = self._ingest(event, final=final)
+            except LedgerError as exc:
+                if exc.code != "unknown_principal":
+                    raise
+                self.undeclared_principal_events.append({"seq": event.get("seq"), "frame": event.get("frame"),
+                                                         "kind": event.get("kind"), "error": str(exc)})
+                ingested = True
+            if not ingested:
                 return  # an effect waits for its intent's receipt
             self._buffer.pop(0)
 
@@ -623,6 +634,7 @@ def run_smoke(config: SmokeConfig, *,
                     ordered.pump()
                 except Exception as exc:  # recorded in the verdict, stops the pump
                     verdict.setdefault("pump_errors", []).append(repr(exc))
+                    print(f"ledger pump stopped: {exc!r}", file=sys.stderr, flush=True)
                     return
         threading.Thread(target=pump_loop, name="ledger-pump", daemon=True).start()
 
@@ -1505,7 +1517,8 @@ def _finish(verdict: dict[str, Any], trace: dict[str, Any], ordered: OrderedLedg
         verdict["ingestion"] = {"clamped_frames": ordered.clamped, "uncited_effects": ordered.uncited_effects,
                                 "bridge_errors": ordered.bridge_errors, "bye": ordered.bye,
                                 "late_or_engine_receipts": ordered.engine_receipts,
-                                "inference_link_mismatches": ordered.inference_link_mismatches}
+                                "inference_link_mismatches": ordered.inference_link_mismatches,
+                                "undeclared_principal_events": ordered.undeclared_principal_events}
     selected = verdict.get("scenario")
     if selected and selected.get("table_declares_seed"):
         echoed = ((ordered.hello or {}).get("scenario") or {}).get("seed") if ordered is not None else None
