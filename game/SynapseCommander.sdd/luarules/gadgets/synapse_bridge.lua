@@ -35,7 +35,7 @@ if gadgetHandler:IsSyncedCode() then
   -- team LOS or an engine sensor-radius mutation.
   local principal_mode, principals, principal_order, unit_principal, principal_body_ids = false, {}, {}, {}, {}
   local links, delivered_reports, queued_reports, entity_names = {}, {}, {}, {}
-  local local_status, factory_name = {}, "F0"
+  local factory_name = "F0"
   local terrain_method = Spring.TraceRayGroundBetweenPositions and "native" or "sampled"
   local effect, body_for_principal
   local waypoints_world = {}
@@ -353,12 +353,15 @@ if gadgetHandler:IsSyncedCode() then
     local definition = UnitDefs[Spring.GetUnitDefID(unitID)]
     local body = { id = unitID, team = Spring.GetUnitTeam(unitID), pos = { x, y, z }, source = source,
                    def = definition and definition.name }
-    if source == "own_body" then
+    if source == "own_body" or source == "own_unit" then
       body.health, body.max_health = Spring.GetUnitHealth(unitID)
       body.commands = Spring.GetUnitCommandCount(unitID)
       body.controller = embodied[unitID]
-      body.sensor_range = unit_sensor_range(unitID)
-      body.link = links[unitID] == true
+      body.speed_factor = speed_factor_for_unit(unitID)
+      if source == "own_body" then
+        body.sensor_range = unit_sensor_range(unitID)
+        body.link = links[unitID] == true
+      end
       if carrying_parts[unitID] then body.carrying_parts = true end
       if entrapment_state and not entrapment_state.delivered and entrapment_state.unit_id == unitID then
         body.immobilised, body.reason = true, "needs_parts"
@@ -731,7 +734,7 @@ if gadgetHandler:IsSyncedCode() then
     scenario = loaded
     scenario_origin_x, scenario_origin_z = x, z
     principal_mode, principals = loaded.principals ~= nil, loaded.principals or {}
-    principal_order, unit_principal, links, delivered_reports, queued_reports, local_status = {}, {}, {}, {}, {}, {}
+    principal_order, unit_principal, links, delivered_reports, queued_reports = {}, {}, {}, {}, {}
     if principal_mode then principal_order = sorted_keys(principals) end
     -- Table positions are offsets from the map centre ([dx, dz] for the
     -- factory, [dx, ignored, dz] for waypoints); heights come from the ground.
@@ -916,9 +919,6 @@ if gadgetHandler:IsSyncedCode() then
       elseif links[report.from] then
         local body = report.body
         body.delivered_frame, body.age_frames = frame, frame - body.observed_frame
-        if report.to == "commander" and body.kind == "status" and body.body then
-          local_status[body.from] = body.body.health
-        end
         remember_report(report.to, body)
       else
         effect("report_dropped", frame, report.from, nil, { reason = "no_link", from = report.body.from }, report.to)
@@ -1230,8 +1230,10 @@ if gadgetHandler:IsSyncedCode() then
         if bodyID then
           local entities = { entity_for(bodyID, "own_body") }
           for _, unitID in ipairs(Spring.GetAllUnits()) do
-            if unitID ~= bodyID and detects(bodyID, unitID) then
-              local entity = entity_for(unitID, "sensor")
+            local authority_body = principal == "commander" and unitID ~= bodyID and Spring.GetUnitTeam(unitID) == TEAM0
+              and embodied[unitID] and not unit_principal[unitID] and links[unitID] == true
+            if unitID ~= bodyID and (authority_body or detects(bodyID, unitID)) then
+              local entity = entity_for(unitID, authority_body and "own_unit" or "sensor")
               if entity then entities[#entities + 1] = entity end
             end
           end
@@ -1282,22 +1284,7 @@ if gadgetHandler:IsSyncedCode() then
               local entry = { name = name, def = a.def, controller = a.controller or Json.null,
                               status = status, unit_id = status == "in_contact" and a.unit_id or nil }
               if status == "in_contact" then entry.carrying_parts = carrying_parts[a.unit_id] == true end
-              if local_status[name] ~= nil then entry.health = local_status[name] end
               body.roster[#body.roster + 1] = entry
-            end
-            local asset_units, units = {}, Spring.GetTeamUnits(TEAM0) or {}
-            for _, name in ipairs(asset_order) do if assets[name].unit_id then asset_units[assets[name].unit_id] = true end end
-            table.sort(units)
-            for _, unitID in ipairs(units) do
-              if unitID ~= commander.unit_id and unitID ~= factory.unit_id and not asset_units[unitID] and embodied[unitID] then
-                local linked = links[unitID] == true
-                local definition = UnitDefs[Spring.GetUnitDefID(unitID)]
-                local entry = { name = entity_names[unitID] or ("unit-" .. unitID), def = definition and definition.name,
-                                controller = embodied[unitID], status = linked and "in_contact" or "no_contact",
-                                unit_id = linked and unitID or nil }
-                if linked then entry.carrying_parts = carrying_parts[unitID] == true end
-                body.roster[#body.roster + 1] = entry
-              end
             end
             if #reports > 0 then body.reports = body.reports or {}; for _, report in ipairs(reports) do table.insert(body.reports, report) end end
           end

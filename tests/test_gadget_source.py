@@ -157,7 +157,9 @@ class GadgetSourceContractTests(unittest.TestCase):
         observation = self.source[self.source.index("if principal_mode then", self.source.index("function gadget:GameFrame")):]
         self.assertIn("body.resources = { parts = resources.parts }", observation)
         self.assertIn("entry.carrying_parts = carrying_parts[a.unit_id] == true", observation)
-        self.assertIn("entry.carrying_parts = carrying_parts[unitID] == true", observation)
+        self.assertIn('authority_body and "own_unit" or "sensor"', observation)
+        self.assertIn('source == "own_body" or source == "own_unit"', self.source)
+        self.assertIn("not unit_principal[unitID]", observation)
 
     def test_only_produced_carriers_take_stock_parts(self) -> None:
         produce = function_body(self.source, "local function reduce_produce")
@@ -278,7 +280,7 @@ class InitialWorldSourceTests(unittest.TestCase):
             self.assertNotIn(secret, self.observation)
         self.assertIn('observation_id = "obs-" .. principal .. "-" .. frame', self.observation)
         self.assertIn('entity_for(bodyID, "own_body")', self.source)
-        self.assertIn('entity_for(unitID, "sensor")', self.source)
+        self.assertIn('authority_body and "own_unit" or "sensor"', self.source)
 
     def test_truth_is_recorded_only_in_the_evaluator_record(self) -> None:
         record = function_body(self.source, "local function world_init_record")
